@@ -29,7 +29,7 @@ router.delete('/users/:id', authenticate, superAdminOnly, users.deleteUser);
 router.get('/dashboard', authenticate, dashboard.getDashboard);
 
 // INVENTORY
-router.get('/categories', authenticate, inventory.getCategories);
+router.get('/categories', inventory.getCategories); // public — used by storefront
 router.post('/categories', authenticate, authorize('super_admin', 'warehouse_staff'), inventory.createCategory);
 router.get('/products', authenticate, inventory.getProducts);
 router.get('/products/:id', authenticate, inventory.getProduct);

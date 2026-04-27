@@ -49,10 +49,16 @@ const updateOrderStatus = async (req, res) => {
 };
 
 const getStorefrontProducts = async (req, res) => {
-  const { search, category_id, page = 1, limit = 12 } = req.query;
+  const { search, category_id, category, page = 1, limit = 12 } = req.query;
   const filter = { is_active: true };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { description: new RegExp(search, 'i') }];
   if (category_id) filter.category_id = category_id;
+  if (category) {
+    const { Category } = require('../models');
+    const cat = await Category.findOne({ name: category });
+    if (cat) filter.category_id = cat._id;
+    else filter.category_id = null; // no match → return empty
+  }
   const skip = (parseInt(page) - 1) * parseInt(limit);
   const [products, total] = await Promise.all([
     Product.find(filter).populate('category_id', 'name').sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
