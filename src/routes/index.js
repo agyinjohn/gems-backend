@@ -39,6 +39,54 @@ router.delete('/products/:id', authenticate, superAdminOnly, inventory.deletePro
 router.post('/products/:id/adjust-stock', authenticate, authorize('super_admin', 'warehouse_staff'), inventory.adjustStock);
 router.get('/products/:id/movements', authenticate, inventory.getStockMovements);
 
+// POS
+router.post('/pos/sale', authenticate, authorize('super_admin', 'sales_staff'), async (req, res) => {
+  const { items, payment_method, amount_tendered, customer_name, customer_phone } = req.body;
+  if (!items?.length) return res.status(400).json({ success: false, message: 'items required.' });
+  let subtotal = 0;
+  const enrichedItems = [];
+  for (const item of items) {
+    const p = await Product.findOne({ _id: item.product_id, is_active: true });
+    if (!p) return res.status(400).json({ success: false, message: `Product not found.` });
+    if (p.stock_qty < item.quantity) return res.status(400).json({ success: false, message: `Insufficient stock for ${p.name}.` });
+    const total = p.price * item.quantity;
+    subtotal += total;
+    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
+  }
+  const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
+  const order = await Order.create({
+    order_number: orderNumber,
+    customer_name: customer_name || 'Walk-in Customer',
+    customer_phone: customer_phone || '',
+    subtotal, total: subtotal,
+    payment_status: 'paid',
+    payment_method: payment_method || 'cash',
+    status: 'delivered',
+    source: 'pos',
+    items: enrichedItems,
+    created_by: req.user._id,
+  });
+  for (const item of enrichedItems) {
+    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+    await StockMovement.create({ product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: orderNumber, created_by: req.user._id });
+  }
+  res.status(201).json({ success: true, data: { ...order.toJSON(), amount_tendered, change: (amount_tendered || subtotal) - subtotal } });
+});
+
+router.get('/pos/products', authenticate, async (req, res) => {
+  const { search, category } = req.query;
+  const filter = { is_active: true };
+  if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
+  if (category) {
+    const { Category } = require('../models');
+    const cat = await Category.findOne({ name: category });
+    if (cat) filter.category_id = cat._id;
+  }
+  const products = await Product.find(filter).populate('category_id', 'name').sort('name').limit(200);
+  const data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name || 'General' }));
+  res.json({ success: true, data });
+});
+
 // ORDERS
 router.get('/orders', authenticate, orders.getOrders);
 router.get('/orders/:id', authenticate, orders.getOrder);

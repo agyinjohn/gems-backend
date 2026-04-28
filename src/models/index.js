@@ -99,7 +99,7 @@ const orderSchema = new Schema({
   payment_method:  String,
   payment_status:  { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' },
   status:          { type: String, enum: ['pending','processing','shipped','delivered','cancelled'], default: 'pending' },
-  source:          { type: String, enum: ['storefront','internal'], default: 'storefront' },
+  source:          { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
   items:           [orderItemSchema],
   created_by:      { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
