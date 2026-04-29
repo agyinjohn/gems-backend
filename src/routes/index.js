@@ -17,6 +17,8 @@ const {
 router.post('/auth/login', auth.login);
 router.get('/auth/me', authenticate, auth.getMe);
 router.post('/auth/change-password', authenticate, auth.changePassword);
+router.post('/auth/forgot-password', auth.forgotPassword);
+router.post('/auth/reset-password', auth.resetPassword);
 
 // USERS
 router.get('/users', authenticate, superAdminOnly, users.getUsers);
@@ -83,7 +85,7 @@ router.get('/pos/products', authenticate, async (req, res) => {
     if (cat) filter.category_id = cat._id;
   }
   const products = await Product.find(filter).populate('category_id', 'name').sort('name').limit(200);
-  const data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name || 'General' }));
+  const data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name || 'General', barcode: p.barcode || null }));
   res.json({ success: true, data });
 });
 

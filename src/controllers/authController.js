@@ -21,6 +21,43 @@ const getMe = async (req, res) => {
   res.json({ success: true, data: req.user });
 };
 
+const forgotPassword = async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: 'Email is required.' });
+  const user = await User.findOne({ email: email.toLowerCase().trim(), is_active: true });
+  // Always return success to avoid email enumeration
+  if (!user) return res.json({ success: true, message: 'If that email exists, a reset code has been sent.' });
+  const verificationId   = require('crypto').randomUUID();
+  const verificationCode = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit code
+  user.verification_id      = verificationId;
+  user.verification_code    = verificationCode;
+  user.verification_expires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  await user.save();
+  // TODO: send verificationCode to user.email via email service
+  console.log(`[DEV] Reset code for ${email}: ${verificationCode} | ID: ${verificationId}`);
+  res.json({ success: true, message: 'If that email exists, a reset code has been sent.', data: { verificationId } });
+};
+
+const resetPassword = async (req, res) => {
+  const { newPassword, verificationId, verificationCode } = req.body;
+  if (!newPassword || !verificationId || !verificationCode)
+    return res.status(400).json({ success: false, message: 'newPassword, verificationId and verificationCode are required.' });
+  if (newPassword.length < 8) return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+  if (!/[A-Z]/.test(newPassword)) return res.status(400).json({ success: false, message: 'Password must contain at least one uppercase letter.' });
+  if (!/[0-9]/.test(newPassword)) return res.status(400).json({ success: false, message: 'Password must contain at least one number.' });
+  if (!/[^A-Za-z0-9]/.test(newPassword)) return res.status(400).json({ success: false, message: 'Password must contain at least one special character.' });
+  const user = await User.findOne({ verification_id: verificationId, verification_code: verificationCode });
+  if (!user) return res.status(400).json({ success: false, message: 'Invalid verification details.' });
+  if (user.verification_expires < new Date()) return res.status(400).json({ success: false, message: 'Verification code has expired.' });
+  user.password_hash        = await bcrypt.hash(newPassword, 10);
+  user.token_version        = (user.token_version || 0) + 1;
+  user.verification_id      = undefined;
+  user.verification_code    = undefined;
+  user.verification_expires = undefined;
+  await user.save();
+  res.json({ success: true, message: 'Password reset successfully.' });
+};
+
 const changePassword = async (req, res) => {
   const { current_password, new_password } = req.body;
   if (!current_password || !new_password) return res.status(400).json({ success: false, message: 'Both passwords are required.' });
@@ -37,4 +74,4 @@ const changePassword = async (req, res) => {
   res.json({ success: true, message: 'Password changed successfully.' });
 };
 
-module.exports = { login, getMe, changePassword };
+module.exports = { login, getMe, changePassword, forgotPassword, resetPassword };

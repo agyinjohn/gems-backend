@@ -31,17 +31,19 @@ const getProduct = async (req, res) => {
 };
 
 const createProduct = async (req, res) => {
-  const { name, sku, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit } = req.body;
-  if (!name || !sku || price === undefined) return res.status(400).json({ success: false, message: 'name, sku, and price are required.' });
-  const product = await Product.create({ name, sku, description, category_id: category_id || null, price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', created_by: req.user._id });
+  const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images } = req.body;
+  if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
+  const finalSku = sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`;
+  const product = await Product.create({ name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: category_id || null, price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: images || [], created_by: req.user._id });
   if (stock_qty > 0) await StockMovement.create({ product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
   res.status(201).json({ success: true, message: 'Product created.', data: product });
 };
 
 const updateProduct = async (req, res) => {
-  const { name, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, is_active } = req.body;
+  const { name, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, is_active, images } = req.body;
   const update = {};
   if (name !== undefined) update.name = name;
+  if (barcode !== undefined) update.barcode = barcode?.trim() || null;
   if (description !== undefined) update.description = description;
   if (category_id !== undefined) update.category_id = category_id;
   if (price !== undefined) update.price = price;
@@ -50,6 +52,7 @@ const updateProduct = async (req, res) => {
   if (low_stock_threshold !== undefined) update.low_stock_threshold = low_stock_threshold;
   if (unit !== undefined) update.unit = unit;
   if (is_active !== undefined) update.is_active = is_active;
+  if (images !== undefined) update.images = images;
   const product = await Product.findByIdAndUpdate(req.params.id, update, { new: true });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
   res.json({ success: true, message: 'Product updated.', data: product });

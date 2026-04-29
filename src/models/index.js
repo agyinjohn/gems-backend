@@ -8,7 +8,10 @@ const userSchema = new Schema({
   password_hash: { type: String, required: true },
   role:          { type: String, enum: ['super_admin','sales_staff','warehouse_staff','accountant','hr_manager','procurement_officer'], default: 'sales_staff' },
   is_active:     { type: Boolean, default: true },
-  token_version: { type: Number, default: 0 },
+  token_version:        { type: Number, default: 0 },
+  verification_id:      String,
+  verification_code:    String,
+  verification_expires: Date,
 }, { timestamps: true });
 
 // ── CATEGORY ─────────────────────────────────────────────────────────────────
@@ -20,7 +23,8 @@ const categorySchema = new Schema({
 // ── PRODUCT ──────────────────────────────────────────────────────────────────
 const productSchema = new Schema({
   name:                { type: String, required: true },
-  sku:                 { type: String, required: true, unique: true },
+  sku:                 { type: String, required: true, unique: true, sparse: true },
+  barcode:             { type: String, sparse: true },
   description:         String,
   category_id:         { type: Schema.Types.ObjectId, ref: 'Category' },
   price:               { type: Number, required: true, default: 0 },
