@@ -89,10 +89,12 @@ const initiateCheckout = async (req, res) => {
 
   // Group items by branch
   const branchGroups = {};
+  let resolvedTenantId = tenant_id;
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, is_active: true });
     if (!p) throw { status: 400, message: `Product ${item.product_id} not found.` };
     if (p.stock_qty < item.quantity) throw { status: 400, message: `Insufficient stock for ${p.name}.` };
+    if (!resolvedTenantId) resolvedTenantId = p.tenant_id;
     const bId = String(item.branch_id || p.branch_id || 'default');
     if (!branchGroups[bId]) branchGroups[bId] = { branch_id: item.branch_id || p.branch_id || null, branch_name: item.branch_name || 'Main Branch', items: [] };
     branchGroups[bId].items.push({ product: p, quantity: item.quantity });
@@ -112,7 +114,7 @@ const initiateCheckout = async (req, res) => {
     const total = subtotal + fee;
     const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const order = await Order.create({
-      tenant_id: tenant_id || p?.tenant_id,
+      tenant_id: resolvedTenantId,
       branch_id: group.branch_id,
       order_number: orderNumber,
       customer_name, customer_email, customer_phone, delivery_address,

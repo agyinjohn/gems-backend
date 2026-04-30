@@ -2,7 +2,14 @@ const { Category, Product, StockMovement } = require('../models');
 const audit = require('../utils/audit');
 
 const getCategories = async (req, res) => {
-  const data = await Category.find({ tenant_id: req.tenant_id }).sort('name');
+  let tenantId = req.tenant_id;
+  if (!tenantId && req.query.tenant_slug) {
+    const { Tenant } = require('../models');
+    const t = await Tenant.findOne({ slug: req.query.tenant_slug });
+    if (!t) return res.status(404).json({ success: false, message: 'Store not found.' });
+    tenantId = t._id;
+  }
+  const data = await Category.find({ tenant_id: tenantId }).sort('name');
   res.json({ success: true, data });
 };
 

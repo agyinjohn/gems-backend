@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const { User, Tenant } = require('../models');
 const audit = require('../utils/audit');
 
-const TENANT_ROLES = ['business_owner','branch_manager','sales_staff','warehouse_staff','accountant','hr_manager','procurement_officer'];
+const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer'];
 
 const getUsers = async (req, res) => {
   const users = await User.find({ tenant_id: req.tenant_id }, '-password_hash').sort({ createdAt: -1 });

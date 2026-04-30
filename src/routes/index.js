@@ -26,13 +26,10 @@ router.post('/auth/reset-password', auth.resetPassword);
 // TENANT REGISTRATION (public)
 router.post('/tenants/register', tenant.registerTenant);
 
-// Audit middleware — runs after authenticate sets req.user on all routes below
+// Audit middleware — only runs for authenticated requests, skips public routes
 router.use((req, res, next) => {
   if (req.user) return auditMiddleware(req, res, next);
-  authenticate(req, res, (err) => {
-    if (err) return next(err);
-    auditMiddleware(req, res, next);
-  });
+  next();
 });
 
 // PLATFORM ADMIN — tenant management (us only)
@@ -141,7 +138,11 @@ router.get('/audit-logs', authenticate, async (req, res) => {
 router.get('/dashboard', authenticate, requireTenant, dashboard.getDashboard);
 
 // INVENTORY
-router.get('/categories', authenticate, requireTenant, inventory.getCategories);
+// Allow public access when tenant_slug query param is present (storefront)
+router.get('/categories', (req, res, next) => {
+  if (req.query.tenant_slug) return next();
+  authenticate(req, res, () => requireTenant(req, res, next));
+}, inventory.getCategories);
 router.post('/categories', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.createCategory);
 router.put('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.updateCategory);
 router.delete('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.deleteCategory);
