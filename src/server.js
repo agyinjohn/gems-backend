@@ -35,7 +35,7 @@ app.use(morgan('dev'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', system: 'GThink ERP', version: '1.0.0', timestamp: new Date() });
+  res.json({ status: 'ok', system: 'GEMS', version: '1.0.0', timestamp: new Date() });
 });
 
 // ── API ROUTES ────────────────────────────────────────────────────────────────
@@ -51,9 +51,11 @@ app.use(errorHandler);
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
+  const { startBillingCron } = require('./utils/billingCron');
+  startBillingCron();
   console.log('');
   console.log('╔══════════════════════════════════════╗');
-  console.log('║         GThink ERP — Backend         ║');
+  console.log('║         GEMS — Backend         ║');
   console.log('╠══════════════════════════════════════╣');
   console.log(`║  Server running on port ${PORT}         ║`);
   console.log(`║  Environment: ${process.env.NODE_ENV || 'development'}            ║`);

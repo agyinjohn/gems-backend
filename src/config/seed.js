@@ -2,12 +2,12 @@ require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const connectDB = require('./db');
 const {
-  User, Category, Department, Product, Account, Supplier, Customer,
+  Tenant, Branch, User, Category, Department, Product, Account, Supplier, Customer,
   Order, Lead, Employee, Expense, PurchaseOrder, StockMovement, JournalEntry,
   Attendance, LeaveRequest,
 } = require('../models');
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// helpers
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const daysAgo = n => new Date(Date.now() - n * 86400000);
@@ -20,42 +20,64 @@ const monthsAgo = (m, day = 15) => {
 
 const seed = async () => {
   await connectDB();
-  console.log('🌱 Seeding database...');
+  console.log('Seeding database...');
 
-  // ── Users ──────────────────────────────────────────────────────────────────
+  // Platform Admin (us)
   const adminHash = await bcrypt.hash('Admin@1234', 10);
-  const staffHash = await bcrypt.hash('Staff@1234', 10);
   await User.findOneAndUpdate(
     { email: 'admin@gthink.com' },
-    { name: 'Super Admin', email: 'admin@gthink.com', password_hash: adminHash, role: 'super_admin' },
+    { name: 'Platform Admin', email: 'admin@gthink.com', password_hash: adminHash, role: 'platform_admin', tenant_id: null, branch_id: null },
+    { upsert: true, new: true },
+  );
+
+  // Demo Tenant
+  const tenant = await Tenant.findOneAndUpdate(
+    { slug: 'gems-store' },
+    { business_name: 'GEMS Store', slug: 'gems-store', email: 'owner@gems-store.com', plan: 'pro', subscription_status: 'active', subscription_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), max_branches: 5, max_users: 20 },
+    { upsert: true, new: true },
+  );
+
+  // Default Branch
+  const branch = await Branch.findOneAndUpdate(
+    { tenant_id: tenant._id, slug: 'main' },
+    { tenant_id: tenant._id, name: 'Main Branch', slug: 'main', address: 'Accra, Ghana', email: 'main@gems-store.com' },
+    { upsert: true, new: true },
+  );
+
+  // Tenant Users
+  const staffHash = await bcrypt.hash('Staff@1234', 10);
+  const ownerHash = await bcrypt.hash('Admin@1234', 10);
+  await User.findOneAndUpdate(
+    { email: 'owner@gems-store.com' },
+    { tenant_id: tenant._id, branch_id: null, name: 'Kofi Mensah (Owner)', email: 'owner@gems-store.com', password_hash: ownerHash, role: 'business_owner' },
     { upsert: true, new: true },
   );
   const staffDefs = [
-    { name: 'Kwame Asante',  email: 'sales@gthink.com',        role: 'sales_staff' },
-    { name: 'Abena Mensah',  email: 'warehouse@gthink.com',    role: 'warehouse_staff' },
-    { name: 'Kofi Boateng',  email: 'accounts@gthink.com',     role: 'accountant' },
-    { name: 'Ama Owusu',     email: 'hr@gthink.com',           role: 'hr_manager' },
-    { name: 'Yaw Darko',     email: 'procurement@gthink.com',  role: 'procurement_officer' },
+    { name: 'Kwame Asante',  email: 'sales@gthink.com',        role: 'sales_staff',         branch_id: branch._id },
+    { name: 'Abena Mensah',  email: 'warehouse@gthink.com',    role: 'warehouse_staff',      branch_id: branch._id },
+    { name: 'Kofi Boateng',  email: 'accounts@gthink.com',     role: 'accountant',           branch_id: null },
+    { name: 'Ama Owusu',     email: 'hr@gthink.com',           role: 'hr_manager',           branch_id: null },
+    { name: 'Yaw Darko',     email: 'procurement@gthink.com',  role: 'procurement_officer',  branch_id: null },
   ];
   for (const s of staffDefs) {
-    await User.findOneAndUpdate({ email: s.email }, { ...s, password_hash: staffHash }, { upsert: true });
+    await User.findOneAndUpdate({ email: s.email }, { ...s, tenant_id: tenant._id, password_hash: staffHash }, { upsert: true });
   }
-  const adminUser = await User.findOne({ email: 'admin@gthink.com' });
+  const adminUser = await User.findOne({ email: 'owner@gems-store.com' });
   const salesUser = await User.findOne({ email: 'sales@gthink.com' });
 
-  // ── Categories ─────────────────────────────────────────────────────────────
+  // Categories
   const catNames = ['Electronics', 'Office Supplies', 'Furniture', 'Clothing', 'Food & Beverage', 'Tools & Equipment'];
   const catMap = {};
   for (const name of catNames) {
-    const cat = await Category.findOneAndUpdate({ name }, { name }, { upsert: true, new: true });
+    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { tenant_id: tenant._id, name }, { upsert: true, new: true });
     catMap[name] = cat._id;
   }
 
-  // ── Departments ────────────────────────────────────────────────────────────
+    // ── Departments ────────────────────────────────────────────────────────────
   const deptNames = ['Administration', 'Sales', 'Warehouse', 'Finance', 'Human Resources', 'Procurement', 'IT'];
   const deptMap = {};
   for (const name of deptNames) {
-    const dept = await Department.findOneAndUpdate({ name }, { name }, { upsert: true, new: true });
+    const dept = await Department.findOneAndUpdate({ tenant_id: tenant._id, name }, { tenant_id: tenant._id, name }, { upsert: true, new: true });
     deptMap[name] = dept._id;
   }
 
@@ -121,8 +143,8 @@ const seed = async () => {
   const productMap = {};
   for (const p of productDefs) {
     const prod = await Product.findOneAndUpdate(
-      { sku: p.sku },
-      { ...p, category_id: catMap[p.cat], low_stock_threshold: 10 },
+      { tenant_id: tenant._id, sku: p.sku },
+      { ...p, tenant_id: tenant._id, branch_id: branch._id, category_id: catMap[p.cat], low_stock_threshold: 10 },
       { upsert: true, new: true },
     );
     productMap[p.sku] = prod;
@@ -142,7 +164,7 @@ const seed = async () => {
     { code: '5300', name: 'Rent & Utilities',    type: 'expense' },
   ];
   for (const a of accounts) {
-    await Account.findOneAndUpdate({ code: a.code }, a, { upsert: true });
+    await Account.findOneAndUpdate({ tenant_id: tenant._id, code: a.code }, { ...a, tenant_id: tenant._id }, { upsert: true });
   }
 
   // ── Suppliers ──────────────────────────────────────────────────────────────
@@ -153,7 +175,7 @@ const seed = async () => {
     { name: 'ProTools Supplies',    email: 'info@protools.gh',         phone: '+233277445566', payment_terms: 'Net 30' },
   ];
   for (const s of supplierDefs) {
-    await Supplier.findOneAndUpdate({ email: s.email }, s, { upsert: true });
+    await Supplier.findOneAndUpdate({ tenant_id: tenant._id, email: s.email }, { ...s, tenant_id: tenant._id }, { upsert: true });
   }
 
   // ── Customers ──────────────────────────────────────────────────────────────
@@ -171,7 +193,7 @@ const seed = async () => {
   ];
   const customerMap = {};
   for (const c of customerDefs) {
-    const cust = await Customer.findOneAndUpdate({ email: c.email }, c, { upsert: true, new: true });
+    const cust = await Customer.findOneAndUpdate({ tenant_id: tenant._id, email: c.email }, { ...c, tenant_id: tenant._id }, { upsert: true, new: true });
     customerMap[c.email] = cust;
   }
   const customers = Object.values(customerMap);
@@ -209,6 +231,8 @@ const seed = async () => {
     const orderDate = monthsAgo(monthsBack, dayOfMonth);
 
     await Order.create({
+      tenant_id: tenant._id,
+      branch_id: branch._id,
       order_number: num,
       customer_id: cust._id,
       customer_name: cust.name,
@@ -264,8 +288,9 @@ const seed = async () => {
   for (const e of employeeDefs) {
     const linkedUser = e.userEmail ? await User.findOne({ email: e.userEmail }) : null;
     await Employee.findOneAndUpdate(
-      { employee_code: e.code },
+      { tenant_id: tenant._id, employee_code: e.code },
       {
+        tenant_id: tenant._id,
         employee_code: e.code,
         name: e.name,
         email: e.userEmail || `${e.code.toLowerCase()}@gthink.com`,
@@ -291,8 +316,9 @@ const seed = async () => {
   for (let i = 0; i < leadTitles.length; i++) {
     const cust = customers[i % customers.length];
     await Lead.findOneAndUpdate(
-      { title: leadTitles[i] },
+      { tenant_id: tenant._id, title: leadTitles[i] },
       {
+        tenant_id: tenant._id,
         title: leadTitles[i],
         customer_id: cust._id,
         stage: stages[i % stages.length],
@@ -328,8 +354,9 @@ const seed = async () => {
   ];
   for (const e of expenseDefs) {
     await Expense.findOneAndUpdate(
-      { title: e.title },
+      { tenant_id: tenant._id, title: e.title },
       {
+        tenant_id: tenant._id,
         title: e.title,
         category: e.cat,
         amount: e.amount,
@@ -373,7 +400,7 @@ const seed = async () => {
       items.push({ product_id: prod._id, product_name: prod.name, quantity_ordered: it.qty, quantity_received: def.status === 'completed' ? it.qty : def.status === 'partially_received' ? Math.floor(it.qty/2) : 0, unit_cost: it.cost, total: itemTotal });
     }
     const poDate = daysAgo(def.daysBack);
-    await PurchaseOrder.create({ po_number: poNum, supplier_id: sup._id, total_cost, status: def.status, items, created_by: procUser._id, approved_by: adminUser._id, approved_at: poDate, expected_date: daysAgo(def.daysBack - 7), createdAt: poDate, updatedAt: poDate });
+    await PurchaseOrder.create({ tenant_id: tenant._id, branch_id: branch._id, po_number: poNum, supplier_id: sup._id, total_cost, status: def.status, items, created_by: procUser._id, approved_by: adminUser._id, approved_at: poDate, expected_date: daysAgo(def.daysBack - 7), createdAt: poDate, updatedAt: poDate });
   }
 
   // ── Attendance (last 14 working days) ──────────────────────────────────────
@@ -388,7 +415,7 @@ const seed = async () => {
       const dayEnd   = new Date(date); dayEnd.setHours(23,59,59,999);
       const exists = await Attendance.findOne({ employee_id: emp._id, date: { $gte: dayStart, $lt: dayEnd } });
       if (exists) continue;
-      await Attendance.create({ employee_id: emp._id, date: dayStart, status: pick(attStatuses) });
+      await Attendance.create({ tenant_id: tenant._id, employee_id: emp._id, date: dayStart, status: pick(attStatuses) });
     }
   }
 
@@ -406,7 +433,7 @@ const seed = async () => {
     if (!emp) continue;
     const exists = await LeaveRequest.findOne({ employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start) });
     if (exists) continue;
-    await LeaveRequest.create({ employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start), end_date: daysAgo(l.end), reason: l.reason, status: l.status, reviewed_by: l.status !== 'pending' ? adminUser._id : undefined });
+    await LeaveRequest.create({ tenant_id: tenant._id, employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start), end_date: daysAgo(l.end), reason: l.reason, status: l.status, reviewed_by: l.status !== 'pending' ? adminUser._id : undefined });
   }
 
   // ── Journal Entries (seed balances for chart of accounts) ──────────────────
@@ -464,17 +491,22 @@ const seed = async () => {
       .map(l => ({ account_id: accMap[l.code]._id, debit: l.debit, credit: l.credit }));
     const total_debit  = lines.reduce((s, l) => s + l.debit, 0);
     const total_credit = lines.reduce((s, l) => s + l.credit, 0);
-    await JournalEntry.create({ reference: je.ref, description: je.desc, total_debit, total_credit, lines, source: 'manual', created_by: adminUser._id });
+    await JournalEntry.create({ tenant_id: tenant._id, reference: je.ref, description: je.desc, total_debit, total_credit, lines, source: 'manual', created_by: adminUser._id });
   }
 
   console.log('✅ Database seeded successfully!');
   console.log('\n👤 Login Credentials:');
-  console.log('   Super Admin  → admin@gthink.com       / Admin@1234');
-  console.log('   Sales Staff  → sales@gthink.com       / Staff@1234');
-  console.log('   Warehouse    → warehouse@gthink.com   / Staff@1234');
-  console.log('   Accountant   → accounts@gthink.com    / Staff@1234');
-  console.log('   HR Manager   → hr@gthink.com          / Staff@1234');
-  console.log('   Procurement  → procurement@gthink.com / Staff@1234');
+  console.log('\n  --- Platform Admin (GTHINK) ---');
+  console.log('   Platform Admin → admin@gthink.com        / Admin@1234');
+  console.log('\n  --- Demo Business (GEMS Store) ---');
+  console.log('   Business Owner → owner@gems-store.com   / Admin@1234');
+  console.log('   Sales Staff    → sales@gthink.com       / Staff@1234');
+  console.log('   Warehouse      → warehouse@gthink.com   / Staff@1234');
+  console.log('   Accountant     → accounts@gthink.com    / Staff@1234');
+  console.log('   HR Manager     → hr@gthink.com          / Staff@1234');
+  console.log('   Procurement    → procurement@gthink.com / Staff@1234');
+  console.log('\n  --- Storefront ---');
+  console.log('   Visit: http://localhost:3000/store/gems-store');
   process.exit(0);
 };
 
