@@ -9,6 +9,7 @@ const inventory = require('../controllers/inventoryController');
 const orders = require('../controllers/ordersController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
+const logPayment = require('../utils/paymentLog');
 const {
   Supplier, PurchaseOrder, Product, StockMovement,
   Account, Expense, JournalEntry, TaxRate,
@@ -186,6 +187,7 @@ router.post('/pos/sale', authenticate, requireTenant, authorize('business_owner'
     await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
     await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: orderNumber, created_by: req.user._id });
   }
+  await logPayment({ tenant_id: req.tenant_id, source: 'pos', reference: orderNumber, amount: subtotal, method: payment_method || 'cash', status: 'success', payer_name: customer_name || 'Walk-in Customer', description: `POS sale ${orderNumber}`, source_id: order._id, recorded_by: req.user._id });
   res.status(201).json({ success: true, data: { ...order.toJSON(), amount_tendered, change: (amount_tendered || subtotal) - subtotal } });
 });
 
@@ -219,6 +221,11 @@ router.get('/storefront/:tenantSlug/branches', async (req, res) => {
 });
 
 router.get('/storefront/products', orders.getStorefrontProducts);
+router.get('/storefront/categories', async (req, res) => {
+  const { Category } = require('../models');
+  const data = await Category.find().sort('name');
+  res.json({ success: true, data });
+});
 router.post('/storefront/checkout', orders.initiateCheckout);
 router.post('/storefront/verify-payment', orders.verifyPayment);
 router.get('/storefront/orders/:orderNumber', async (req, res) => {
@@ -296,6 +303,30 @@ router.delete('/storefront/cart/:cartId', async (req, res) => {
   res.json({ success: true, data: { cart_id: req.params.cartId, items: [] } });
 });
 
+// PAYMENT LOGS
+router.get('/payment-logs', authenticate, requireTenant, async (req, res) => {
+  const { source, status, from, to, page = 1, limit = 50 } = req.query;
+  const filter = { tenant_id: req.tenant_id };
+  if (source) filter.source = source;
+  if (status) filter.status = status;
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to)   filter.createdAt.$lte = new Date(to + 'T23:59:59');
+  }
+  const { PaymentLog } = require('../models');
+  const skip = (parseInt(page) - 1) * parseInt(limit);
+  const [logs, total] = await Promise.all([
+    PaymentLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
+    PaymentLog.countDocuments(filter),
+  ]);
+  const summary = await PaymentLog.aggregate([
+    { $match: { tenant_id: filter.tenant_id, status: 'success' } },
+    { $group: { _id: '$source', total: { $sum: '$amount' }, count: { $sum: 1 } } },
+  ]);
+  res.json({ success: true, data: logs, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), summary });
+});
+
 // SUPPLIERS
 router.get('/suppliers', authenticate, requireTenant, async (req, res) => {
   const data = await Supplier.find({ tenant_id: req.tenant_id, is_active: true }).sort('name');
@@ -368,6 +399,7 @@ router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, authorize(
   po.payment_status = 'paid';
   po.paid_at = new Date();
   await po.save();
+  await logPayment({ tenant_id: req.tenant_id, source: 'purchase_order', reference: po.po_number, amount: po.total_cost, method: 'manual', status: 'success', description: `Purchase order ${po.po_number} paid`, source_id: po._id, recorded_by: req.user._id });
   res.json({ success: true, data: po });
 });
 router.post('/purchase-orders/:id/receive', authenticate, requireTenant, authorize('business_owner','warehouse_staff','procurement_officer'), async (req, res) => {
@@ -672,11 +704,48 @@ router.get('/employees', authenticate, requireTenant, async (req, res) => {
   res.json({ success: true, data: mapped });
 });
 router.post('/employees', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const { name, email, phone, department_id, job_title, gross_salary, start_date, employee_code } = req.body;
+  const { name, email, phone, department_id, job_title, gross_salary, start_date, employee_code,
+    photo, date_of_birth, gender, nationality, marital_status, national_id, address, employment_type,
+    emergency_name, emergency_phone, emergency_relation } = req.body;
   if (!name || !gross_salary) return res.status(400).json({ success: false, message: 'name and gross_salary required.' });
   const code = employee_code || `EMP-${Date.now().toString().slice(-6)}`;
-  const data = await Employee.create({ tenant_id: req.tenant_id, employee_code: code, name, email, phone, department_id: department_id || null, job_title, gross_salary, start_date: start_date || null });
+  const data = await Employee.create({
+    tenant_id: req.tenant_id, employee_code: code, name, email, phone,
+    department_id: department_id || null, job_title, gross_salary, start_date: start_date || null,
+    photo, date_of_birth: date_of_birth || null, gender, nationality, marital_status,
+    national_id, address, employment_type: employment_type || 'full_time',
+    emergency_name, emergency_phone, emergency_relation,
+  });
   res.status(201).json({ success: true, data });
+});
+
+router.put('/employees/:id', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const allowed = ['name','email','phone','department_id','job_title','gross_salary','start_date','status',
+    'photo','date_of_birth','gender','nationality','marital_status','national_id','address','employment_type',
+    'emergency_name','emergency_phone','emergency_relation'];
+  const update = {};
+  allowed.forEach(k => { if (req.body[k] !== undefined) update[k] = req.body[k]; });
+  const data = await Employee.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
+  if (!data) return res.status(404).json({ success: false, message: 'Employee not found.' });
+  res.json({ success: true, data });
+});
+
+router.post('/employees/:id/documents', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const { name, type, file, mime_type } = req.body;
+  if (!name || !file) return res.status(400).json({ success: false, message: 'name and file required.' });
+  const emp = await Employee.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
+  emp.documents.push({ name, type: type || 'other', file, mime_type, uploaded_at: new Date() });
+  await emp.save();
+  res.json({ success: true, data: emp.documents });
+});
+
+router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const emp = await Employee.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
+  emp.documents = emp.documents.filter(d => String(d._id) !== req.params.docId);
+  await emp.save();
+  res.json({ success: true, message: 'Document deleted.' });
 });
 
 // ATTENDANCE
@@ -733,6 +802,10 @@ router.post('/payroll', authenticate, requireTenant, authorize('business_owner',
 });
 router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
   const data = await PayrollRun.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { status: 'approved', approved_by: req.user._id }, { new: true });
+  if (data) {
+    const emp = await Employee.findById(data.employee_id).select('name');
+    await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${data.employee_id}-${data.month}-${data.year}`, amount: data.net_salary, method: 'bank_transfer', status: 'success', payer_name: emp?.name, description: `Payroll approved for ${emp?.name || data.employee_id} — ${data.month}/${data.year}`, source_id: data._id, recorded_by: req.user._id });
+  }
   res.json({ success: true, data });
 });
 
@@ -849,7 +922,8 @@ router.get('/reports/finance', authenticate, requireTenant, async (req, res) => 
 router.get('/reports/hr', authenticate, requireTenant, async (req, res) => {
   const tid = req.tenant_id;
   const now = new Date();
-  const [employees, payroll, byDept] = await Promise.all([
+  const today = new Date(); today.setHours(0,0,0,0);
+  const [employees, payroll, byDept, onLeave] = await Promise.all([
     Employee.find({ tenant_id: tid }),
     PayrollRun.aggregate([{ $match: { tenant_id: tid, month: now.getMonth() + 1, year: now.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
     Employee.aggregate([
@@ -858,11 +932,12 @@ router.get('/reports/hr', authenticate, requireTenant, async (req, res) => {
       { $group: { _id: { $arrayElemAt: ['$dept.name', 0] }, count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ]),
+    LeaveRequest.countDocuments({ tenant_id: tid, status: 'approved', start_date: { $lte: today }, end_date: { $gte: today } }),
   ]);
   res.json({ success: true, data: {
     total_employees: employees.length,
     active: employees.filter(e => e.status === 'active').length,
-    on_leave: employees.filter(e => e.status === 'on_leave').length,
+    on_leave: onLeave,
     monthly_payroll: payroll[0]?.total || 0,
     by_department: byDept.map(d => ({ department: d._id, count: d.count })),
   }});

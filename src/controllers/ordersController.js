@@ -1,5 +1,6 @@
 const { Order, Product, StockMovement } = require('../models');
 const audit = require('../utils/audit');
+const logPayment = require('../utils/paymentLog');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -37,6 +38,7 @@ const createOrder = async (req, res) => {
     await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
     await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
   }
+  await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: subtotal, method: 'manual', status: 'success', payer_name: customer_name, payer_email: customer_email, description: `Internal order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
   res.status(201).json({ success: true, message: 'Order created.', data: order });
   await audit(req, 'CREATE_ORDER', 'orders', `${req.user.name} created order ${order.order_number} for ${customer_name}`, { order_number: order.order_number, total: subtotal, items: enrichedItems.length });
 };
@@ -128,7 +130,8 @@ const initiateCheckout = async (req, res) => {
   }
 
   const grandTotal = orders.reduce((s, o) => s + o.total, 0);
-  res.status(201).json({ success: true, data: { orders, grand_total: grandTotal, email: customer_email, paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY } });
+  const paystackRef = `GEMS-${Date.now()}`;
+  res.status(201).json({ success: true, data: { orders, grand_total: grandTotal, email: customer_email, paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY, reference: paystackRef } });
 };
 
 const verifyPayment = async (req, res) => {
@@ -153,6 +156,7 @@ const verifyPayment = async (req, res) => {
             order.status = 'processing';
             await order.save();
             orderNumbers.push(order.order_number);
+            await logPayment({ tenant_id: order.tenant_id, source: 'storefront', reference: order.order_number, amount: order.total, method: 'paystack', status: 'success', payer_name: order.customer_name, payer_email: order.customer_email, description: `Storefront order ${order.order_number}`, source_id: order._id });
             for (const item of order.items) {
               await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
               await StockMovement.create({ tenant_id: order.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number });

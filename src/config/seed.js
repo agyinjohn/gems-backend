@@ -494,6 +494,133 @@ const seed = async () => {
     await JournalEntry.create({ tenant_id: tenant._id, reference: je.ref, description: je.desc, total_debit, total_credit, lines, source: 'manual', created_by: adminUser._id });
   }
 
+  const { PaymentLog } = require('../models');
+  await PaymentLog.deleteMany({ tenant_id: tenant._id });
+
+  const paymentMethods = ['paystack', 'cash', 'mobile_money', 'bank_transfer', 'card'];
+  const storefrontCustomers = [
+    { name: 'Akosua Frimpong', email: 'akosua@email.com' },
+    { name: 'Nana Brew',       email: 'nana@email.com' },
+    { name: 'Kofi Acheampong', email: 'kofi.a@email.com' },
+    { name: 'Efua Sarpong',    email: 'efua@email.com' },
+    { name: 'Kwabena Osei',    email: 'kwabena@email.com' },
+  ];
+
+  // Storefront payments (last 3 months)
+  for (let i = 0; i < 20; i++) {
+    const cust = pick(storefrontCustomers);
+    const amount = rand(80, 4500);
+    const dBack = rand(0, 90);
+    await PaymentLog.create({
+      tenant_id: tenant._id,
+      source: 'storefront',
+      reference: `ORD-SF-${String(i+1).padStart(4,'0')}`,
+      amount,
+      currency: 'GHS',
+      method: pick(['paystack', 'mobile_money', 'card']),
+      status: pick(['success','success','success','failed']),
+      payer_name: cust.name,
+      payer_email: cust.email,
+      description: `Storefront order payment`,
+      recorded_by: adminUser._id,
+      createdAt: daysAgo(dBack),
+      updatedAt: daysAgo(dBack),
+    });
+  }
+
+  // POS payments (last 2 months)
+  const posCustomers = ['Walk-in Customer', 'Kofi Mensah', 'Ama Boateng', 'Yaw Asante', 'Efua Darko'];
+  for (let i = 0; i < 15; i++) {
+    const amount = rand(30, 800);
+    const dBack = rand(0, 60);
+    await PaymentLog.create({
+      tenant_id: tenant._id,
+      source: 'pos',
+      reference: `POS-${Date.now()}-${i}`,
+      amount,
+      currency: 'GHS',
+      method: pick(['cash', 'mobile_money', 'card']),
+      status: 'success',
+      payer_name: pick(posCustomers),
+      description: `POS sale`,
+      recorded_by: salesUser._id,
+      createdAt: daysAgo(dBack),
+      updatedAt: daysAgo(dBack),
+    });
+  }
+
+  // Internal orders (last 2 months)
+  for (let i = 0; i < 10; i++) {
+    const cust = pick(customers);
+    const amount = rand(500, 8000);
+    const dBack = rand(0, 60);
+    await PaymentLog.create({
+      tenant_id: tenant._id,
+      source: 'internal_order',
+      reference: `ORD-INT-${String(i+1).padStart(4,'0')}`,
+      amount,
+      currency: 'GHS',
+      method: pick(['bank_transfer', 'card', 'mobile_money']),
+      status: pick(['success','success','pending']),
+      payer_name: cust.name,
+      payer_email: cust.email,
+      description: `Internal order payment`,
+      recorded_by: salesUser._id,
+      createdAt: daysAgo(dBack),
+      updatedAt: daysAgo(dBack),
+    });
+  }
+
+  // Purchase order payments
+  const poPayments = [
+    { ref: 'PO-SEED-007', amount: 2520,  supplier: 'FurniCraft Accra',  dBack: 38 },
+    { ref: 'PO-SEED-008', amount: 3360,  supplier: 'ProTools Supplies', dBack: 48 },
+  ];
+  for (const p of poPayments) {
+    await PaymentLog.create({
+      tenant_id: tenant._id,
+      source: 'purchase_order',
+      reference: p.ref,
+      amount: p.amount,
+      currency: 'GHS',
+      method: 'bank_transfer',
+      status: 'success',
+      payer_name: p.supplier,
+      description: `Purchase order ${p.ref} paid`,
+      recorded_by: adminUser._id,
+      createdAt: daysAgo(p.dBack),
+      updatedAt: daysAgo(p.dBack),
+    });
+  }
+
+  // Payroll payments (last 3 months)
+  const payrollEmps = [
+    { name: 'Kwame Asante',  amount: 3200 },
+    { name: 'Abena Mensah',  amount: 2800 },
+    { name: 'Kofi Boateng',  amount: 3500 },
+    { name: 'Ama Owusu',     amount: 4000 },
+    { name: 'Yaw Darko',     amount: 3000 },
+  ];
+  for (let m = 1; m <= 3; m++) {
+    for (const emp of payrollEmps) {
+      const dBack = m * 30 + rand(0, 5);
+      await PaymentLog.create({
+        tenant_id: tenant._id,
+        source: 'payroll',
+        reference: `PAYROLL-${emp.name.replace(' ','-')}-M${m}`,
+        amount: emp.amount,
+        currency: 'GHS',
+        method: 'bank_transfer',
+        status: 'success',
+        payer_name: emp.name,
+        description: `Payroll payment — Month ${m}`,
+        recorded_by: adminUser._id,
+        createdAt: daysAgo(dBack),
+        updatedAt: daysAgo(dBack),
+      });
+    }
+  }
+
   console.log('✅ Database seeded successfully!');
   console.log('\n👤 Login Credentials:');
   console.log('\n  --- Platform Admin (GTHINK) ---');

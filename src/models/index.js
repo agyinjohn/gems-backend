@@ -50,6 +50,7 @@ const userSchema = new Schema({
     'accountant',
     'hr_manager',
     'procurement_officer',
+    'employee',
   ], default: 'sales_staff' },
   is_active:            { type: Boolean, default: true },
   token_version:        { type: Number, default: 0 },
@@ -275,6 +276,27 @@ const employeeSchema = new Schema({
   gross_salary:  { type: Number, required: true, default: 0 },
   start_date:    Date,
   status:        { type: String, enum: ['active','on_leave','terminated'], default: 'active' },
+  // Personal
+  photo:            String, // base64
+  date_of_birth:    Date,
+  gender:           { type: String, enum: ['male','female','other'] },
+  nationality:      String,
+  marital_status:   { type: String, enum: ['single','married','divorced','widowed'] },
+  national_id:      String,
+  address:          String,
+  employment_type:  { type: String, enum: ['full_time','part_time','contract','intern'], default: 'full_time' },
+  // Emergency contact
+  emergency_name:   String,
+  emergency_phone:  String,
+  emergency_relation: String,
+  // Documents (base64)
+  documents: [{
+    name:      String,
+    type:      String, // id_card, passport, certificate, contract, other
+    file:      String, // base64
+    mime_type: String,
+    uploaded_at: { type: Date, default: Date.now },
+  }],
 }, { timestamps: true });
 employeeSchema.index({ tenant_id: 1, employee_code: 1 }, { unique: true });
 
@@ -343,6 +365,24 @@ const billingTransactionSchema = new Schema({
   initiated_by:    { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 billingTransactionSchema.index({ tenant_id: 1, createdAt: -1 });
+
+// PAYMENT LOG
+const paymentLogSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant' },
+  source:         { type: String, enum: ['storefront','pos','internal_order','purchase_order','payroll'], required: true },
+  reference:      { type: String, required: true },
+  amount:         { type: Number, required: true },
+  currency:       { type: String, default: 'GHS' },
+  method:         { type: String, enum: ['paystack','cash','mobile_money','bank_transfer','card','manual'], default: 'manual' },
+  status:         { type: String, enum: ['success','failed','pending','refunded'], default: 'success' },
+  payer_name:     String,
+  payer_email:    String,
+  description:    String,
+  source_id:      { type: Schema.Types.ObjectId },  // order_id, po_id, payroll_id etc
+  recorded_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+paymentLogSchema.index({ tenant_id: 1, createdAt: -1 });
+paymentLogSchema.index({ reference: 1 });
 
 // PLATFORM SETTINGS
 const platformSettingsSchema = new Schema({
@@ -413,7 +453,7 @@ const allSchemas = [
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
   attendanceSchema, leaveRequestSchema, payrollRunSchema, taxRateSchema,
-  cartSchema, auditLogSchema,
+  cartSchema, auditLogSchema, paymentLogSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -450,6 +490,7 @@ module.exports = {
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
   TaxRate:        mongoose.model('TaxRate', taxRateSchema),
   Cart:           mongoose.model('Cart', cartSchema),
+  PaymentLog:        mongoose.model('PaymentLog', paymentLogSchema),
   AuditLog:          mongoose.model('AuditLog', auditLogSchema),
   PlatformSettings:      mongoose.model('PlatformSettings', platformSettingsSchema),
   BillingTransaction:    mongoose.model('BillingTransaction', billingTransactionSchema),

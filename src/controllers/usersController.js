@@ -1,8 +1,8 @@
 const bcrypt = require('bcryptjs');
-const { User, Tenant } = require('../models');
+const { User, Tenant, Employee, Department } = require('../models');
 const audit = require('../utils/audit');
 
-const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer'];
+const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer', 'employee'];
 
 const getUsers = async (req, res) => {
   const users = await User.find({ tenant_id: req.tenant_id }, '-password_hash').sort({ createdAt: -1 });
@@ -16,7 +16,7 @@ const getUser = async (req, res) => {
 };
 
 const createUser = async (req, res) => {
-  const { name, email, password, role, branch_id } = req.body;
+  const { name, email, password, role, branch_id, gross_salary, job_title, department_id } = req.body;
   if (!name || !email || !password || !role) return res.status(400).json({ success: false, message: 'name, email, password, and role are required.' });
   if (!TENANT_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Invalid role.' });
 
@@ -34,6 +34,25 @@ const createUser = async (req, res) => {
     password_hash: hashed,
     role,
   });
+
+  // Auto-create employee record for staff roles
+  if (role !== 'business_owner') {
+    const empCode = `EMP-${Date.now().toString().slice(-6)}`;
+    await Employee.create({
+      tenant_id:     req.tenant_id,
+      branch_id:     branch_id || null,
+      user_id:       user._id,
+      employee_code: empCode,
+      name,
+      email:         email.toLowerCase().trim(),
+      department_id: department_id || null,
+      job_title:     job_title || role.replace(/_/g, ' '),
+      gross_salary:  parseFloat(gross_salary) || 0,
+      start_date:    new Date(),
+      status:        'active',
+    });
+  }
+
   const { password_hash, ...userObj } = user.toObject();
   await audit(req, 'CREATE_USER', 'users', `${req.user.name} created user "${name}" with role ${role}`, { email, role });
   res.status(201).json({ success: true, message: 'User created successfully.', data: userObj });

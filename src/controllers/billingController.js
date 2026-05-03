@@ -1,5 +1,6 @@
 const { Tenant, BillingTransaction, PlatformSettings, CardAuthorization } = require('../models');
 const audit = require('../utils/audit');
+const logPayment = require('../utils/paymentLog');
 
 const PLAN_PRICES_USD = { starter: 29, pro: 79, enterprise: 199 };
 
