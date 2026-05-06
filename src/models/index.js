@@ -195,8 +195,10 @@ const purchaseOrderSchema = new Schema({
   po_number:      { type: String, required: true },
   supplier_id:    { type: Schema.Types.ObjectId, ref: 'Supplier' },
   total_cost:     { type: Number, default: 0 },
+  amount_paid:    { type: Number, default: 0 },
   status:         { type: String, enum: ['draft','pending_approval','approved','sent','partially_received','completed','cancelled'], default: 'draft' },
-  payment_status: { type: String, enum: ['unpaid','paid'], default: 'unpaid' },
+  payment_status: { type: String, enum: ['unpaid','partial','paid'], default: 'unpaid' },
+  payments:       [{ amount: Number, method: String, reference: String, note: String, date: { type: Date, default: Date.now } }],
   paid_at:        Date,
   notes:          String,
   expected_date:  Date,
@@ -216,6 +218,10 @@ const accountSchema = new Schema({
   balance:     { type: Number, default: 0 },
   description: String,
   is_active:   { type: Boolean, default: true },
+  // Hierarchy
+  parent_id:   { type: Schema.Types.ObjectId, ref: 'Account', default: null },
+  level:       { type: Number, default: 1 },   // 1 = group header, 2 = sub-group, 3 = posting account
+  is_group:    { type: Boolean, default: false }, // group accounts cannot be posted to directly
 }, { timestamps: true });
 accountSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
 
@@ -233,11 +239,16 @@ const journalEntrySchema = new Schema({
   description:  { type: String, required: true },
   total_debit:  { type: Number, default: 0 },
   total_credit: { type: Number, default: 0 },
-  source:       { type: String, enum: ['manual','sale','purchase','payroll'], default: 'manual' },
+  source:       { type: String, enum: ['manual','sale','purchase','payroll','expense'], default: 'manual' },
   source_id:    Schema.Types.ObjectId,
   entry_date:   { type: Date, default: Date.now },
   lines:        [journalLineSchema],
   created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+  // Immutability & audit
+  status:       { type: String, enum: ['posted','voided'], default: 'posted' },
+  voided_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+  voided_at:    Date,
+  void_reason:  String,
 }, { timestamps: true });
 journalEntrySchema.index({ tenant_id: 1, reference: 1 }, { unique: true });
 
@@ -251,6 +262,7 @@ const expenseSchema = new Schema({
   account_id:   { type: Schema.Types.ObjectId, ref: 'Account' },
   description:  String,
   expense_date: { type: Date, default: Date.now },
+  receipt:      { file: String, mime_type: String, name: String },
   created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
@@ -386,12 +398,34 @@ paymentLogSchema.index({ reference: 1 });
 
 // PLATFORM SETTINGS
 const platformSettingsSchema = new Schema({
+  // Subscription plans
   trial_days:   { type: Number, default: 14 },
   grace_days:   { type: Number, default: 7 },
+  auto_renew_default: { type: Boolean, default: true },
+  currency:     { type: String, default: 'GHS' },
   plans:        { type: Schema.Types.Mixed, default: {
     starter:    { price: 29,  max_branches: 1,   max_users: 5   },
     pro:        { price: 79,  max_branches: 5,   max_users: 20  },
     enterprise: { price: 199, max_branches: 999, max_users: 999 },
+  }},
+  // Platform identity
+  platform_name:  { type: String, default: 'GEMS' },
+  support_email:  { type: String, default: 'support@gthink.com' },
+  platform_logo:  { type: String, default: '' },
+  // Payment gateway
+  paystack_public_key:  { type: String, default: '' },
+  paystack_secret_key:  { type: String, default: '' },
+  paystack_webhook_url: { type: String, default: '' },
+  // Alerts
+  trial_warning_days:   { type: Number, default: 3 },
+  expiry_alert_days:    { type: Number, default: 7 },
+  // Audit & data retention
+  audit_retention_days: { type: Number, default: 90 },
+  // Feature flags per plan
+  feature_flags: { type: Schema.Types.Mixed, default: {
+    starter:    { crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
+    pro:        { crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
+    enterprise: { crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
   }},
 }, { timestamps: true });
 
@@ -413,7 +447,27 @@ const auditLogSchema = new Schema({
 auditLogSchema.index({ tenant_id: 1, createdAt: -1 });
 auditLogSchema.index({ createdAt: -1 });
 
-// STOREFRONT CART
+// CHAT CONVERSATION
+const chatConversationSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  opened_by:   { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  subject:     { type: String, default: 'Support Request' },
+  status:      { type: String, enum: ['open','resolved'], default: 'open' },
+  last_message_at: { type: Date, default: Date.now },
+  unread_admin: { type: Number, default: 0 }, // unread count for platform admin
+  unread_tenant:{ type: Number, default: 0 }, // unread count for tenant user
+}, { timestamps: true });
+
+// CHAT MESSAGE
+const chatMessageSchema = new Schema({
+  conversation_id: { type: Schema.Types.ObjectId, ref: 'ChatConversation', required: true },
+  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  sender_id:       { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  sender_role:     { type: String, enum: ['tenant','admin'], required: true },
+  message:         { type: String, required: true },
+  read:            { type: Boolean, default: false },
+}, { timestamps: true });
+chatMessageSchema.index({ conversation_id: 1, createdAt: 1 });
 const cartItemSchema = new Schema({
   product_id:          { type: Schema.Types.ObjectId, ref: 'Product', required: true },
   product_name:        String,
@@ -446,6 +500,82 @@ const taxRateSchema = new Schema({
   is_active:  { type: Boolean, default: true },
 }, { timestamps: true });
 
+// INVOICE
+const invoicePaymentSchema = new Schema({
+  date:      { type: Date, default: Date.now },
+  amount:    { type: Number, required: true },
+  method:    { type: String, enum: ['cash','card','mobile_money','bank_transfer','paystack','manual'], default: 'cash' },
+  reference: String,
+  note:      String,
+});
+
+const invoiceLineSchema = new Schema({
+  description: { type: String, required: true },
+  quantity:    { type: Number, required: true, default: 1 },
+  unit_price:  { type: Number, required: true },
+  tax_rate:    { type: Number, default: 0 },   // % e.g. 15
+  total:       { type: Number, required: true },
+});
+
+const invoiceSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  invoice_number: { type: String, required: true },
+  customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
+  customer_name:  { type: String, required: true },
+  customer_email: String,
+  issue_date:     { type: Date, default: Date.now },
+  due_date:       { type: Date, required: true },
+  lines:          [invoiceLineSchema],
+  subtotal:       { type: Number, default: 0 },
+  tax_amount:     { type: Number, default: 0 },
+  total:          { type: Number, default: 0 },
+  amount_paid:    { type: Number, default: 0 },
+  amount_due:     { type: Number, default: 0 },
+  payments:       [invoicePaymentSchema],
+  status:         { type: String, enum: ['draft','sent','partially_paid','paid','overdue','void'], default: 'draft' },
+  notes:          String,
+  order_id:       { type: Schema.Types.ObjectId, ref: 'Order' },
+  created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+invoiceSchema.index({ tenant_id: 1, invoice_number: 1 }, { unique: true });
+
+// CREDIT NOTE
+const creditNoteSchema = new Schema({
+  tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  credit_note_number:{ type: String, required: true },
+  invoice_id:        { type: Schema.Types.ObjectId, ref: 'Invoice', required: true },
+  customer_id:       { type: Schema.Types.ObjectId, ref: 'Customer' },
+  customer_name:     { type: String, required: true },
+  amount:            { type: Number, required: true },
+  reason:            { type: String, required: true },
+  status:            { type: String, enum: ['draft','applied','void'], default: 'draft' },
+  created_by:        { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+creditNoteSchema.index({ tenant_id: 1, credit_note_number: 1 }, { unique: true });
+
+// ACCOUNTING PERIOD
+const accountingPeriodSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:       { type: String, required: true },       // e.g. 'January 2025', 'FY 2025'
+  type:       { type: String, enum: ['month','year'], default: 'month' },
+  start_date: { type: Date, required: true },
+  end_date:   { type: Date, required: true },
+  status:     { type: String, enum: ['open','closed'], default: 'open' },
+  closed_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+  closed_at:  Date,
+}, { timestamps: true });
+accountingPeriodSchema.index({ tenant_id: 1, start_date: 1 }, { unique: true });
+
+// BUDGET
+const budgetSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  category:   { type: String, required: true },
+  period:     { type: String, required: true }, // e.g. '2024-01', '2024' for annual
+  period_type:{ type: String, enum: ['monthly','annual'], default: 'monthly' },
+  amount:     { type: Number, required: true },
+}, { timestamps: true });
+budgetSchema.index({ tenant_id: 1, category: 1, period: 1 }, { unique: true });
+
 // toJSON aliases for all schemas
 const allSchemas = [
   tenantSchema, branchSchema, userSchema, categorySchema, productSchema,
@@ -453,7 +583,9 @@ const allSchemas = [
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
   attendanceSchema, leaveRequestSchema, payrollRunSchema, taxRateSchema,
-  cartSchema, auditLogSchema, paymentLogSchema,
+  cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
+  invoiceSchema, creditNoteSchema, accountingPeriodSchema,
+  chatConversationSchema, chatMessageSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -495,4 +627,10 @@ module.exports = {
   PlatformSettings:      mongoose.model('PlatformSettings', platformSettingsSchema),
   BillingTransaction:    mongoose.model('BillingTransaction', billingTransactionSchema),
   CardAuthorization:     mongoose.model('CardAuthorization', cardAuthorizationSchema),
+  Budget:                mongoose.model('Budget', budgetSchema),
+  Invoice:               mongoose.model('Invoice', invoiceSchema),
+  CreditNote:            mongoose.model('CreditNote', creditNoteSchema),
+  AccountingPeriod:      mongoose.model('AccountingPeriod', accountingPeriodSchema),
+  ChatConversation:      mongoose.model('ChatConversation', chatConversationSchema),
+  ChatMessage:           mongoose.model('ChatMessage', chatMessageSchema),
 };

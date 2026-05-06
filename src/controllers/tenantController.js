@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const { Tenant, Branch, User } = require('../models');
+const { seedChartOfAccounts } = require('../services/accountingService');
 
 // POST /api/tenants/register — public, creates tenant + business owner account
 const registerTenant = async (req, res) => {
@@ -46,6 +47,9 @@ const registerTenant = async (req, res) => {
   // Set branch manager to owner
   branch.manager_id = owner._id;
   await branch.save();
+
+  // Seed standard Chart of Accounts for this tenant
+  await seedChartOfAccounts(tenant._id);
 
   res.status(201).json({
     success: true,

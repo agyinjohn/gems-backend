@@ -1,6 +1,7 @@
 const { Order, Product, StockMovement } = require('../models');
 const audit = require('../utils/audit');
 const logPayment = require('../utils/paymentLog');
+const accounting = require('../services/accountingService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -21,7 +22,7 @@ const getOrder = async (req, res) => {
 };
 
 const createOrder = async (req, res) => {
-  const { customer_name, customer_email, customer_phone, delivery_address, items, customer_id } = req.body;
+  const { customer_name, customer_email, customer_phone, delivery_address, items, customer_id, payment_status, payment_method } = req.body;
   if (!customer_name || !items?.length) return res.status(400).json({ success: false, message: 'customer_name and items are required.' });
   let subtotal = 0;
   const enrichedItems = [];
@@ -33,14 +34,17 @@ const createOrder = async (req, res) => {
     subtotal += total;
     enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
   }
-  const order = await Order.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, order_number: generateOrderNumber(), customer_id: customer_id || null, customer_name, customer_email, customer_phone, delivery_address, subtotal, total: subtotal, payment_status: 'paid', status: 'processing', source: 'internal', items: enrichedItems, created_by: req.user._id });
-  for (const item of enrichedItems) {
-    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-    await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
+  const isPaid = payment_status !== 'pending';
+  const order = await Order.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, order_number: generateOrderNumber(), customer_id: customer_id || null, customer_name, customer_email, customer_phone, delivery_address, subtotal, total: subtotal, payment_status: isPaid ? 'paid' : 'pending', payment_method: isPaid ? (payment_method || 'cash') : null, status: isPaid ? 'processing' : 'pending', source: 'internal', items: enrichedItems, created_by: req.user._id });
+  if (isPaid) {
+    for (const item of enrichedItems) {
+      await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+      await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
+    }
+    await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: subtotal, method: payment_method || 'cash', status: 'success', payer_name: customer_name, payer_email: customer_email, description: `Internal order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
   }
-  await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: subtotal, method: 'manual', status: 'success', payer_name: customer_name, payer_email: customer_email, description: `Internal order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
   res.status(201).json({ success: true, message: 'Order created.', data: order });
-  await audit(req, 'CREATE_ORDER', 'orders', `${req.user.name} created order ${order.order_number} for ${customer_name}`, { order_number: order.order_number, total: subtotal, items: enrichedItems.length });
+  await audit(req, 'CREATE_ORDER', 'orders', `${req.user.name} created order ${order.order_number} for ${customer_name}`, { order_number: order.order_number, total: subtotal, items: enrichedItems.length, payment_status: order.payment_status, payment_method: order.payment_method });
 };
 
 const updateOrderStatus = async (req, res) => {
@@ -157,6 +161,7 @@ const verifyPayment = async (req, res) => {
             await order.save();
             orderNumbers.push(order.order_number);
             await logPayment({ tenant_id: order.tenant_id, source: 'storefront', reference: order.order_number, amount: order.total, method: 'paystack', status: 'success', payer_name: order.customer_name, payer_email: order.customer_email, description: `Storefront order ${order.order_number}`, source_id: order._id });
+            await accounting.postSaleEntry({ tenantId: order.tenant_id, amount: order.total, cogsAmount: order.subtotal, taxAmount: order.tax_amount || 0, reference: order.order_number, date: new Date(), sourceId: order._id }).catch(() => {});
             for (const item of order.items) {
               await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
               await StockMovement.create({ tenant_id: order.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number });

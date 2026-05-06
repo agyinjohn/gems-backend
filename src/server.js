@@ -1,6 +1,8 @@
 require('dotenv').config();
 require('express-async-errors');
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -11,7 +13,27 @@ const errorHandler = require('./middleware/errorHandler');
 connectDB();
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
+
+const io = new Server(server, {
+  cors: {
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const allowed = ['http://localhost:3000', process.env.FRONTEND_URL?.replace(/\/$/, '')].filter(Boolean);
+      if (allowed.includes(origin) || origin.endsWith('.vercel.app')) return cb(null, true);
+      cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
+    credentials: true,
+  },
+});
+app.set('io', io);
+
+io.on('connection', (socket) => {
+  socket.on('join_conversation', (conversationId) => socket.join(`conv_${conversationId}`));
+  socket.on('join_admin', () => socket.join('admin_room'));
+  socket.on('leave_conversation', (conversationId) => socket.leave(`conv_${conversationId}`));
+});
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 app.use(cors({
@@ -50,7 +72,7 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 // ── START ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   const { startBillingCron } = require('./utils/billingCron');
   startBillingCron();
   console.log('');

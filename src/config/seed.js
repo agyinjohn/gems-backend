@@ -6,6 +6,7 @@ const {
   Order, Lead, Employee, Expense, PurchaseOrder, StockMovement, JournalEntry,
   Attendance, LeaveRequest,
 } = require('../models');
+const { seedChartOfAccounts } = require('../services/accountingService');
 
 // helpers
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
@@ -151,21 +152,7 @@ const seed = async () => {
   }
 
   // ── Chart of Accounts ──────────────────────────────────────────────────────
-  const accounts = [
-    { code: '1001', name: 'Cash & Bank',         type: 'asset' },
-    { code: '1100', name: 'Accounts Receivable', type: 'asset' },
-    { code: '1200', name: 'Inventory',           type: 'asset' },
-    { code: '2001', name: 'Accounts Payable',    type: 'liability' },
-    { code: '3001', name: 'Owner Equity',        type: 'equity' },
-    { code: '4001', name: 'Sales Revenue',       type: 'revenue' },
-    { code: '5001', name: 'Cost of Goods Sold',  type: 'expense' },
-    { code: '5100', name: 'Salaries & Wages',    type: 'expense' },
-    { code: '5200', name: 'Office Expenses',     type: 'expense' },
-    { code: '5300', name: 'Rent & Utilities',    type: 'expense' },
-  ];
-  for (const a of accounts) {
-    await Account.findOneAndUpdate({ tenant_id: tenant._id, code: a.code }, { ...a, tenant_id: tenant._id }, { upsert: true });
-  }
+  await seedChartOfAccounts(tenant._id);
 
   // ── Suppliers ──────────────────────────────────────────────────────────────
   const supplierDefs = [
@@ -331,8 +318,8 @@ const seed = async () => {
   }
 
   // ── Expenses ───────────────────────────────────────────────────────────────
-  const expenseAccount = await Account.findOne({ code: '5200' });
-  const rentAccount    = await Account.findOne({ code: '5300' });
+  const expenseAccount = await Account.findOne({ tenant_id: tenant._id, code: '5200' });
+  const rentAccount    = await Account.findOne({ tenant_id: tenant._id, code: '5300' });
   const expenseDefs = [
     // This month
     { title: 'Office Rent – Current Month',  cat: 'Rent',       amount: 4500,  account: rentAccount,    daysBack: 2 },
@@ -436,63 +423,84 @@ const seed = async () => {
     await LeaveRequest.create({ tenant_id: tenant._id, employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start), end_date: daysAgo(l.end), reason: l.reason, status: l.status, reviewed_by: l.status !== 'pending' ? adminUser._id : undefined });
   }
 
-  // ── Journal Entries (seed balances for chart of accounts) ──────────────────
+  // ── Journal Entries (seed balanced GL entries) ────────────────────────────
   const accMap = {};
-  const allAccounts = await Account.find();
+  const allAccounts = await Account.find({ tenant_id: tenant._id });
   for (const a of allAccounts) accMap[a.code] = a;
 
-  // Get real totals to seed realistic balances
+  // Get real totals scoped to this tenant
+  const tid = tenant._id;
   const [revAgg, expAgg, arAgg, invAgg, apAgg] = await Promise.all([
-    Order.aggregate([{ $match: { payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
-    Expense.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
-    Order.aggregate([{ $match: { payment_status: 'pending' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-    Product.aggregate([{ $match: { is_active: true } }, { $group: { _id: null, total: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
-    PurchaseOrder.aggregate([{ $match: { status: { $in: ['approved','sent','partially_received'] } } }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
+    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
+    Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'pending' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+    Product.aggregate([{ $match: { tenant_id: tid, is_active: true } }, { $group: { _id: null, total: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
+    PurchaseOrder.aggregate([{ $match: { tenant_id: tid, status: { $in: ['approved','sent','partially_received'] } } }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
   ]);
 
-  const totalRevenue   = revAgg[0]?.total || 0;
+  const totalRevenue   = revAgg[0]?.total    || 0;
   const totalCogs      = revAgg[0]?.subtotal || 0;
-  const totalExpenses  = expAgg[0]?.total || 0;
-  const totalAR        = arAgg[0]?.total || 0;
-  const totalInventory = invAgg[0]?.total || 0;
-  const totalAP        = apAgg[0]?.total || 0;
-  const cashBalance    = Math.max(0, totalRevenue - totalExpenses - totalCogs * 0.3);
-  const equity         = cashBalance + totalAR + totalInventory - totalAP;
+  const totalExpenses  = expAgg[0]?.total    || 0;
+  const totalAR        = arAgg[0]?.total     || 0;
+  const totalInventory = invAgg[0]?.total    || 0;
+  const totalAP        = apAgg[0]?.total     || 0;
 
-  const journalDefs = [
-    {
-      ref: 'JE-SEED-001', desc: 'Opening balances — Cash & Revenue',
-      lines: [
-        { code: '1001', debit: cashBalance,    credit: 0 },
-        { code: '4001', debit: 0,              credit: totalRevenue },
-        { code: '5001', debit: totalCogs,      credit: 0 },
-        { code: '1100', debit: totalAR,        credit: 0 },
-        { code: '2001', debit: 0,              credit: totalAP },
-        { code: '1200', debit: totalInventory, credit: 0 },
-        { code: '3001', debit: 0,              credit: equity },
-      ],
-    },
-    {
-      ref: 'JE-SEED-002', desc: 'Operating expenses recognition',
-      lines: [
-        { code: '5200', debit: totalExpenses * 0.4, credit: 0 },
-        { code: '5300', debit: totalExpenses * 0.4, credit: 0 },
-        { code: '5100', debit: totalExpenses * 0.2, credit: 0 },
-        { code: '1001', debit: 0, credit: totalExpenses },
-      ],
-    },
-  ];
+  // Cash = revenue collected minus expenses paid minus a portion of COGS already paid
+  const cashBalance = Math.max(0, totalRevenue - totalExpenses - totalCogs * 0.3);
+  // Equity = Assets - Liabilities  (must equal for BS to balance)
+  const equity = cashBalance + totalAR + totalInventory - totalAP;
 
-  for (const je of journalDefs) {
-    const exists = await JournalEntry.findOne({ reference: je.ref });
-    if (exists) continue;
-    const lines = je.lines
-      .filter(l => accMap[l.code] && (l.debit > 0 || l.credit > 0))
-      .map(l => ({ account_id: accMap[l.code]._id, debit: l.debit, credit: l.credit }));
-    const total_debit  = lines.reduce((s, l) => s + l.debit, 0);
-    const total_credit = lines.reduce((s, l) => s + l.credit, 0);
-    await JournalEntry.create({ tenant_id: tenant._id, reference: je.ref, description: je.desc, total_debit, total_credit, lines, source: 'manual', created_by: adminUser._id });
-  }
+  // ── JE-SEED-001: Sales & balance sheet positions ───────────────────────────
+  // Debits:  Cash + AR + Inventory + COGS
+  // Credits: Sales Revenue + AP + Owner's Equity
+  // For balance: Cash + AR + Inventory + COGS = Revenue + AP + Equity
+  //   equity = Cash + AR + Inventory - AP  →  Cash + AR + Inventory + COGS = Revenue + AP + (Cash + AR + Inventory - AP) + COGS - Revenue
+  // Simplify: both sides equal Cash + AR + Inventory + COGS  ✓ (equity absorbs the difference)
+  const je1Debits  = cashBalance + totalAR + totalInventory + totalCogs;
+  const je1Credits = totalRevenue + totalAP + equity;
+  // Floating-point safety: adjust equity line to make it exactly balanced
+  const je1EquityAdj = equity + (je1Debits - je1Credits);
+
+  // ── JE-SEED-002: Expense recognition ──────────────────────────────────────
+  // Debits:  Expense accounts (5200 + 5300 + 5100)
+  // Credits: Cash (already reduced above, so we credit equity to keep GL clean)
+  // We credit Owner's Equity for the expense offset so cash isn't double-counted
+  const expRent   = parseFloat((totalExpenses * 0.4).toFixed(2));
+  const expOffice = parseFloat((totalExpenses * 0.4).toFixed(2));
+  const expSal    = parseFloat((totalExpenses - expRent - expOffice).toFixed(2)); // remainder
+  const je2Total  = expRent + expOffice + expSal;
+
+  const postJe = async (ref, desc, lines) => {
+    const exists = await JournalEntry.findOne({ reference: ref });
+    if (exists) return;
+    const mapped = lines
+      .filter(l => accMap[l.code] && Math.abs(l.debit - 0) + Math.abs(l.credit - 0) > 0.001)
+      .map(l => ({ account_id: accMap[l.code]._id, debit: parseFloat(l.debit.toFixed(2)), credit: parseFloat(l.credit.toFixed(2)), description: desc }));
+    const td = parseFloat(mapped.reduce((s, l) => s + l.debit,  0).toFixed(2));
+    const tc = parseFloat(mapped.reduce((s, l) => s + l.credit, 0).toFixed(2));
+    if (Math.abs(td - tc) > 0.02) {
+      console.warn(`⚠️  Skipping unbalanced seed entry ${ref}: debits=${td} credits=${tc}`);
+      return;
+    }
+    await JournalEntry.create({ tenant_id: tid, reference: ref, description: desc, total_debit: td, total_credit: tc, lines: mapped, source: 'manual', created_by: adminUser._id, status: 'posted' });
+  };
+
+  await postJe('JE-SEED-001', 'Opening balances — sales, AR, inventory & equity', [
+    { code: '1001', debit: cashBalance,    credit: 0 },           // Cash & Bank
+    { code: '1110', debit: totalAR,        credit: 0 },           // Accounts Receivable
+    { code: '1120', debit: totalInventory, credit: 0 },           // Inventory
+    { code: '5001', debit: totalCogs,      credit: 0 },           // COGS
+    { code: '4001', debit: 0,              credit: totalRevenue }, // Sales Revenue
+    { code: '2001', debit: 0,              credit: totalAP },      // Accounts Payable
+    { code: '3001', debit: 0,              credit: je1EquityAdj }, // Owner's Equity (balancing)
+  ]);
+
+  await postJe('JE-SEED-002', 'Operating expenses recognition', [
+    { code: '5300', debit: expRent,   credit: 0 },        // Rent & Utilities
+    { code: '5200', debit: expOffice, credit: 0 },        // Office Expenses
+    { code: '5100', debit: expSal,    credit: 0 },        // Salaries & Wages
+    { code: '3001', debit: 0,         credit: je2Total }, // Offset to equity (cash already seeded net)
+  ]);
 
   const { PaymentLog } = require('../models');
   await PaymentLog.deleteMany({ tenant_id: tenant._id });
