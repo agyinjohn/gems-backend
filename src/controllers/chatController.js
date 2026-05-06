@@ -1,8 +1,8 @@
 const { ChatConversation, ChatMessage } = require('../models');
 
-// GET /chat/conversation — get or create open conversation for tenant
+// GET /chat/conversation — get or create open conversation for the current user
 const getOrCreateConversation = async (req, res) => {
-  let conv = await ChatConversation.findOne({ tenant_id: req.tenant_id, status: 'open' });
+  let conv = await ChatConversation.findOne({ tenant_id: req.tenant_id, opened_by: req.user._id, status: 'open' });
   if (!conv) {
     conv = await ChatConversation.create({
       tenant_id: req.tenant_id,
