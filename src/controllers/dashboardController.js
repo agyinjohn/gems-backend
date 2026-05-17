@@ -35,18 +35,65 @@ const getDashboard = async (req, res) => {
 
   // ── WAREHOUSE STAFF ──────────────────────────────────────────────────────────
   if (role === 'warehouse_staff') {
-    const [totalProducts, lowStock, outOfStock, recentMovements, lowStockItems] = await Promise.all([
+    const weekAgo  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [
+      totalProducts, lowStock, outOfStock, healthyStock,
+      recentMovements, lowStockItems,
+      totalStockValue, movementsByType, stockTrend, topMovedProducts, pendingPOs,
+    ] = await Promise.all([
       Product.countDocuments({ tenant_id: tid, is_active: true }),
       Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $and: [{ $lte: ['$stock_qty', '$low_stock_threshold'] }, { $gt: ['$stock_qty', 0] }] } }),
       Product.countDocuments({ tenant_id: tid, is_active: true, stock_qty: 0 }),
-      StockMovement.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(10).populate('product_id', 'name'),
-      Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(8).select('name stock_qty low_stock_threshold sku'),
+      Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $gt: ['$stock_qty', '$low_stock_threshold'] } }),
+      StockMovement.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(12).populate('product_id', 'name'),
+      Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10).select('name stock_qty low_stock_threshold sku cost_price'),
+      // Total inventory value
+      Product.aggregate([{ $match: { tenant_id: tid, is_active: true } }, { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
+      // Movement breakdown by type — last 30 days
+      StockMovement.aggregate([
+        { $match: { tenant_id: tid, createdAt: { $gte: monthAgo } } },
+        { $group: { _id: '$type', count: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
+      ]),
+      // Daily in/out trend — last 7 days
+      StockMovement.aggregate([
+        { $match: { tenant_id: tid, createdAt: { $gte: weekAgo } } },
+        { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          in:  { $sum: { $cond: [{ $gt: ['$quantity', 0] }, '$quantity', 0] } },
+          out: { $sum: { $cond: [{ $lt: ['$quantity', 0] }, { $abs: '$quantity' }, 0] } },
+        }},
+        { $sort: { _id: 1 } },
+        { $project: { day: { $substr: ['$_id', 5, 5] }, in: 1, out: 1 } },
+      ]),
+      // Top 5 most moved products — last 30 days
+      StockMovement.aggregate([
+        { $match: { tenant_id: tid, createdAt: { $gte: monthAgo } } },
+        { $group: { _id: '$product_id', moves: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
+        { $sort: { qty: -1 } }, { $limit: 5 },
+        { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'product' } },
+        { $unwind: '$product' },
+        { $project: { name: '$product.name', stock_qty: '$product.stock_qty', moves: 1, qty: 1 } },
+      ]),
+      // Pending POs awaiting goods receipt
+      PurchaseOrder.countDocuments({ tenant_id: tid, status: { $in: ['approved', 'sent', 'partially_received'] } }),
     ]);
+
     return res.json({ success: true, data: {
       role: 'warehouse_staff',
-      kpis: { total_products: totalProducts, low_stock: lowStock, out_of_stock: outOfStock },
-      recent_movements: recentMovements.map(m => ({ ...m.toJSON(), product_name: m.product_id?.name || 'Unknown' })),
-      low_stock_items: lowStockItems,
+      kpis: {
+        total_products: totalProducts,
+        low_stock:      lowStock,
+        out_of_stock:   outOfStock,
+        healthy_stock:  healthyStock,
+        stock_value:    totalStockValue[0]?.value || 0,
+        pending_pos:    pendingPOs,
+      },
+      recent_movements:   recentMovements.map(m => ({ ...m.toJSON(), product_name: m.product_id?.name || 'Unknown' })),
+      low_stock_items:    lowStockItems,
+      movements_by_type:  movementsByType,
+      stock_trend:        stockTrend,
+      top_moved_products: topMovedProducts,
     }});
   }
 
@@ -111,7 +158,7 @@ const getDashboard = async (req, res) => {
     }});
   }
 
-  // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER (full dashboard) ─────────────────────
+  // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER ────────────────────────────────
   const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales] = await Promise.all([
     Order.countDocuments({ tenant_id: tid, payment_status: 'paid' }),
     Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
@@ -136,25 +183,16 @@ const getDashboard = async (req, res) => {
     ]),
   ]);
 
-  res.json({
-    success: true,
-    data: {
-      role: 'admin',
-      kpis: {
-        total_orders: orders,
-        total_revenue: revenue[0]?.total || 0,
-        total_products: products,
-        low_stock_items: lowStock,
-        total_customers: customers,
-        active_leads: leads,
-        total_employees: employees,
-        monthly_expenses: expenses[0]?.total || 0,
-      },
-      recent_orders: recentOrders,
-      top_products: topProducts,
-      monthly_sales: monthlySales,
+  res.json({ success: true, data: {
+    role: 'admin',
+    kpis: {
+      total_orders: orders, total_revenue: revenue[0]?.total || 0,
+      total_products: products, low_stock_items: lowStock,
+      total_customers: customers, active_leads: leads,
+      total_employees: employees, monthly_expenses: expenses[0]?.total || 0,
     },
-  });
+    recent_orders: recentOrders, top_products: topProducts, monthly_sales: monthlySales,
+  }});
 };
 
 module.exports = { getDashboard };

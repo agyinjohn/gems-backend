@@ -126,9 +126,9 @@ router.get('/plan-prices', async (req, res) => {
   const { PlatformSettings } = require('../models');
   const settings = await PlatformSettings.findOne();
   const plans = settings?.plans || {
-    starter:    { price: 29,  max_branches: 1,   max_users: 5   },
-    pro:        { price: 79,  max_branches: 5,   max_users: 20  },
-    enterprise: { price: 199, max_branches: 999, max_users: 999 },
+    starter:    { price: 350,  max_branches: 1,   max_users: 5   },
+    pro:        { price: 850,  max_branches: 5,   max_users: 20  },
+    enterprise: { price: 2000, max_branches: 999, max_users: 999 },
   };
   res.json({ success: true, data: { plans } });
 });
@@ -168,8 +168,23 @@ router.get('/categories', (req, res, next) => {
   if (req.query.tenant_slug) return next();
   authenticate(req, res, () => requireTenant(req, res, next));
 }, inventory.getCategories);
-router.post('/categories', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.createCategory);
-router.put('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.updateCategory);
+router.post('/categories', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
+  const { name, description, custom_fields } = req.body;
+  const { Category } = require('../models');
+  const data = await Category.create({ tenant_id: req.tenant_id, name, description, custom_fields: custom_fields || [] });
+  res.status(201).json({ success: true, data });
+});
+router.put('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
+  const { name, description, custom_fields } = req.body;
+  const { Category } = require('../models');
+  const data = await Category.findOneAndUpdate(
+    { _id: req.params.id, tenant_id: req.tenant_id },
+    { name, description, ...(custom_fields !== undefined && { custom_fields }) },
+    { new: true }
+  );
+  if (!data) return res.status(404).json({ success: false, message: 'Category not found.' });
+  res.json({ success: true, data });
+});
 router.delete('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.deleteCategory);
 router.get('/products', authenticate, requireTenant, inventory.getProducts);
 router.get('/products/:id', authenticate, requireTenant, inventory.getProduct);
@@ -495,7 +510,10 @@ router.post('/purchase-orders/:id/receive', authenticate, requireTenant, authori
 });
 
 
-router.get('/notifications', authenticate, requireTenant, async (req, res) => {
+router.get('/notifications', authenticate, async (req, res) => {
+  if (req.user.role === 'platform_admin') {
+    return res.json({ success: true, data: [] });
+  }
   const tid = req.tenant_id;
   const [lowStock, pendingLeave, pendingOrders, pendingPOs] = await Promise.all([
     Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(5),
@@ -528,13 +546,38 @@ router.post('/ess/leave-requests', authenticate, async (req, res) => {
   if (!start_date || !end_date) return res.status(400).json({ success: false, message: 'start_date and end_date required.' });
   const employee = await Employee.findOne({ user_id: req.user._id });
   if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
-  const data = await LeaveRequest.create({ employee_id: employee._id, leave_type: leave_type || 'annual', start_date, end_date, reason });
+  const tenant_id = employee.tenant_id || req.user.tenant_id;
+  if (!tenant_id) return res.status(400).json({ success: false, message: 'Could not determine tenant for this employee.' });
+  // Patch missing tenant_id on the employee record so future requests work
+  if (!employee.tenant_id) await Employee.findByIdAndUpdate(employee._id, { tenant_id });
+  const data = await LeaveRequest.create({ tenant_id, employee_id: employee._id, leave_type: leave_type || 'annual', start_date, end_date, reason });
   res.status(201).json({ success: true, data });
 });
 router.get('/ess/payslips', authenticate, async (req, res) => {
   const employee = await Employee.findOne({ user_id: req.user._id });
   if (!employee) return res.json({ success: true, data: [] });
-  const data = await PayrollRun.find({ employee_id: employee._id }).sort({ year: -1, month: -1 });
+  const filter = { employee_id: employee._id };
+  if (req.query.month) filter.month = parseInt(req.query.month);
+  if (req.query.year)  filter.year  = parseInt(req.query.year);
+  const data = await PayrollRun.find(filter).sort({ year: -1, month: -1 });
+  res.json({ success: true, data });
+});
+
+router.patch('/ess/leave-requests/:id/cancel', authenticate, async (req, res) => {
+  const employee = await Employee.findOne({ user_id: req.user._id });
+  if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found.' });
+  const leave = await LeaveRequest.findOne({ _id: req.params.id, employee_id: employee._id });
+  if (!leave) return res.status(404).json({ success: false, message: 'Leave request not found.' });
+  if (leave.status !== 'pending') return res.status(400).json({ success: false, message: 'Only pending requests can be cancelled.' });
+  leave.status = 'rejected';
+  await leave.save();
+  res.json({ success: true, data: leave });
+});
+
+router.get('/ess/attendance', authenticate, async (req, res) => {
+  const employee = await Employee.findOne({ user_id: req.user._id });
+  if (!employee) return res.json({ success: true, data: [] });
+  const data = await Attendance.find({ employee_id: employee._id }).sort({ date: -1 }).limit(30);
   res.json({ success: true, data });
 });
 

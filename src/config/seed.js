@@ -23,6 +23,30 @@ const seed = async () => {
   await connectDB();
   console.log('Seeding database...');
 
+  // Wipe all demo tenant data so re-seeding is always clean
+  const existingTenant = await Tenant.findOne({ slug: 'gems-store' });
+  if (existingTenant) {
+    const tid = existingTenant._id;
+    await Promise.all([
+      Employee.deleteMany({ tenant_id: tid }),
+      Attendance.deleteMany({ tenant_id: tid }),
+      LeaveRequest.deleteMany({ tenant_id: tid }),
+      Order.deleteMany({ tenant_id: tid }),
+      PurchaseOrder.deleteMany({ tenant_id: tid }),
+      Expense.deleteMany({ tenant_id: tid }),
+      JournalEntry.deleteMany({ tenant_id: tid }),
+      Account.deleteMany({ tenant_id: tid }),
+      StockMovement.deleteMany({ tenant_id: tid }),
+      Product.deleteMany({ tenant_id: tid }),
+      Category.deleteMany({ tenant_id: tid }),
+      Department.deleteMany({ tenant_id: tid }),
+      Supplier.deleteMany({ tenant_id: tid }),
+      Customer.deleteMany({ tenant_id: tid }),
+      Lead.deleteMany({ tenant_id: tid }),
+    ]);
+    console.log('Cleared existing demo tenant data.');
+  }
+
   // Platform Admin (us)
   const adminHash = await bcrypt.hash('Admin@1234', 10);
   await User.findOneAndUpdate(
@@ -70,7 +94,7 @@ const seed = async () => {
   const catNames = ['Electronics', 'Office Supplies', 'Furniture', 'Clothing', 'Food & Beverage', 'Tools & Equipment'];
   const catMap = {};
   for (const name of catNames) {
-    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { tenant_id: tenant._id, name }, { upsert: true, new: true });
+    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name } }, { upsert: true, new: true });
     catMap[name] = cat._id;
   }
 
@@ -78,7 +102,7 @@ const seed = async () => {
   const deptNames = ['Administration', 'Sales', 'Warehouse', 'Finance', 'Human Resources', 'Procurement', 'IT'];
   const deptMap = {};
   for (const name of deptNames) {
-    const dept = await Department.findOneAndUpdate({ tenant_id: tenant._id, name }, { tenant_id: tenant._id, name }, { upsert: true, new: true });
+    const dept = await Department.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name } }, { upsert: true, new: true });
     deptMap[name] = dept._id;
   }
 
@@ -143,12 +167,13 @@ const seed = async () => {
   ];
   const productMap = {};
   for (const p of productDefs) {
+    const { sku, cat, ...rest } = p;
     const prod = await Product.findOneAndUpdate(
-      { tenant_id: tenant._id, sku: p.sku },
-      { ...p, tenant_id: tenant._id, branch_id: branch._id, category_id: catMap[p.cat], low_stock_threshold: 10 },
+      { tenant_id: tenant._id, sku },
+      { $set: { ...rest, branch_id: branch._id, category_id: catMap[cat], low_stock_threshold: 10 } },
       { upsert: true, new: true },
     );
-    productMap[p.sku] = prod;
+    productMap[sku] = prod;
   }
 
   // ── Chart of Accounts ──────────────────────────────────────────────────────
@@ -276,9 +301,7 @@ const seed = async () => {
     const linkedUser = e.userEmail ? await User.findOne({ email: e.userEmail }) : null;
     await Employee.findOneAndUpdate(
       { tenant_id: tenant._id, employee_code: e.code },
-      {
-        tenant_id: tenant._id,
-        employee_code: e.code,
+      { $set: {
         name: e.name,
         email: e.userEmail || `${e.code.toLowerCase()}@gthink.com`,
         user_id: linkedUser?._id || null,
@@ -287,7 +310,7 @@ const seed = async () => {
         gross_salary: e.salary,
         start_date: daysAgo(rand(180, 900)),
         status: 'active',
-      },
+      }},
       { upsert: true },
     );
   }

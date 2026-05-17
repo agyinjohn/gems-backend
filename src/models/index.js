@@ -61,10 +61,19 @@ const userSchema = new Schema({
 userSchema.index({ tenant_id: 1, email: 1 });
 
 // CATEGORY
+const categoryFieldSchema = new Schema({
+  label:    { type: String, required: true },
+  key:      { type: String, required: true },   // snake_case identifier
+  type:     { type: String, enum: ['text','number','select','boolean'], default: 'text' },
+  options:  [String],                            // for select type
+  required: { type: Boolean, default: false },
+}, { _id: false });
+
 const categorySchema = new Schema({
-  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
-  name:        { type: String, required: true },
-  description: String,
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:          { type: String, required: true },
+  description:   String,
+  custom_fields: { type: [categoryFieldSchema], default: [] },
 }, { timestamps: true });
 categorySchema.index({ tenant_id: 1, name: 1 }, { unique: true });
 
@@ -84,6 +93,7 @@ const productSchema = new Schema({
   low_stock_threshold: { type: Number, default: 10 },
   unit:                { type: String, default: 'piece' },
   images:              [String],
+  attributes:          { type: Schema.Types.Mixed, default: {} },
   is_active:           { type: Boolean, default: true },
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

@@ -58,10 +58,10 @@ const getProduct = async (req, res) => {
 };
 
 const createProduct = async (req, res) => {
-  const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images } = req.body;
+  const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images, attributes } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
   const finalSku = sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`;
-  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: category_id || null, price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: images || [], created_by: req.user._id });
+  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: category_id || null, price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: images || [], attributes: attributes || {}, created_by: req.user._id });
   if (stock_qty > 0) await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
   await audit(req, 'CREATE_PRODUCT', 'inventory', `${req.user.name} added product "${product.name}"`, { sku: product.sku, price: product.price });
   res.status(201).json({ success: true, message: 'Product created.', data: product });
@@ -81,6 +81,7 @@ const updateProduct = async (req, res) => {
   if (unit !== undefined) update.unit = unit;
   if (is_active !== undefined) update.is_active = is_active;
   if (images !== undefined) update.images = images;
+  if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
   const product = await Product.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
   await audit(req, 'UPDATE_PRODUCT', 'inventory', `${req.user.name} updated product "${product.name}"`, { product_id: product._id });
