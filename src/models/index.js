@@ -96,6 +96,7 @@ const productSchema = new Schema({
   unit:                { type: String, default: 'piece' },
   images:              [String],
   attributes:          { type: Schema.Types.Mixed, default: {} },
+  location_id:         { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
   is_active:           { type: Boolean, default: true },
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
@@ -468,6 +469,64 @@ const auditLogSchema = new Schema({
 auditLogSchema.index({ tenant_id: 1, createdAt: -1 });
 auditLogSchema.index({ createdAt: -1 });
 
+// STORAGE LOCATION (shelf / zone / bin / warehouse area)
+const storageLocationSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:   { type: Schema.Types.ObjectId, ref: 'Branch' },
+  name:        { type: String, required: true },
+  code:        { type: String },
+  type:        { type: String, enum: ['warehouse','zone','shelf','bin','room','other'], default: 'shelf' },
+  description: String,
+  is_active:   { type: Boolean, default: true },
+}, { timestamps: true });
+storageLocationSchema.index({ tenant_id: 1, code: 1 }, { unique: true, sparse: true });
+
+// ASSET CATEGORY
+const assetCategorySchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:        { type: String, required: true },
+  description: String,
+}, { timestamps: true });
+assetCategorySchema.index({ tenant_id: 1, name: 1 }, { unique: true });
+
+// ASSET
+const assetSchema = new Schema({
+  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:       { type: Schema.Types.ObjectId, ref: 'Branch' },
+  asset_code:      { type: String, required: true },
+  name:            { type: String, required: true },
+  category_id:     { type: Schema.Types.ObjectId, ref: 'AssetCategory' },
+  description:     String,
+  purchase_date:   Date,
+  purchase_value:  { type: Number, default: 0 },
+  current_value:   { type: Number, default: 0 },
+  condition:       { type: String, enum: ['excellent','good','fair','poor','disposed'], default: 'good' },
+  status:          { type: String, enum: ['active','under_repair','disposed','lost'], default: 'active' },
+  assigned_to:     { type: Schema.Types.ObjectId, ref: 'Employee' },
+  location_id:     { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
+  serial_number:   String,
+  warranty_expiry: Date,
+  notes:           String,
+  images:          [String],
+  created_by:      { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+assetSchema.index({ tenant_id: 1, asset_code: 1 }, { unique: true });
+
+// ASSET LOG (maintenance / repair / transfer history)
+const assetLogSchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  asset_id:      { type: Schema.Types.ObjectId, ref: 'Asset', required: true },
+  type:          { type: String, enum: ['maintenance','repair','transfer','condition_change','disposal','note'], required: true },
+  notes:         { type: String, required: true },
+  cost:          { type: Number, default: 0 },
+  from_location: { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
+  to_location:   { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
+  from_employee: { type: Schema.Types.ObjectId, ref: 'Employee' },
+  to_employee:   { type: Schema.Types.ObjectId, ref: 'Employee' },
+  created_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+assetLogSchema.index({ tenant_id: 1, asset_id: 1, createdAt: -1 });
+
 // CHAT CONVERSATION
 const chatConversationSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -607,6 +666,7 @@ const allSchemas = [
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
+  storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -655,4 +715,8 @@ module.exports = {
   ChatConversation:      mongoose.model('ChatConversation', chatConversationSchema),
   ChatMessage:           mongoose.model('ChatMessage', chatMessageSchema),
   Role:                  mongoose.model('Role', roleSchema),
+  StorageLocation:       mongoose.model('StorageLocation', storageLocationSchema),
+  AssetCategory:         mongoose.model('AssetCategory', assetCategorySchema),
+  Asset:                 mongoose.model('Asset', assetSchema),
+  AssetLog:              mongoose.model('AssetLog', assetLogSchema),
 };

@@ -928,6 +928,26 @@ router.get('/reports/crm', authenticate, requireTenant, async (req, res) => {
 // This is the standalone boundary — this router can be extracted independently
 router.use('/', accountingRouter);
 
+// STORAGE LOCATIONS
+const assets = require('../controllers/assetController');
+router.get('/locations',              authenticate, requireTenant, assets.getLocations);
+router.post('/locations',             authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), assets.createLocation);
+router.put('/locations/:id',          authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), assets.updateLocation);
+router.delete('/locations/:id',       authenticate, requireTenant, authorize('business_owner','branch_manager'), assets.deleteLocation);
+
+// ASSET CATEGORIES
+router.get('/asset-categories',       authenticate, requireTenant, assets.getAssetCategories);
+router.post('/asset-categories',      authenticate, requireTenant, authorize('business_owner','branch_manager'), assets.createAssetCategory);
+router.put('/asset-categories/:id',   authenticate, requireTenant, authorize('business_owner','branch_manager'), assets.updateAssetCategory);
+router.delete('/asset-categories/:id',authenticate, requireTenant, authorize('business_owner','branch_manager'), assets.deleteAssetCategory);
+
+// ASSETS
+router.get('/assets',                 authenticate, requireTenant, assets.getAssets);
+router.get('/assets/:id',             authenticate, requireTenant, assets.getAsset);
+router.post('/assets',                authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), assets.createAsset);
+router.put('/assets/:id',             authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), assets.updateAsset);
+router.post('/assets/:id/log',        authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), assets.addAssetLog);
+
 // CHAT
 const chat = require('../controllers/chatController');
 router.get('/chat/conversation',                  authenticate, requireTenant, chat.getOrCreateConversation);
