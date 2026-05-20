@@ -51,7 +51,9 @@ const userSchema = new Schema({
     'hr_manager',
     'procurement_officer',
     'employee',
+    'custom',
   ], default: 'sales_staff' },
+  custom_role_id:       { type: Schema.Types.ObjectId, ref: 'Role' },
   is_active:            { type: Boolean, default: true },
   token_version:        { type: Number, default: 0 },
   verification_id:      String,
@@ -439,6 +441,15 @@ const platformSettingsSchema = new Schema({
   }},
 }, { timestamps: true });
 
+// CUSTOM ROLE
+const roleSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:        { type: String, required: true },
+  permissions: { type: [String], default: [] },
+  is_active:   { type: Boolean, default: true },
+}, { timestamps: true });
+roleSchema.index({ tenant_id: 1, name: 1 }, { unique: true });
+
 // AUDIT LOG
 const auditLogSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant' },
@@ -595,7 +606,7 @@ const allSchemas = [
   attendanceSchema, leaveRequestSchema, payrollRunSchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema,
-  chatConversationSchema, chatMessageSchema,
+  chatConversationSchema, chatMessageSchema, roleSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -643,4 +654,5 @@ module.exports = {
   AccountingPeriod:      mongoose.model('AccountingPeriod', accountingPeriodSchema),
   ChatConversation:      mongoose.model('ChatConversation', chatConversationSchema),
   ChatMessage:           mongoose.model('ChatMessage', chatMessageSchema),
+  Role:                  mongoose.model('Role', roleSchema),
 };

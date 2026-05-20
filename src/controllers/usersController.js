@@ -1,11 +1,13 @@
 const bcrypt = require('bcryptjs');
-const { User, Tenant, Employee, Department } = require('../models');
+const { User, Tenant, Employee, Department, Role } = require('../models');
 const audit = require('../utils/audit');
 
-const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer', 'employee'];
+const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer', 'employee', 'custom'];
 
 const getUsers = async (req, res) => {
-  const users = await User.find({ tenant_id: req.tenant_id }, '-password_hash').sort({ createdAt: -1 });
+  const users = await User.find({ tenant_id: req.tenant_id }, '-password_hash')
+    .populate('custom_role_id', 'name permissions is_active')
+    .sort({ createdAt: -1 });
   res.json({ success: true, data: users });
 };
 
@@ -16,9 +18,16 @@ const getUser = async (req, res) => {
 };
 
 const createUser = async (req, res) => {
-  const { name, email, password, role, branch_id, gross_salary, job_title, department_id } = req.body;
+  const { name, email, password, role, custom_role_id, branch_id, gross_salary, job_title, department_id } = req.body;
   if (!name || !email || !password || !role) return res.status(400).json({ success: false, message: 'name, email, password, and role are required.' });
   if (!TENANT_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Invalid role.' });
+  if (role === 'custom' && !custom_role_id) return res.status(400).json({ success: false, message: 'custom_role_id is required for custom roles.' });
+
+  // Validate custom role belongs to this tenant
+  if (role === 'custom') {
+    const cr = await Role.findOne({ _id: custom_role_id, tenant_id: req.tenant_id, is_active: true });
+    if (!cr) return res.status(400).json({ success: false, message: 'Invalid or inactive custom role.' });
+  }
 
   // Check user limit
   const tenant = req.tenant;
@@ -33,6 +42,7 @@ const createUser = async (req, res) => {
     email: email.toLowerCase().trim(),
     password_hash: hashed,
     role,
+    custom_role_id: role === 'custom' ? custom_role_id : null,
   });
 
   // Auto-create employee record for staff roles
@@ -59,14 +69,18 @@ const createUser = async (req, res) => {
 };
 
 const updateUser = async (req, res) => {
-  const { name, email, role, branch_id, is_active } = req.body;
+  const { name, email, role, custom_role_id, branch_id, is_active } = req.body;
   const update = {};
   if (name !== undefined) update.name = name;
   if (email !== undefined) update.email = email.toLowerCase().trim();
-  if (role !== undefined) update.role = role;
+  if (role !== undefined) {
+    update.role = role;
+    update.custom_role_id = role === 'custom' ? (custom_role_id || null) : null;
+  }
   if (branch_id !== undefined) update.branch_id = branch_id || null;
   if (is_active !== undefined) update.is_active = is_active;
-  const user = await User.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true, select: '-password_hash' });
+  const user = await User.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true, select: '-password_hash' })
+    .populate('custom_role_id', 'name permissions is_active');
   if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
   await audit(req, 'UPDATE_USER', 'users', `${req.user.name} updated user "${user.name}"`, { user_id: user._id });
   res.json({ success: true, message: 'User updated.', data: user });

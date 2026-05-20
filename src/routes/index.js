@@ -59,6 +59,42 @@ router.post('/users', authenticate, requireTenant, businessOwnerOnly, users.crea
 router.put('/users/:id', authenticate, requireTenant, businessOwnerOnly, users.updateUser);
 router.delete('/users/:id', authenticate, requireTenant, businessOwnerOnly, users.deleteUser);
 
+// ── CUSTOM ROLES ──────────────────────────────────────────────────────────────
+const { Role } = require('../models');
+
+router.get('/roles', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const roles = await Role.find({ tenant_id: req.tenant_id }).sort({ name: 1 });
+  res.json({ success: true, data: roles });
+});
+
+router.post('/roles', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const { name, permissions } = req.body;
+  if (!name) return res.status(400).json({ success: false, message: 'Role name is required.' });
+  const exists = await Role.findOne({ tenant_id: req.tenant_id, name: name.trim() });
+  if (exists) return res.status(400).json({ success: false, message: 'A role with this name already exists.' });
+  const role = await Role.create({ tenant_id: req.tenant_id, name: name.trim(), permissions: permissions || [] });
+  res.json({ success: true, data: role });
+});
+
+router.put('/roles/:id', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const { name, permissions, is_active } = req.body;
+  const role = await Role.findOneAndUpdate(
+    { _id: req.params.id, tenant_id: req.tenant_id },
+    { ...(name && { name: name.trim() }), ...(permissions !== undefined && { permissions }), ...(is_active !== undefined && { is_active }) },
+    { new: true }
+  );
+  if (!role) return res.status(404).json({ success: false, message: 'Role not found.' });
+  res.json({ success: true, data: role });
+});
+
+router.delete('/roles/:id', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const { User } = require('../models');
+  const inUse = await User.countDocuments({ tenant_id: req.tenant_id, custom_role_id: req.params.id });
+  if (inUse > 0) return res.status(400).json({ success: false, message: `Cannot delete — ${inUse} user(s) are assigned this role.` });
+  await Role.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
+  res.json({ success: true });
+});
+
 // BILLING
 const billing = require('../controllers/billingController');
 router.get('/billing/status',         authenticate, requireTenant, billing.getStatus);

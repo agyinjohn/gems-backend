@@ -13,7 +13,8 @@ const generateToken = (user) =>
 const login = async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password are required.' });
-  const user = await User.findOne({ email: email.toLowerCase().trim(), is_active: true });
+  const user = await User.findOne({ email: email.toLowerCase().trim(), is_active: true })
+    .populate('custom_role_id', 'name permissions is_active');
   if (!user) return res.status(401).json({ success: false, message: 'Invalid email or password.' });
   const isMatch = await bcrypt.compare(password, user.password_hash);
   if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid email or password.' });
@@ -33,10 +34,11 @@ const login = async (req, res) => {
 
   const token = generateToken(user);
   const { password_hash, ...userObj } = user.toObject();
-  // Audit login
+  // Include permissions in user object for frontend sidebar rendering
+  const permissions = user.role === 'custom' ? (user.custom_role_id?.permissions || []) : [];
   req.user = user; req.tenant_id = user.tenant_id;
   await audit(req, 'LOGIN', 'auth', `${user.name} logged in`, { role: user.role });
-  res.json({ success: true, message: 'Login successful', data: { token, user: { ...userObj, id: user._id }, tenant: tenantData, branch: branchData } });
+  res.json({ success: true, message: 'Login successful', data: { token, user: { ...userObj, id: user._id, permissions }, tenant: tenantData, branch: branchData } });
 };
 
 const getMe = async (req, res) => {
