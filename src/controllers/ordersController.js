@@ -1,7 +1,11 @@
-const { Order, Product, StockMovement } = require('../models');
+const { Order, Product, StockMovement, Tenant } = require('../models');
+const { pickSettings, calcDeliveryFee } = require('./storefrontController');
 const audit = require('../utils/audit');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
+const { verifyPaystackTransaction, fulfillStorefrontOrders, failStorefrontOrders } = require('../services/paymentService');
+const { isFeatureEnabled } = require('../services/tenantService');
+const { getActiveSalesTaxRate, calcTaxAmount } = require('../services/taxService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -90,7 +94,7 @@ const getStorefrontProducts = async (req, res) => {
 };
 
 const initiateCheckout = async (req, res) => {
-  const { customer_name, customer_email, customer_phone, delivery_address, delivery_fee, items, tenant_id, branch_id } = req.body;
+  const { customer_name, customer_email, customer_phone, delivery_address, delivery_fee, items, tenant_id, branch_id, coupon_code } = req.body;
   if (!customer_name || !customer_email || !items?.length) return res.status(400).json({ success: false, message: 'customer_name, customer_email and items are required.' });
 
   // Group items by branch
@@ -106,6 +110,56 @@ const initiateCheckout = async (req, res) => {
     branchGroups[bId].items.push({ product: p, quantity: item.quantity });
   }
 
+  const tenantDoc = resolvedTenantId ? await Tenant.findById(resolvedTenantId) : null;
+  const storeSettings = tenantDoc ? pickSettings(tenantDoc) : null;
+  if (tenantDoc && !(await isFeatureEnabled(tenantDoc.plan || 'starter', 'storefront'))) {
+    return res.status(403).json({ success: false, message: 'Online store is not available on this subscription plan.' });
+  }
+  if (storeSettings && !storeSettings.store_enabled) {
+    return res.status(403).json({ success: false, message: 'Online store is currently unavailable.' });
+  }
+
+  let cartSubtotal = 0;
+  for (const [, group] of Object.entries(branchGroups)) {
+    for (const { product: p, quantity } of group.items) {
+      cartSubtotal += p.price * quantity;
+    }
+  }
+  if (storeSettings && cartSubtotal < storeSettings.min_order_amount) {
+    return res.status(400).json({
+      success: false,
+      message: `Minimum order amount is GH₵${storeSettings.min_order_amount}.`,
+    });
+  }
+
+  let discountAmount = 0;
+  let appliedCoupon = null;
+  if (coupon_code && resolvedTenantId) {
+    const { validateCoupon } = require('../services/couponService');
+    const couponResult = await validateCoupon({ tenantId: resolvedTenantId, code: coupon_code, subtotal: cartSubtotal });
+    if (!couponResult.valid) return res.status(400).json({ success: false, message: couponResult.message });
+    discountAmount = couponResult.discount;
+    appliedCoupon = couponResult.coupon;
+  }
+
+  const discountedSubtotal = Math.max(0, cartSubtotal - discountAmount);
+
+  const resolvedFee = Object.keys(branchGroups).length === 1
+    ? (delivery_fee !== undefined && delivery_fee !== null
+      ? parseFloat(delivery_fee) || 0
+      : (storeSettings ? calcDeliveryFee(discountedSubtotal, storeSettings) : 0))
+    : 0;
+
+  const salesTax = resolvedTenantId ? await getActiveSalesTaxRate(resolvedTenantId) : null;
+  const taxRatePct = salesTax?.rate || 0;
+
+  const paystackRef = `GEMS-${Date.now()}`;
+
+  const branchKeys = Object.keys(branchGroups);
+  const branchDiscountShare = branchKeys.length && discountAmount
+    ? discountAmount / branchKeys.length
+    : 0;
+
   // Create one order per branch
   const orders = [];
   for (const [, group] of Object.entries(branchGroups)) {
@@ -116,67 +170,59 @@ const initiateCheckout = async (req, res) => {
       subtotal += total;
       enrichedItems.push({ product_id: p._id, product_name: p.name, quantity, unit_price: p.price, total });
     }
-    const fee = Object.keys(branchGroups).length === 1 ? (parseFloat(delivery_fee) || 0) : 0;
-    const total = subtotal + fee;
+    const branchDiscount = Math.min(subtotal, branchDiscountShare);
+    const taxableSubtotal = Math.max(0, subtotal - branchDiscount);
+    const fee = resolvedFee;
+    const tax_amount = calcTaxAmount(taxableSubtotal, taxRatePct);
+    const total = taxableSubtotal + fee + tax_amount;
     const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const order = await Order.create({
       tenant_id: resolvedTenantId,
       branch_id: group.branch_id,
       order_number: orderNumber,
       customer_name, customer_email, customer_phone, delivery_address,
-      subtotal, total,
+      subtotal, discount_amount: branchDiscount,
+      coupon_code: appliedCoupon?.code || null,
+      tax_amount, total,
       payment_status: 'pending',
+      payment_ref: paystackRef,
       status: 'pending',
       source: 'storefront',
       items: enrichedItems,
     });
-    orders.push({ order_id: order._id, order_number: orderNumber, total, branch_name: group.branch_name });
+    orders.push({ order_id: order._id, order_number: orderNumber, total, branch_name: group.branch_name, discount: branchDiscount });
   }
 
   const grandTotal = orders.reduce((s, o) => s + o.total, 0);
-  const paystackRef = `GEMS-${Date.now()}`;
-  res.status(201).json({ success: true, data: { orders, grand_total: grandTotal, email: customer_email, paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY, reference: paystackRef } });
+  res.status(201).json({
+    success: true,
+    data: {
+      orders,
+      grand_total: grandTotal,
+      discount_amount: discountAmount,
+      coupon_code: appliedCoupon?.code || null,
+      email: customer_email,
+      paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
+      reference: paystackRef,
+      tax_rate: taxRatePct,
+      tax_name: salesTax?.name || '',
+    },
+  });
 };
 
 const verifyPayment = async (req, res) => {
-  const { reference, order_ids } = req.body; // order_ids is array
+  const { reference, order_ids } = req.body;
   if (!reference || !order_ids?.length) return res.status(400).json({ success: false, message: 'reference and order_ids required.' });
-  const https = require('node:https');
-  const options = { hostname: 'api.paystack.co', path: `/transaction/verify/${reference}`, method: 'GET', headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } };
-  let body = '';
-  const paystackReq = https.request(options, (paystackRes) => {
-    paystackRes.on('data', d => body += d);
-    paystackRes.on('end', async () => {
-      try {
-        const data = JSON.parse(body);
-        if (data.data?.status === 'success') {
-          const orderNumbers = [];
-          for (const order_id of order_ids) {
-            const order = await Order.findOne({ _id: order_id, payment_status: 'pending' });
-            if (!order) continue;
-            order.payment_status = 'paid';
-            order.payment_ref = reference;
-            order.payment_method = 'paystack';
-            order.status = 'processing';
-            await order.save();
-            orderNumbers.push(order.order_number);
-            await logPayment({ tenant_id: order.tenant_id, source: 'storefront', reference: order.order_number, amount: order.total, method: 'paystack', status: 'success', payer_name: order.customer_name, payer_email: order.customer_email, description: `Storefront order ${order.order_number}`, source_id: order._id });
-            await accounting.postSaleEntry({ tenantId: order.tenant_id, amount: order.total, cogsAmount: order.subtotal, taxAmount: order.tax_amount || 0, reference: order.order_number, date: new Date(), sourceId: order._id }).catch(() => {});
-            for (const item of order.items) {
-              await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-              await StockMovement.create({ tenant_id: order.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number });
-            }
-          }
-          res.json({ success: true, message: 'Payment verified. Orders confirmed!', data: { order_numbers: orderNumbers } });
-        } else {
-          for (const order_id of order_ids) await Order.findByIdAndUpdate(order_id, { payment_status: 'failed' });
-          res.status(400).json({ success: false, message: 'Payment verification failed.' });
-        }
-      } catch { res.status(500).json({ success: false, message: 'Payment verification error.' }); }
-    });
-  });
-  paystackReq.on('error', () => res.status(500).json({ success: false, message: 'Could not reach Paystack.' }));
-  paystackReq.end();
+
+  try {
+    await verifyPaystackTransaction(reference);
+    const result = await fulfillStorefrontOrders({ reference, orderIds: order_ids });
+    res.json({ success: true, message: 'Payment verified. Orders confirmed!', data: result });
+  } catch (err) {
+    await failStorefrontOrders(order_ids);
+    const status = err.message?.includes('not configured') ? 500 : 400;
+    res.status(status).json({ success: false, message: err.message || 'Payment verification failed.' });
+  }
 };
 
 module.exports = { getOrders, getOrder, createOrder, updateOrderStatus, getStorefrontProducts, initiateCheckout, verifyPayment };

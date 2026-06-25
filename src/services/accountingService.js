@@ -266,6 +266,25 @@ async function postPayrollEntry({ tenantId, amount, reference, date, sourceId, c
   });
 }
 
+async function postSaleReturnEntry({ tenantId, amount, cogsAmount = 0, taxAmount = 0, reference, date, sourceId, createdBy }) {
+  const netRevenue = amount - taxAmount;
+  const lines = [
+    { accountCode: '1001', debit: 0,      credit: amount,     description: `Cash refunded ${reference}` },
+    { accountCode: '4001', debit: netRevenue, credit: 0,     description: `Revenue reversal ${reference}` },
+  ];
+  if (taxAmount > 0) {
+    lines.push({ accountCode: '2110', debit: taxAmount, credit: 0, description: `VAT reversal ${reference}` });
+  }
+  if (cogsAmount > 0) {
+    lines.push({ accountCode: '1120', debit: cogsAmount, credit: 0,          description: `Inventory restored ${reference}` });
+    lines.push({ accountCode: '5001', debit: 0,          credit: cogsAmount, description: `COGS reversal ${reference}` });
+  }
+  return postJournalEntry({
+    tenantId, description: `Sale return — ${reference}`,
+    date, lines, source: 'sale', sourceId, createdBy, reference: `REF-${reference}`,
+  });
+}
+
 module.exports = {
   seedChartOfAccounts,
   postJournalEntry,
@@ -276,4 +295,5 @@ module.exports = {
   postPurchaseOrderEntry,
   postPurchasePaymentEntry,
   postPayrollEntry,
+  postSaleReturnEntry,
 };

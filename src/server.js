@@ -52,6 +52,11 @@ app.use(cors({
   credentials: true,
 }));
 app.use(helmet());
+
+// Paystack webhook — raw body required for signature verification
+const { handlePaystackWebhook } = require('./controllers/webhookController');
+app.post('/api/webhooks/paystack', express.raw({ type: 'application/json' }), handlePaystackWebhook);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(morgan('dev'));
 

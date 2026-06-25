@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
-const { User, Tenant, Role } = require('../models');
+const { User } = require('../models');
+const { resolveTenantForUser } = require('../services/tenantService');
 
 const authenticate = async (req, res, next) => {
   try {
@@ -12,26 +13,16 @@ const authenticate = async (req, res, next) => {
     if ((decoded.tv ?? 0) !== (user.token_version || 0)) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
 
     req.user = user;
-    // Expose permissions array for custom roles
     req.permissions = user.custom_role_id?.permissions || [];
 
-    // Attach tenant if user belongs to one
     if (user.tenant_id) {
-      const tenant = await Tenant.findById(user.tenant_id);
-      if (!tenant || !tenant.is_active) return res.status(403).json({ success: false, message: 'Your business account is inactive.' });
-
-      // Check subscription (platform_admin and billing routes bypass this)
-      if (user.role !== 'platform_admin' && !req.path?.startsWith('/billing') && !req.path?.startsWith('/my-tenant')) {
-        const now = new Date();
-        if (tenant.subscription_status === 'suspended') return res.status(403).json({ success: false, message: 'Your subscription has been suspended. Please contact support.' });
-        if (tenant.subscription_status === 'expired' || tenant.subscription_expires_at < now) {
-          const gracePeriodEnd = new Date(tenant.subscription_expires_at.getTime() + 7 * 24 * 60 * 60 * 1000);
-          if (now > gracePeriodEnd) return res.status(403).json({ success: false, message: 'Your subscription has expired. Please renew to continue.' });
-        }
+      const apiPath = req.originalUrl?.replace(/^\/api/, '') || req.path || '';
+      const tenantContext = await resolveTenantForUser(user, apiPath);
+      if (tenantContext.error) {
+        return res.status(tenantContext.error.status).json({ success: false, message: tenantContext.error.message });
       }
-
-      req.tenant = tenant;
-      req.tenant_id = tenant._id;
+      req.tenant = tenantContext.tenant;
+      req.tenant_id = tenantContext.tenant_id;
     }
 
     next();
@@ -71,4 +62,24 @@ const requireTenant = (req, res, next) => {
   next();
 };
 
-module.exports = { authenticate, authorize, requirePermission, platformAdminOnly, businessOwnerOnly, superAdminOnly, requireTenant };
+const authenticateStoreCustomer = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ success: false, message: 'Access denied.' });
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.type !== 'store_customer') return res.status(401).json({ success: false, message: 'Invalid customer token.' });
+
+    const { StoreCustomer } = require('../models');
+    const customer = await StoreCustomer.findById(decoded.id);
+    if (!customer) return res.status(401).json({ success: false, message: 'Customer not found.' });
+
+    req.storeCustomer = customer;
+    req.tenant_id = customer.tenant_id;
+    next();
+  } catch {
+    return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
+  }
+};
+
+module.exports = { authenticate, authorize, requirePermission, platformAdminOnly, businessOwnerOnly, superAdminOnly, requireTenant, authenticateStoreCustomer };

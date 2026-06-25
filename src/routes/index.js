@@ -1,22 +1,32 @@
-const express = require('express');
+﻿const express = require('express');
 const router = express.Router();
-const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwnerOnly, requireTenant } = require('../middleware/auth');
+const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwnerOnly, requireTenant, authenticateStoreCustomer } = require('../middleware/auth');
+const { requireFeature } = require('../middleware/featureFlags');
+const { productModeGate } = require('../middleware/productMode');
+const { getModeMeta } = require('../config/productMode');
+const storefrontDocsRouter = require('./storefrontDocs');
 const auditMiddleware = require('../middleware/auditMiddleware');
 const auth = require('../controllers/authController');
 const users = require('../controllers/usersController');
 const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
 const orders = require('../controllers/ordersController');
+const storefront = require('../controllers/storefrontController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
+const pos = require('../controllers/posController');
+const storeCustomer = require('../controllers/storeCustomerController');
+const { validateCoupon } = require('../services/couponService');
+const { completePosSale, getOpenShift, recordShiftRefund } = require('../services/posService');
 const accountingRouter = require('./accounting');
+const reportsRouter = require('./reports');
 const {
   Supplier, PurchaseOrder, Product, StockMovement,
   Account, Expense, JournalEntry,
   Department, Employee, Attendance, LeaveRequest, PayrollRun,
-  Customer, Lead, ContactHistory, Order,
+  Customer, Lead, ContactHistory, Order, Coupon,
 } = require('../models');
 
 // AUTH
@@ -29,20 +39,27 @@ router.post('/auth/reset-password', auth.resetPassword);
 // TENANT REGISTRATION (public)
 router.post('/tenants/register', tenant.registerTenant);
 
-// Audit middleware — only runs for authenticated requests, skips public routes
+// Product mode info + storefront API docs (public)
+router.get('/product-info', (req, res) => res.json({ success: true, data: getModeMeta() }));
+router.use(storefrontDocsRouter);
+
+// Restrict API surface when PRODUCT_MODE=pos|storefront|accounting
+router.use(productModeGate);
+
+// Audit middleware â€” only runs for authenticated requests, skips public routes
 router.use((req, res, next) => {
   if (req.user) return auditMiddleware(req, res, next);
   next();
 });
 
-// PLATFORM ADMIN — tenant management (us only)
+// PLATFORM ADMIN â€” tenant management (us only)
 router.get('/platform/tenants', authenticate, platformAdminOnly, tenant.getAllTenants);
 router.get('/platform/tenants/:id', authenticate, platformAdminOnly, tenant.getTenant);
 router.patch('/platform/tenants/:id', authenticate, platformAdminOnly, tenant.updateTenant);
 router.patch('/platform/tenants/:id/suspend', authenticate, platformAdminOnly, tenant.suspendTenant);
 router.patch('/platform/tenants/:id/activate', authenticate, platformAdminOnly, tenant.activateTenant);
 
-// MY TENANT — business owner sees their own tenant
+// MY TENANT â€” business owner sees their own tenant
 router.get('/my-tenant', authenticate, requireTenant, tenant.getMyTenant);
 
 // BRANCHES
@@ -59,7 +76,7 @@ router.post('/users', authenticate, requireTenant, businessOwnerOnly, users.crea
 router.put('/users/:id', authenticate, requireTenant, businessOwnerOnly, users.updateUser);
 router.delete('/users/:id', authenticate, requireTenant, businessOwnerOnly, users.deleteUser);
 
-// ── CUSTOM ROLES ──────────────────────────────────────────────────────────────
+// â”€â”€ CUSTOM ROLES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const { Role } = require('../models');
 
 router.get('/roles', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
@@ -90,7 +107,7 @@ router.put('/roles/:id', authenticate, requireTenant, businessOwnerOnly, async (
 router.delete('/roles/:id', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
   const { User } = require('../models');
   const inUse = await User.countDocuments({ tenant_id: req.tenant_id, custom_role_id: req.params.id });
-  if (inUse > 0) return res.status(400).json({ success: false, message: `Cannot delete — ${inUse} user(s) are assigned this role.` });
+  if (inUse > 0) return res.status(400).json({ success: false, message: `Cannot delete â€” ${inUse} user(s) are assigned this role.` });
   await Role.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
   res.json({ success: true });
 });
@@ -106,7 +123,7 @@ router.post('/billing/authorize-card',authenticate, requireTenant, businessOwner
 router.post('/billing/save-card',     authenticate, requireTenant, businessOwnerOnly, billing.saveCard);
 router.post('/billing/cancel',        authenticate, requireTenant, businessOwnerOnly, billing.cancelSubscription);
 
-// GET /billing/callback?reference=xxx — called by frontend after Paystack card redirect
+// GET /billing/callback?reference=xxx â€” called by frontend after Paystack card redirect
 router.get('/billing/callback', authenticate, requireTenant, async (req, res) => {
   const { reference } = req.query;
   if (!reference) return res.status(400).json({ success: false, message: 'reference required.' });
@@ -122,7 +139,7 @@ router.get('/platform/settings', authenticate, platformAdminOnly, async (req, re
   if (!settings) settings = await PlatformSettings.create({});
   // Mask secret key in response
   const data = settings.toJSON();
-  if (data.paystack_secret_key) data.paystack_secret_key = '••••••••' + data.paystack_secret_key.slice(-4);
+  if (data.paystack_secret_key) data.paystack_secret_key = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' + data.paystack_secret_key.slice(-4);
   res.json({ success: true, data });
 });
 router.put('/platform/settings', authenticate, platformAdminOnly, async (req, res) => {
@@ -146,18 +163,20 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     if (v !== undefined) settings[k] = v;
   }
   // Only update secret key if a real value (not masked) is provided
-  if (paystack_secret_key && !paystack_secret_key.startsWith('••••')) {
+  if (paystack_secret_key && !paystack_secret_key.startsWith('â€¢â€¢â€¢â€¢')) {
     settings.paystack_secret_key = paystack_secret_key;
   }
   if (plans !== undefined) { settings.plans = plans; settings.markModified('plans'); }
   if (feature_flags !== undefined) { settings.feature_flags = feature_flags; settings.markModified('feature_flags'); }
   await settings.save();
+  const { invalidatePlatformSettingsCache } = require('../services/tenantService');
+  invalidatePlatformSettingsCache();
   const data = settings.toJSON();
-  if (data.paystack_secret_key) data.paystack_secret_key = '••••••••' + data.paystack_secret_key.slice(-4);
+  if (data.paystack_secret_key) data.paystack_secret_key = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' + data.paystack_secret_key.slice(-4);
   res.json({ success: true, data });
 });
 
-// Public plan prices — used by billing page (no auth required)
+// Public plan prices â€” used by billing page (no auth required)
 router.get('/plan-prices', async (req, res) => {
   const { PlatformSettings } = require('../models');
   const settings = await PlatformSettings.findOne();
@@ -231,43 +250,127 @@ router.post('/products/:id/adjust-stock', authenticate, requireTenant, authorize
 router.get('/products/:id/movements', authenticate, requireTenant, inventory.getStockMovements);
 
 // POS
-router.post('/pos/sale', authenticate, requireTenant, authorize('business_owner', 'sales_staff'), async (req, res) => {
+router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
   const { items, payment_method, amount_tendered, customer_name, customer_phone } = req.body;
   if (!items?.length) return res.status(400).json({ success: false, message: 'items required.' });
-  let subtotal = 0;
-  const enrichedItems = [];
-  for (const item of items) {
-    const p = await Product.findOne({ _id: item.product_id, tenant_id: req.tenant_id, is_active: true });
-    if (!p) return res.status(400).json({ success: false, message: `Product not found.` });
-    if (p.stock_qty < item.quantity) return res.status(400).json({ success: false, message: `Insufficient stock for ${p.name}.` });
-    const total = p.price * item.quantity;
-    subtotal += total;
-    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
+  if (payment_method === 'momo' || payment_method === 'card') {
+    return res.status(400).json({ success: false, message: 'Use Paystack flow for card and mobile money payments.' });
   }
-  const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
-  const order = await Order.create({
-    tenant_id: req.tenant_id,
-    order_number: orderNumber,
-    customer_name: customer_name || 'Walk-in Customer',
-    customer_phone: customer_phone || '',
-    subtotal, total: subtotal,
-    payment_status: 'paid',
-    payment_method: payment_method || 'cash',
-    status: 'delivered',
-    source: 'pos',
-    items: enrichedItems,
-    created_by: req.user._id,
-  });
-  for (const item of enrichedItems) {
-    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-    await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: orderNumber, created_by: req.user._id });
+  try {
+    const shift = await getOpenShift(req.tenant_id, req.user._id);
+    const result = await completePosSale({
+      tenantId: req.tenant_id,
+      userId: req.user._id,
+      branchId: req.user.branch_id,
+      items,
+      payment_method: payment_method || 'cash',
+      customer_name,
+      customer_phone,
+      shift_id: shift?._id,
+      amount_tendered,
+    });
+    res.status(201).json({ success: true, data: { ...result.order.toJSON(), amount_tendered: result.amount_tendered, change: result.change } });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message || 'Sale failed.' });
   }
-  await logPayment({ tenant_id: req.tenant_id, source: 'pos', reference: orderNumber, amount: subtotal, method: payment_method || 'cash', status: 'success', payer_name: customer_name || 'Walk-in Customer', description: `POS sale ${orderNumber}`, source_id: order._id, recorded_by: req.user._id });
-  await accounting.postSaleEntry({ tenantId: req.tenant_id, amount: subtotal, cogsAmount: 0, reference: orderNumber, date: new Date(), sourceId: order._id, createdBy: req.user._id }).catch(err => console.error('[POS] GL posting failed:', err.message));
-  res.status(201).json({ success: true, data: { ...order.toJSON(), amount_tendered, change: (amount_tendered || subtotal) - subtotal } });
 });
 
-router.get('/pos/products', authenticate, requireTenant, async (req, res) => {
+router.post('/pos/paystack/init', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.initPaystackPayment);
+router.post('/pos/paystack/verify', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.verifyPaystackPayment);
+router.post('/pos/shifts/open', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.openShift);
+router.get('/pos/shifts/current', authenticate, requireTenant, requireFeature('pos'), pos.getCurrentShift);
+router.post('/pos/shifts/close', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.closeShift);
+router.get('/pos/shifts/:id/z-report', authenticate, requireTenant, requireFeature('pos'), pos.getZReport);
+
+router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
+  const { order_number, items, reason } = req.body;
+  if (!order_number) return res.status(400).json({ success: false, message: 'order_number required.' });
+
+  const order = await Order.findOne({ tenant_id: req.tenant_id, order_number, source: 'pos', payment_status: 'paid' });
+  if (!order) return res.status(404).json({ success: false, message: 'POS sale not found or already refunded.' });
+
+  const refundLines = items?.length
+    ? items
+    : order.items.map((i) => ({ product_id: String(i.product_id), quantity: i.quantity - (i.refunded_qty || 0) })).filter((i) => i.quantity > 0);
+
+  if (!refundLines.length) return res.status(400).json({ success: false, message: 'Nothing left to refund on this sale.' });
+
+  let refundSubtotal = 0;
+  let refundCogs = 0;
+  const refundedItems = [];
+
+  for (const line of refundLines) {
+    const orderItem = order.items.find((i) => String(i.product_id) === String(line.product_id));
+    if (!orderItem) return res.status(400).json({ success: false, message: `Product not on original sale.` });
+    const remaining = orderItem.quantity - (orderItem.refunded_qty || 0);
+    const qty = Math.min(parseInt(line.quantity, 10) || 0, remaining);
+    if (qty <= 0) continue;
+
+    const p = await Product.findOne({ _id: orderItem.product_id, tenant_id: req.tenant_id });
+    if (!p) return res.status(400).json({ success: false, message: 'Product not found.' });
+
+    const lineTotal = orderItem.unit_price * qty;
+    const lineCogs = (p.cost_price || 0) * qty;
+    refundSubtotal += lineTotal;
+    refundCogs += lineCogs;
+    orderItem.refunded_qty = (orderItem.refunded_qty || 0) + qty;
+    refundedItems.push({ product_id: p._id, product_name: orderItem.product_name, quantity: qty, amount: lineTotal });
+
+    await Product.findByIdAndUpdate(p._id, { $inc: { stock_qty: qty } });
+    await StockMovement.create({
+      tenant_id: req.tenant_id,
+      product_id: p._id,
+      type: 'return',
+      quantity: qty,
+      reference: `REF-${order.order_number}`,
+      notes: reason || 'POS refund',
+      created_by: req.user._id,
+    });
+  }
+
+  if (!refundedItems.length) return res.status(400).json({ success: false, message: 'Invalid refund quantities.' });
+
+  order.refund_amount = (order.refund_amount || 0) + refundSubtotal;
+  const fullyRefunded = order.items.every((i) => (i.refunded_qty || 0) >= i.quantity);
+  if (fullyRefunded) order.payment_status = 'refunded';
+  order.markModified('items');
+  await order.save();
+
+  const refundRef = `REF-${order.order_number}-${Date.now()}`;
+  await logPayment({
+    tenant_id: req.tenant_id,
+    source: 'pos',
+    reference: refundRef,
+    amount: -refundSubtotal,
+    method: order.payment_method || 'cash',
+    status: 'success',
+    payer_name: order.customer_name,
+    description: `POS refund for ${order.order_number}${reason ? `: ${reason}` : ''}`,
+    source_id: order._id,
+    recorded_by: req.user._id,
+  });
+
+  await accounting.postSaleReturnEntry({
+    tenantId: req.tenant_id,
+    amount: refundSubtotal,
+    cogsAmount: refundCogs,
+    taxAmount: 0,
+    reference: refundRef,
+    date: new Date(),
+    sourceId: order._id,
+    createdBy: req.user._id,
+  }).catch((err) => console.error('[POS] Refund GL failed:', err.message));
+
+  await recordShiftRefund(order.shift_id, refundSubtotal, order.payment_method);
+
+  res.json({
+    success: true,
+    message: fullyRefunded ? 'Sale fully refunded.' : 'Partial refund processed.',
+    data: { order_number: order.order_number, refund_amount: refundSubtotal, refunded_items: refundedItems, payment_status: order.payment_status },
+  });
+});
+
+router.get('/pos/products', authenticate, requireTenant, requireFeature('pos'), async (req, res) => {
   const { search, category } = req.query;
   const filter = { tenant_id: req.tenant_id, is_active: true };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
@@ -320,19 +423,67 @@ router.get('/storefront/:tenantSlug/branches', async (req, res) => {
 });
 
 router.get('/storefront/products', orders.getStorefrontProducts);
+router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
+router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
+router.get('/storefront/resolve-domain', storefront.resolveDomain);
+router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
+router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
+router.get('/storefront/customer/me', authenticateStoreCustomer, storeCustomer.getMe);
+router.get('/storefront/customer/orders', authenticateStoreCustomer, storeCustomer.getMyOrders);
+router.post('/storefront/coupons/validate', async (req, res) => {
+  const { code, subtotal, tenant_id, tenant_slug } = req.body;
+  if (!code) return res.status(400).json({ success: false, message: 'code required.' });
+  let tid = tenant_id;
+  if (!tid && tenant_slug) {
+    const { Tenant } = require('../models');
+    const t = await Tenant.findOne({ slug: tenant_slug, is_active: true });
+    if (!t) return res.status(404).json({ success: false, message: 'Store not found.' });
+    tid = t._id;
+  }
+  if (!tid) return res.status(400).json({ success: false, message: 'tenant_id or tenant_slug required.' });
+  const result = await validateCoupon({ tenantId: tid, code, subtotal: parseFloat(subtotal) || 0 });
+  if (!result.valid) return res.status(400).json({ success: false, message: result.message });
+  res.json({ success: true, data: { code: result.code, discount: result.discount, discount_type: result.discount_type, discount_value: result.discount_value } });
+});
+
+router.get('/coupons', authenticate, requireTenant, requireFeature('storefront'), async (req, res) => {
+  const data = await Coupon.find({ tenant_id: req.tenant_id }).sort({ createdAt: -1 });
+  res.json({ success: true, data });
+});
+router.post('/coupons', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  const { code, discount_type, discount_value, min_order_amount, max_uses, expires_at } = req.body;
+  if (!code || discount_value === undefined) return res.status(400).json({ success: false, message: 'code and discount_value required.' });
+  const data = await Coupon.create({
+    tenant_id: req.tenant_id,
+    code: String(code).toUpperCase().trim(),
+    discount_type: discount_type || 'percent',
+    discount_value: parseFloat(discount_value),
+    min_order_amount: parseFloat(min_order_amount) || 0,
+    max_uses: parseInt(max_uses, 10) || 0,
+    expires_at: expires_at ? new Date(expires_at) : null,
+  });
+  res.status(201).json({ success: true, data });
+});
+router.delete('/coupons/:id', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  await Coupon.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
+  res.json({ success: true, message: 'Coupon deleted.' });
+});
+
+router.get('/storefront/:tenantSlug/settings', storefront.getPublicSettings);
+router.get('/storefront/:tenantSlug/orders/:reference', storefront.trackOrder);
 router.get('/storefront/categories', async (req, res) => {
-  const { Category } = require('../models');
-  const data = await Category.find().sort('name');
+  const { Category, Tenant } = require('../models');
+  const filter = {};
+  if (req.query.tenant_slug) {
+    const t = await Tenant.findOne({ slug: req.query.tenant_slug });
+    if (t) filter.tenant_id = t._id;
+  }
+  const data = await Category.find(filter).sort('name');
   res.json({ success: true, data });
 });
 router.post('/storefront/checkout', orders.initiateCheckout);
 router.post('/storefront/verify-payment', orders.verifyPayment);
-router.get('/storefront/orders/:orderNumber', async (req, res) => {
-  const order = await Order.findOne({ order_number: req.params.orderNumber, source: 'storefront' })
-    .select('order_number status payment_status customer_name delivery_address items total createdAt branch_id');
-  if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
-  res.json({ success: true, data: order });
-});
+router.get('/storefront/orders/:orderNumber', storefront.trackOrderLegacy);
 
 // STOREFRONT CART
 const { Cart } = require('../models');
@@ -403,7 +554,7 @@ router.delete('/storefront/cart/:cartId', async (req, res) => {
 });
 
 // PAYMENT LOGS
-router.get('/payment-logs', authenticate, requireTenant, async (req, res) => {
+router.get('/payment-logs', authenticate, requireTenant, requireFeature('accounting'), async (req, res) => {
   const { source, status, from, to, page = 1, limit = 50 } = req.query;
   const filter = { tenant_id: req.tenant_id };
   if (source) filter.source = source;
@@ -513,7 +664,7 @@ router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, authorize(
   po.payments.push({ amount: paying, method, reference: reference || null, note: note || null, date: new Date() });
   await po.save();
 
-  await logPayment({ tenant_id: req.tenant_id, source: 'purchase_order', reference: po.po_number, amount: paying, method, status: 'success', description: `Supplier payment — ${po.po_number}${reference ? ' ref: ' + reference : ''}`, source_id: po._id, recorded_by: req.user._id });
+  await logPayment({ tenant_id: req.tenant_id, source: 'purchase_order', reference: po.po_number, amount: paying, method, status: 'success', description: `Supplier payment â€” ${po.po_number}${reference ? ' ref: ' + reference : ''}`, source_id: po._id, recorded_by: req.user._id });
 
   // Post GL: Dr Accounts Payable / Cr Cash & Bank (for the amount actually paid)
   await accounting.postPurchasePaymentEntry({ tenantId: req.tenant_id, amount: paying, reference: `${po.po_number}-${Date.now()}`, date: new Date(), sourceId: po._id, createdBy: req.user._id }).catch(() => {});
@@ -743,7 +894,7 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
   if (data) {
     const emp = await Employee.findById(data.employee_id).select('name');
     const ref = `${emp?.name || data.employee_id}-${data.month}-${data.year}`;
-    await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${ref}`, amount: data.net_salary, method: 'bank_transfer', status: 'success', payer_name: emp?.name, description: `Payroll approved for ${emp?.name || data.employee_id} — ${data.month}/${data.year}`, source_id: data._id, recorded_by: req.user._id });
+    await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${ref}`, amount: data.net_salary, method: 'bank_transfer', status: 'success', payer_name: emp?.name, description: `Payroll approved for ${emp?.name || data.employee_id} â€” ${data.month}/${data.year}`, source_id: data._id, recorded_by: req.user._id });
     await accounting.postPayrollEntry({ tenantId: req.tenant_id, amount: data.net_salary, reference: ref, date: new Date(), sourceId: data._id, createdBy: req.user._id }).catch(() => {});
   }
   res.json({ success: true, data });
@@ -796,136 +947,14 @@ router.post('/contact-history', authenticate, requireTenant, authorize('business
   res.status(201).json({ success: true, data });
 });
 
-// REPORTS
-router.get('/reports/sales', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const match = { tenant_id: tid, payment_status: 'paid' };
-  if (req.query.from || req.query.to) {
-    match.createdAt = {};
-    if (req.query.from) match.createdAt.$gte = new Date(req.query.from);
-    if (req.query.to)   match.createdAt.$lte = new Date(req.query.to);
-  }
-  const [summary, monthly, topProducts, byStatus] = await Promise.all([
-    Order.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 }, avg: { $avg: '$total' } } }]),
-    Order.aggregate([
-      { $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000) } } },
-      { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-      { $project: { month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
-    ]),
-    Order.aggregate([
-      { $match: match }, { $unwind: '$items' },
-      { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
-      { $sort: { revenue: -1 } }, { $limit: 6 },
-    ]),
-    Order.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-  ]);
-  const by_status = {};
-  byStatus.forEach(r => { by_status[r._id] = r.count; });
-  const s = summary[0] || {};
-  res.json({ success: true, data: { total_revenue: s.total || 0, total_orders: s.count || 0, avg_order_value: s.avg || 0, paid_orders: s.count || 0, monthly, top_products: topProducts, by_status } });
-});
 
-router.get('/reports/inventory', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const [products, valueAgg, lowStock, byCat] = await Promise.all([
-    Product.find({ tenant_id: tid, is_active: true }),
-    Product.aggregate([{ $match: { tenant_id: tid, is_active: true } }, { $group: { _id: null, total: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
-    Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10),
-    Product.aggregate([
-      { $match: { tenant_id: tid, is_active: true } },
-      { $lookup: { from: 'categories', localField: 'category_id', foreignField: '_id', as: 'cat' } },
-      { $group: { _id: { $arrayElemAt: ['$cat.name', 0] }, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } },
-      { $sort: { value: -1 } },
-    ]),
-  ]);
-  res.json({ success: true, data: {
-    total_products: products.length,
-    out_of_stock: products.filter(p => p.stock_qty === 0).length,
-    low_stock_count: products.filter(p => p.stock_qty <= p.low_stock_threshold && p.stock_qty > 0).length,
-    total_value: valueAgg[0]?.total || 0,
-    low_stock: lowStock,
-    by_category: byCat.map(c => ({ category: c._id, value: c.value })),
-  }});
-});
+// REPORTS — advanced analytics (routes/reports.js)
+router.use(reportsRouter);
 
-router.get('/reports/finance', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const [rev, exp, bycat] = await Promise.all([
-    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-    Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-    Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, total: { $sum: '$amount' } } }, { $sort: { total: -1 } }]),
-  ]);
-  res.json({ success: true, data: { revenue: rev[0]?.total || 0, total_expenses: exp[0]?.total || 0, expenses_by_category: bycat.map(c => ({ category: c._id, total: c.total })) } });
-});
 
-router.get('/reports/hr', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const now = new Date();
-  const today = new Date(); today.setHours(0,0,0,0);
-  const [employees, payroll, byDept, onLeave] = await Promise.all([
-    Employee.find({ tenant_id: tid }),
-    PayrollRun.aggregate([{ $match: { tenant_id: tid, month: now.getMonth() + 1, year: now.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
-    Employee.aggregate([
-      { $match: { tenant_id: tid, status: 'active' } },
-      { $lookup: { from: 'departments', localField: 'department_id', foreignField: '_id', as: 'dept' } },
-      { $group: { _id: { $arrayElemAt: ['$dept.name', 0] }, count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]),
-    LeaveRequest.countDocuments({ tenant_id: tid, status: 'approved', start_date: { $lte: today }, end_date: { $gte: today } }),
-  ]);
-  res.json({ success: true, data: {
-    total_employees: employees.length,
-    active: employees.filter(e => e.status === 'active').length,
-    on_leave: onLeave,
-    monthly_payroll: payroll[0]?.total || 0,
-    by_department: byDept.map(d => ({ department: d._id, count: d.count })),
-  }});
-});
-
-router.get('/reports/procurement', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const [pos, spend, bySupplier, recent] = await Promise.all([
-    PurchaseOrder.find({ tenant_id: tid }),
-    PurchaseOrder.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
-    PurchaseOrder.aggregate([
-      { $match: { tenant_id: tid } },
-      { $lookup: { from: 'suppliers', localField: 'supplier_id', foreignField: '_id', as: 'sup' } },
-      { $group: { _id: { $arrayElemAt: ['$sup.name', 0] }, total: { $sum: '$total_cost' } } },
-      { $sort: { total: -1 } }, { $limit: 8 },
-    ]),
-    PurchaseOrder.find({ tenant_id: tid }).populate('supplier_id', 'name').sort({ createdAt: -1 }).limit(10),
-  ]);
-  res.json({ success: true, data: {
-    total_pos: pos.length,
-    completed_pos: pos.filter(p => p.status === 'completed').length,
-    pending_delivery: pos.filter(p => ['approved', 'sent', 'partially_received'].includes(p.status)).length,
-    total_spend: spend[0]?.total || 0,
-    by_supplier: bySupplier.map(s => ({ supplier: s._id, total: s.total })),
-    recent_pos: recent,
-  }});
-});
-
-router.get('/reports/crm', authenticate, requireTenant, async (req, res) => {
-  const tid = req.tenant_id;
-  const [customers, leads, byStage, topCust] = await Promise.all([
-    Customer.countDocuments({ tenant_id: tid }),
-    Lead.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, active: { $sum: { $cond: [{ $not: [{ $in: ['$stage', ['won', 'lost']] }] }, 1, 0] } }, won: { $sum: { $cond: [{ $eq: ['$stage', 'won'] }, 1, 0] } }, pipeline: { $sum: { $cond: [{ $not: [{ $in: ['$stage', ['won', 'lost']] }] }, '$value', 0] } } } }]),
-    Lead.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: '$stage', count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
-    Customer.aggregate([
-      { $match: { tenant_id: tid } },
-      { $lookup: { from: 'orders', localField: '_id', foreignField: 'customer_id', as: 'orders' } },
-      { $addFields: { order_count: { $size: '$orders' } } },
-      { $sort: { order_count: -1 } }, { $limit: 10 }, { $project: { orders: 0 } },
-    ]),
-  ]);
-  const l = leads[0] || {};
-  res.json({ success: true, data: { total_customers: customers, active_leads: l.active || 0, won_leads: l.won || 0, pipeline_value: l.pipeline || 0, by_stage: byStage.map(s => ({ stage: s._id, count: s.count })), top_customers: topCust } });
-});
-
-// ── ACCOUNTING MODULE ────────────────────────────────────────────────────────
+// â”€â”€ ACCOUNTING MODULE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // All accounting routes live in routes/accounting.js
-// This is the standalone boundary — this router can be extracted independently
+// This is the standalone boundary â€” this router can be extracted independently
 router.use('/', accountingRouter);
 
 // STORAGE LOCATIONS

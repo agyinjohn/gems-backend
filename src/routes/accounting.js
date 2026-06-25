@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate, authorize, requireTenant } = require('../middleware/auth');
+const { requireFeature } = require('../middleware/featureFlags');
 const accounting = require('../services/accountingService');
 const {
   Account, Expense, JournalEntry, TaxRate, Budget,
@@ -8,9 +9,149 @@ const {
   Invoice, CreditNote, AccountingPeriod,
 } = require('../models');
 
+router.use(requireFeature('accounting'));
+
+const CATEGORY_ACCOUNT_CODES = {
+  office: '5200',
+  rent: '5300',
+  utilities: '5300',
+  marketing: '5400',
+  salaries: '5100',
+  payroll: '5100',
+  cogs: '5001',
+  'bank charges': '5600',
+  depreciation: '5500',
+};
+
+async function resolveExpenseAccountCode(tenantId, accountId, category) {
+  if (accountId) {
+    const acc = await Account.findOne({ _id: accountId, tenant_id: tenantId, is_active: true, is_group: false });
+    if (acc) return acc.code;
+  }
+  const key = String(category || '').trim().toLowerCase();
+  return CATEGORY_ACCOUNT_CODES[key] || '5900';
+}
+
+async function voidExpenseJournalEntry(expense, voidedBy, reason) {
+  if (expense.journal_entry_id) {
+    await accounting.voidJournalEntry(expense.journal_entry_id, expense.tenant_id, voidedBy, reason).catch(() => {});
+    return;
+  }
+  const entry = await JournalEntry.findOne({
+    tenant_id: expense.tenant_id,
+    source: 'expense',
+    source_id: expense._id,
+    status: 'posted',
+  });
+  if (entry) await accounting.voidJournalEntry(entry._id, expense.tenant_id, voidedBy, reason).catch(() => {});
+}
+
+async function postExpenseToGl(expense, createdBy) {
+  const accountCode = await resolveExpenseAccountCode(expense.tenant_id, expense.account_id, expense.category);
+  const ref = `${String(expense._id)}-${Date.now()}`;
+  const entry = await accounting.postExpenseEntry({
+    tenantId: expense.tenant_id,
+    amount: expense.amount,
+    accountCode,
+    reference: ref,
+    date: expense.expense_date || new Date(),
+    sourceId: expense._id,
+    createdBy,
+  });
+  expense.journal_entry_id = entry._id;
+  await expense.save();
+  return entry;
+}
+
+async function cashAccountBalance(tid, asOfDate, before = false) {
+  const cashAcc = await Account.findOne({ tenant_id: tid, code: '1001' });
+  if (!cashAcc) return 0;
+  const dateFilter = asOfDate ? (before ? { $lt: new Date(asOfDate) } : { $lte: new Date(asOfDate) }) : null;
+  const match = { tenant_id: tid, status: { $ne: 'voided' } };
+  if (dateFilter) match.entry_date = dateFilter;
+  const agg = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $match: { 'lines.account_id': cashAcc._id } },
+    { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
+  ]);
+  return agg[0]?.balance || 0;
+}
+
+async function glAccountActivity(tid, codes, from, to, direction = 'debit') {
+  const accounts = await Account.find({ tenant_id: tid, code: { $in: codes } });
+  if (!accounts.length) return { items: [], net: 0 };
+  const ids = accounts.map((a) => a._id);
+  const match = { tenant_id: tid, status: { $ne: 'voided' } };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) match.entry_date.$lte = new Date(to);
+  }
+  const rows = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $match: { 'lines.account_id': { $in: ids } } },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $group: { _id: '$acc.code', name: { $first: '$acc.name' }, debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+  ]);
+  const items = rows.map((r) => {
+    const amount = direction === 'debit' ? r.debit - r.credit : r.credit - r.debit;
+    return { label: r.name, code: r._id, amount };
+  }).filter((i) => Math.abs(i.amount) > 0.001);
+  const net = items.reduce((s, i) => s + i.amount, 0);
+  return { items, net };
+}
+
+async function buildGlPl(tid, from, to) {
+  const match = { tenant_id: tid, status: { $ne: 'voided' } };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) match.entry_date.$lte = new Date(to);
+  }
+  const rows = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $match: { 'acc.type': { $in: ['revenue', 'expense'] }, 'acc.is_group': { $ne: true } } },
+    { $group: { _id: { type: '$acc.type', code: '$acc.code', name: '$acc.name' }, debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+  ]);
+
+  let revenue = 0;
+  let cogs = 0;
+  const expensesByCategory = [];
+
+  for (const row of rows) {
+    if (row._id.type === 'revenue') {
+      revenue += row.credit - row.debit;
+    } else if (row._id.code === '5001') {
+      cogs += row.debit - row.credit;
+    } else {
+      const amt = row.debit - row.credit;
+      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: amt });
+    }
+  }
+
+  const operatingExpenses = expensesByCategory.reduce((s, e) => s + e.total, 0);
+  const totalExpenses = operatingExpenses + cogs;
+  return {
+    source: 'gl',
+    revenue,
+    cogs,
+    gross_profit: revenue - cogs,
+    total_expenses: totalExpenses,
+    net_profit: revenue - totalExpenses,
+    expenses_by_category: expensesByCategory.sort((a, b) => b.total - a.total),
+    monthly: [],
+  };
+}
+
 // ACCOUNTING
 // Trial Balance — GL-derived source of truth
-router.get('/accounting/trial-balance', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/trial-balance', async (req, res) => {
   const tid = req.tenant_id;
   const asOf = req.query.asOf ? new Date(req.query.asOf) : new Date();
   const [accounts, jeBalances] = await Promise.all([
@@ -33,7 +174,7 @@ router.get('/accounting/trial-balance', authenticate, requireTenant, async (req,
   res.json({ success: true, data: { as_of: asOf, accounts: rows, totals } });
 });
 
-router.get('/accounts', authenticate, requireTenant, async (req, res) => {
+router.get('/accounts', async (req, res) => {
   const tid = req.tenant_id;
   const [accounts, jeBalances] = await Promise.all([
     Account.find({ tenant_id: tid, is_active: true }).sort('code'),
@@ -47,7 +188,7 @@ router.get('/accounts', authenticate, requireTenant, async (req, res) => {
   const data = accounts.map(a => ({ ...a.toJSON(), balance: jeMap[String(a._id)] || 0 }));
   res.json({ success: true, data });
 });
-router.post('/accounts', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/accounts', authorize('business_owner', 'accountant'), async (req, res) => {
   const { code, name, type, description } = req.body;
   if (!code || !name || !type) return res.status(400).json({ success: false, message: 'code, name and type required.' });
   const exists = await Account.findOne({ tenant_id: req.tenant_id, code });
@@ -55,7 +196,7 @@ router.post('/accounts', authenticate, requireTenant, authorize('business_owner'
   const data = await Account.create({ tenant_id: req.tenant_id, code, name, type, description });
   res.status(201).json({ success: true, data });
 });
-router.put('/accounts/:id', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.put('/accounts/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   const { name, type, description } = req.body;
   // Note: balance is NOT stored on the Account document — it is computed live
   // from journal entry lines. To change a balance, post a journal entry instead.
@@ -67,33 +208,49 @@ router.put('/accounts/:id', authenticate, requireTenant, authorize('business_own
   if (!data) return res.status(404).json({ success: false, message: 'Account not found.' });
   res.json({ success: true, data });
 });
-router.get('/expenses', authenticate, requireTenant, async (req, res) => {
+router.get('/expenses', async (req, res) => {
   const data = await Expense.find({ tenant_id: req.tenant_id }).populate('created_by', 'name').sort({ expense_date: -1 });
   res.json({ success: true, data });
 });
-router.post('/expenses', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/expenses', authorize('business_owner', 'accountant'), async (req, res) => {
   const { title, category, amount, account_id, description, expense_date, receipt } = req.body;
   if (!title || !amount) return res.status(400).json({ success: false, message: 'title and amount required.' });
   const data = await Expense.create({ tenant_id: req.tenant_id, title, category, amount, account_id: account_id || null, description, expense_date: expense_date || Date.now(), receipt: receipt || null, created_by: req.user._id });
+  try {
+    await postExpenseToGl(data, req.user._id);
+  } catch (err) {
+    await Expense.findByIdAndDelete(data._id);
+    return res.status(400).json({ success: false, message: err.message || 'Failed to post expense to ledger.' });
+  }
   res.status(201).json({ success: true, data });
 });
-router.put('/expenses/:id', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.put('/expenses/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   const { title, category, amount, account_id, description, expense_date, receipt } = req.body;
+  const existing = await Expense.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!existing) return res.status(404).json({ success: false, message: 'Expense not found.' });
   const update = { title, category, amount, account_id: account_id || null, description, expense_date };
   if (receipt !== undefined) update.receipt = receipt || null;
+  await voidExpenseJournalEntry(existing, req.user._id, 'Expense updated');
   const data = await Expense.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
-  if (!data) return res.status(404).json({ success: false, message: 'Expense not found.' });
+  try {
+    await postExpenseToGl(data, req.user._id);
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message || 'Expense saved but ledger posting failed.' });
+  }
   res.json({ success: true, data });
 });
-router.delete('/expenses/:id', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.delete('/expenses/:id', authorize('business_owner', 'accountant'), async (req, res) => {
+  const existing = await Expense.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!existing) return res.status(404).json({ success: false, message: 'Expense not found.' });
+  await voidExpenseJournalEntry(existing, req.user._id, 'Expense deleted');
   await Expense.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
   res.json({ success: true, message: 'Deleted.' });
 });
-router.get('/journal-entries', authenticate, requireTenant, async (req, res) => {
+router.get('/journal-entries', async (req, res) => {
   const data = await JournalEntry.find({ tenant_id: req.tenant_id }).sort({ entry_date: -1 }).limit(100);
   res.json({ success: true, data });
 });
-router.post('/journal-entries', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/journal-entries', authorize('business_owner', 'accountant'), async (req, res) => {
   const { description, entry_date, lines } = req.body;
   if (!description || !lines?.length) return res.status(400).json({ success: false, message: 'description and lines required.' });
   const total_debit  = lines.reduce((s, l) => s + (parseFloat(l.debit)  || 0), 0);
@@ -105,49 +262,44 @@ router.post('/journal-entries', authenticate, requireTenant, authorize('business
   res.status(201).json({ success: true, data });
 });
 
-router.post('/journal-entries/:id/void', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/journal-entries/:id/void', authorize('business_owner', 'accountant'), async (req, res) => {
   const reversal = await accounting.voidJournalEntry(req.params.id, req.tenant_id, req.user._id, req.body.reason);
   res.json({ success: true, data: reversal });
 });
-router.get('/accounting/cashflow', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/cashflow', async (req, res) => {
   const tid = req.tenant_id;
+  const { from, to } = req.query;
   const match = { tenant_id: tid };
   const expMatch = { tenant_id: tid };
   const poMatch = { tenant_id: tid, payment_status: 'paid' };
   const payrollMatch = { tenant_id: tid, status: 'approved' };
-  if (req.query.from || req.query.to) {
+  if (from || to) {
     match.createdAt = {}; expMatch.expense_date = {}; poMatch.paid_at = {}; payrollMatch.createdAt = {};
-    if (req.query.from) {
-      const f = new Date(req.query.from);
+    if (from) {
+      const f = new Date(from);
       match.createdAt.$gte = f; expMatch.expense_date.$gte = f; poMatch.paid_at.$gte = f; payrollMatch.createdAt.$gte = f;
     }
-    if (req.query.to) {
-      const t = new Date(req.query.to);
+    if (to) {
+      const t = new Date(to);
       match.createdAt.$lte = t; expMatch.expense_date.$lte = t; poMatch.paid_at.$lte = t; payrollMatch.createdAt.$lte = t;
     }
   }
-  const [salesAgg, expAgg, poAgg, payrollAgg, cashAccount, jeBalances] = await Promise.all([
+  const [salesAgg, expAgg, poAgg, payrollAgg, openingBalance, closingBalance, investing, financing] = await Promise.all([
     Order.aggregate([{ $match: { ...match, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
     Expense.aggregate([{ $match: expMatch }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     PurchaseOrder.aggregate([{ $match: poMatch }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
     PayrollRun.aggregate([{ $match: payrollMatch }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
-    Account.findOne({ tenant_id: tid, code: '1001' }),
-    JournalEntry.aggregate([
-      { $match: { tenant_id: tid } },
-      { $unwind: '$lines' },
-      { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
-      { $unwind: '$acc' },
-      { $match: { 'acc.code': '1001' } },
-      { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
-    ]),
+    cashAccountBalance(tid, from || null, true),
+    cashAccountBalance(tid, to || new Date(), false),
+    glAccountActivity(tid, ['1210'], from, to, 'debit'),
+    glAccountActivity(tid, ['3001', '2210'], from, to, 'credit'),
   ]);
   const cashFromSales     =  salesAgg[0]?.total   || 0;
   const cashPaidExpenses  = -(expAgg[0]?.total     || 0);
   const cashPaidSuppliers = -(poAgg[0]?.total      || 0);
   const cashPaidPayroll   = -(payrollAgg[0]?.total || 0);
   const operatingNet = cashFromSales + cashPaidExpenses + cashPaidSuppliers + cashPaidPayroll;
-  const openingBalance = 0; // simplified — would need prior period balance in a full system
-  const closingBalance = jeBalances[0]?.balance || operatingNet;
+  const netChange = closingBalance - openingBalance;
   res.json({ success: true, data: {
     operating: {
       cash_from_sales:     cashFromSales,
@@ -156,15 +308,15 @@ router.get('/accounting/cashflow', authenticate, requireTenant, async (req, res)
       cash_paid_payroll:   cashPaidPayroll,
       net: operatingNet,
     },
-    investing:  { items: [], net: 0 },
-    financing:  { items: [], net: 0 },
+    investing,
+    financing,
     opening_balance: openingBalance,
-    net_change:      operatingNet,
+    net_change:      netChange,
     closing_balance: closingBalance,
   }});
 });
 
-router.get('/accounting/balance-sheet', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/balance-sheet', async (req, res) => {
   const tid = req.tenant_id;
   // Derive everything from the GL — no raw collection queries
   const jeBalances = await JournalEntry.aggregate([
@@ -251,7 +403,7 @@ router.get('/accounting/balance-sheet', authenticate, requireTenant, async (req,
   }});
 });
 
-router.get('/accounting/vat-return', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/vat-return', async (req, res) => {
   const tid = req.tenant_id;
   const match = { tenant_id: tid, status: { $ne: 'voided' } };
   if (req.query.from || req.query.to) {
@@ -284,14 +436,21 @@ router.get('/accounting/vat-return', authenticate, requireTenant, async (req, re
   }});
 });
 
-router.get('/accounting/pl', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/pl', async (req, res) => {
   const tid = req.tenant_id;
+  const { from, to, source } = req.query;
+
+  if (source === 'gl') {
+    const data = await buildGlPl(tid, from, to);
+    return res.json({ success: true, data });
+  }
+
   const match = { tenant_id: tid, payment_status: 'paid' };
   const expMatch = { tenant_id: tid };
-  if (req.query.from || req.query.to) {
+  if (from || to) {
     match.createdAt = {}; expMatch.expense_date = {};
-    if (req.query.from) { match.createdAt.$gte = new Date(req.query.from); expMatch.expense_date.$gte = new Date(req.query.from); }
-    if (req.query.to)   { match.createdAt.$lte = new Date(req.query.to);   expMatch.expense_date.$lte = new Date(req.query.to); }
+    if (from) { match.createdAt.$gte = new Date(from); expMatch.expense_date.$gte = new Date(from); }
+    if (to)   { match.createdAt.$lte = new Date(to);   expMatch.expense_date.$lte = new Date(to); }
   }
   const [rev, cogs, expByCategory, monthly] = await Promise.all([
     Order.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
@@ -307,12 +466,13 @@ router.get('/accounting/pl', authenticate, requireTenant, async (req, res) => {
   const revenue = rev[0]?.total || 0;
   const totalExpenses = expByCategory.reduce((s, e) => s + e.total, 0);
   res.json({ success: true, data: {
+    source: 'orders',
     revenue, gross_profit: revenue - (cogs[0]?.cogs || 0), total_expenses: totalExpenses, net_profit: revenue - totalExpenses,
     expenses_by_category: expByCategory.map(e => ({ category: e._id, total: e.total })), monthly,
   }});
 });
 
-router.get('/accounting/summary', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/summary', async (req, res) => {
   const tid = req.tenant_id;
   const now = new Date();
   const yearStart = new Date(now.getFullYear(), 0, 1);
@@ -339,7 +499,7 @@ router.get('/accounting/summary', authenticate, requireTenant, async (req, res) 
   }});
 });
 
-router.get('/accounting/gl/:accountId', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/gl/:accountId', async (req, res) => {
   const account = await Account.findOne({ _id: req.params.accountId, tenant_id: req.tenant_id });
   if (!account) return res.status(404).json({ success: false, message: 'Account not found.' });
   const entries = await JournalEntry.find({ tenant_id: req.tenant_id, 'lines.account_id': account._id }).sort({ entry_date: -1 }).limit(100);
@@ -356,7 +516,7 @@ router.get('/accounting/gl/:accountId', authenticate, requireTenant, async (req,
   res.json({ success: true, data: { account, lines: lines.reverse() } });
 });
 
-router.post('/accounting/reconcile', authenticate, requireTenant, async (req, res) => {
+router.post('/accounting/reconcile', async (req, res) => {
   const { lines } = req.body;
   if (!Array.isArray(lines) || !lines.length) return res.status(400).json({ success: false, message: 'lines array required.' });
   const cashAccount = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
@@ -384,7 +544,7 @@ router.post('/accounting/reconcile', authenticate, requireTenant, async (req, re
 });
 
 // AP LEDGER — GL-derived accounts payable
-router.get('/accounting/ap-ledger', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/ap-ledger', async (req, res) => {
   const tid = req.tenant_id;
 
   const apAccount = await Account.findOne({ tenant_id: tid, code: '2001' });
@@ -454,7 +614,7 @@ router.get('/accounting/ap-ledger', authenticate, requireTenant, async (req, res
 });
 
 // BUDGETS
-router.get('/budgets', authenticate, requireTenant, async (req, res) => {
+router.get('/budgets', async (req, res) => {
   const { period, period_type } = req.query;
   const filter = { tenant_id: req.tenant_id };
   if (period) filter.period = period;
@@ -462,7 +622,7 @@ router.get('/budgets', authenticate, requireTenant, async (req, res) => {
   const data = await Budget.find(filter).sort('category');
   res.json({ success: true, data });
 });
-router.post('/budgets', authenticate, requireTenant, authorize('business_owner','accountant'), async (req, res) => {
+router.post('/budgets', authorize('business_owner','accountant'), async (req, res) => {
   const { category, period, period_type, amount } = req.body;
   if (!category || !period || !amount) return res.status(400).json({ success: false, message: 'category, period and amount required.' });
   const data = await Budget.findOneAndUpdate(
@@ -472,17 +632,17 @@ router.post('/budgets', authenticate, requireTenant, authorize('business_owner',
   );
   res.status(201).json({ success: true, data });
 });
-router.put('/budgets/:id', authenticate, requireTenant, authorize('business_owner','accountant'), async (req, res) => {
+router.put('/budgets/:id', authorize('business_owner','accountant'), async (req, res) => {
   const { amount } = req.body;
   const data = await Budget.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { amount }, { new: true });
   if (!data) return res.status(404).json({ success: false, message: 'Budget not found.' });
   res.json({ success: true, data });
 });
-router.delete('/budgets/:id', authenticate, requireTenant, authorize('business_owner','accountant'), async (req, res) => {
+router.delete('/budgets/:id', authorize('business_owner','accountant'), async (req, res) => {
   await Budget.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
   res.json({ success: true, message: 'Deleted.' });
 });
-router.get('/budgets/vs-actual', authenticate, requireTenant, async (req, res) => {
+router.get('/budgets/vs-actual', async (req, res) => {
   const tid = req.tenant_id;
   const { period, period_type = 'monthly' } = req.query;
   // Default period = current month (YYYY-MM) or year (YYYY)
@@ -531,23 +691,23 @@ router.get('/budgets/vs-actual', authenticate, requireTenant, async (req, res) =
 });
 
 // TAX RATES
-router.get('/tax-rates', authenticate, requireTenant, async (req, res) => {
+router.get('/tax-rates', async (req, res) => {
   const data = await TaxRate.find({ tenant_id: req.tenant_id }).sort('name');
   res.json({ success: true, data });
 });
-router.post('/tax-rates', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/tax-rates', authorize('business_owner', 'accountant'), async (req, res) => {
   const { name, rate, applies_to } = req.body;
   if (!name || rate === undefined) return res.status(400).json({ success: false, message: 'name and rate required.' });
   const data = await TaxRate.create({ tenant_id: req.tenant_id, name, rate, applies_to: applies_to || 'both' });
   res.status(201).json({ success: true, data });
 });
-router.put('/tax-rates/:id', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.put('/tax-rates/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   const { name, rate, applies_to, is_active } = req.body;
   const data = await TaxRate.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { name, rate, applies_to, is_active }, { new: true });
   if (!data) return res.status(404).json({ success: false, message: 'Tax rate not found.' });
   res.json({ success: true, data });
 });
-router.delete('/tax-rates/:id', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.delete('/tax-rates/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   await TaxRate.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
   res.json({ success: true, message: 'Deleted.' });
 });
@@ -556,7 +716,7 @@ router.delete('/tax-rates/:id', authenticate, requireTenant, authorize('business
 const invoiceNumber = (n) => `INV-${String(n).padStart(5, '0')}`;
 const creditNoteNumber = (n) => `CN-${String(n).padStart(5, '0')}`;
 
-router.get('/invoices', authenticate, requireTenant, async (req, res) => {
+router.get('/invoices', async (req, res) => {
   const { status, customer_id, from, to } = req.query;
   const filter = { tenant_id: req.tenant_id };
   if (status) {
@@ -578,13 +738,13 @@ router.get('/invoices', authenticate, requireTenant, async (req, res) => {
   res.json({ success: true, data });
 });
 
-router.get('/invoices/:id', authenticate, requireTenant, async (req, res) => {
+router.get('/invoices/:id', async (req, res) => {
   const data = await Invoice.findOne({ _id: req.params.id, tenant_id: req.tenant_id }).populate('customer_id', 'name email phone');
   if (!data) return res.status(404).json({ success: false, message: 'Invoice not found.' });
   res.json({ success: true, data });
 });
 
-router.post('/invoices', authenticate, requireTenant, authorize('business_owner', 'accountant', 'sales_staff'), async (req, res) => {
+router.post('/invoices', authorize('business_owner', 'accountant', 'sales_staff'), async (req, res) => {
   const { customer_id, customer_name, customer_email, issue_date, due_date, lines, notes, order_id } = req.body;
   if (!customer_name || !due_date || !lines?.length) return res.status(400).json({ success: false, message: 'customer_name, due_date and lines required.' });
 
@@ -616,7 +776,7 @@ router.post('/invoices', authenticate, requireTenant, authorize('business_owner'
   res.status(201).json({ success: true, data: inv });
 });
 
-router.patch('/invoices/:id/send', authenticate, requireTenant, authorize('business_owner', 'accountant', 'sales_staff'), async (req, res) => {
+router.patch('/invoices/:id/send', authorize('business_owner', 'accountant', 'sales_staff'), async (req, res) => {
   const inv = await Invoice.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found.' });
   if (inv.status !== 'draft') return res.status(400).json({ success: false, message: 'Only draft invoices can be sent.' });
@@ -631,7 +791,7 @@ router.patch('/invoices/:id/send', authenticate, requireTenant, authorize('busin
   res.json({ success: true, data: inv });
 });
 
-router.post('/invoices/:id/payments', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/invoices/:id/payments', authorize('business_owner', 'accountant'), async (req, res) => {
   const { amount, method, reference, note, date } = req.body;
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ success: false, message: 'amount required.' });
 
@@ -656,7 +816,7 @@ router.post('/invoices/:id/payments', authenticate, requireTenant, authorize('bu
   res.json({ success: true, data: inv });
 });
 
-router.patch('/invoices/:id/void', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.patch('/invoices/:id/void', authorize('business_owner', 'accountant'), async (req, res) => {
   const inv = await Invoice.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found.' });
   if (inv.status === 'paid') return res.status(400).json({ success: false, message: 'Cannot void a paid invoice. Issue a credit note instead.' });
@@ -666,12 +826,12 @@ router.patch('/invoices/:id/void', authenticate, requireTenant, authorize('busin
 });
 
 // CREDIT NOTES
-router.get('/credit-notes', authenticate, requireTenant, async (req, res) => {
+router.get('/credit-notes', async (req, res) => {
   const data = await CreditNote.find({ tenant_id: req.tenant_id }).populate('invoice_id', 'invoice_number').sort({ createdAt: -1 });
   res.json({ success: true, data });
 });
 
-router.post('/credit-notes', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/credit-notes', authorize('business_owner', 'accountant'), async (req, res) => {
   const { invoice_id, amount, reason } = req.body;
   if (!invoice_id || !amount || !reason) return res.status(400).json({ success: false, message: 'invoice_id, amount and reason required.' });
 
@@ -716,12 +876,12 @@ router.post('/credit-notes', authenticate, requireTenant, authorize('business_ow
 });
 
 // ACCOUNTING PERIODS
-router.get('/accounting/periods', authenticate, requireTenant, async (req, res) => {
+router.get('/accounting/periods', async (req, res) => {
   const data = await AccountingPeriod.find({ tenant_id: req.tenant_id }).sort({ start_date: -1 });
   res.json({ success: true, data });
 });
 
-router.post('/accounting/periods', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/accounting/periods', authorize('business_owner', 'accountant'), async (req, res) => {
   const { name, type, start_date, end_date } = req.body;
   if (!name || !start_date || !end_date) return res.status(400).json({ success: false, message: 'name, start_date and end_date required.' });
   // Prevent overlapping open periods
@@ -743,7 +903,7 @@ router.post('/accounting/periods', authenticate, requireTenant, authorize('busin
   res.status(201).json({ success: true, data });
 });
 
-router.patch('/accounting/periods/:id/close', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.patch('/accounting/periods/:id/close', authorize('business_owner', 'accountant'), async (req, res) => {
   const period = await AccountingPeriod.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!period) return res.status(404).json({ success: false, message: 'Period not found.' });
   if (period.status === 'closed') return res.status(400).json({ success: false, message: 'Period is already closed.' });
@@ -764,7 +924,7 @@ router.patch('/accounting/periods/:id/close', authenticate, requireTenant, autho
   res.json({ success: true, data: period });
 });
 
-router.patch('/accounting/periods/:id/reopen', authenticate, requireTenant, authorize('business_owner'), async (req, res) => {
+router.patch('/accounting/periods/:id/reopen', authorize('business_owner'), async (req, res) => {
   const period = await AccountingPeriod.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!period) return res.status(404).json({ success: false, message: 'Period not found.' });
   if (period.status === 'open') return res.status(400).json({ success: false, message: 'Period is already open.' });
@@ -776,7 +936,7 @@ router.patch('/accounting/periods/:id/reopen', authenticate, requireTenant, auth
 });
 
 // Year-end closing — zeros out revenue & expense accounts into Retained Earnings
-router.post('/accounting/periods/:id/year-end-close', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+router.post('/accounting/periods/:id/year-end-close', authorize('business_owner', 'accountant'), async (req, res) => {
   const period = await AccountingPeriod.findOne({ _id: req.params.id, tenant_id: req.tenant_id, type: 'year' });
   if (!period) return res.status(404).json({ success: false, message: 'Annual period not found.' });
   if (period.status !== 'closed') return res.status(400).json({ success: false, message: 'Period must be closed before year-end closing entries can be posted.' });
@@ -863,6 +1023,220 @@ router.use('/journal-entries', async (req, res, next) => {
   });
   if (closedPeriod) return res.status(400).json({ success: false, message: `Cannot post to closed period: ${closedPeriod.name}` });
   next();
+});
+
+// Manual CSV/JSON import for standalone accounting deployments
+router.post('/accounting/import', authorize('business_owner', 'accountant'), async (req, res) => {
+  const { type, rows } = req.body;
+  if (!type || !Array.isArray(rows) || !rows.length) {
+    return res.status(400).json({ success: false, message: 'type and rows[] required.' });
+  }
+
+  if (type === 'expenses') {
+    let imported = 0;
+    const errors = [];
+    for (const row of rows) {
+      try {
+        const title = row.title || row.name;
+        const amount = parseFloat(row.amount);
+        if (!title || !amount) continue;
+        const expense = await Expense.create({
+          tenant_id: req.tenant_id,
+          title: String(title).trim(),
+          category: row.category ? String(row.category).trim() : '',
+          amount,
+          description: row.description || '',
+          expense_date: row.expense_date ? new Date(row.expense_date) : new Date(),
+          created_by: req.user._id,
+        });
+        await postExpenseToGl(expense, req.user._id);
+        imported += 1;
+      } catch (err) {
+        errors.push(err.message || 'Row failed');
+      }
+    }
+    return res.json({ success: true, data: { imported, errors: errors.slice(0, 5) } });
+  }
+
+  if (type === 'journal') {
+    let imported = 0;
+    const errors = [];
+    const grouped = {};
+    for (const row of rows) {
+      const key = row.reference || row.description || `IMPORT-${Date.now()}`;
+      if (!grouped[key]) grouped[key] = { description: row.description || key, entry_date: row.entry_date, lines: [] };
+      grouped[key].lines.push({
+        accountCode: row.account_code || row.accountCode,
+        debit: parseFloat(row.debit) || 0,
+        credit: parseFloat(row.credit) || 0,
+        description: row.line_description || row.description || '',
+      });
+    }
+    for (const entry of Object.values(grouped)) {
+      try {
+        await accounting.postJournalEntry({
+          tenantId: req.tenant_id,
+          description: entry.description,
+          date: entry.entry_date ? new Date(entry.entry_date) : new Date(),
+          lines: entry.lines,
+          source: 'manual',
+          createdBy: req.user._id,
+          reference: `IMP-${Date.now()}-${imported}`,
+        });
+        imported += 1;
+      } catch (err) {
+        errors.push(err.message || 'Entry failed');
+      }
+    }
+    return res.json({ success: true, data: { imported, errors: errors.slice(0, 5) } });
+  }
+
+  return res.status(400).json({ success: false, message: 'type must be "expenses" or "journal".' });
+});
+
+function escapeCsv(val) {
+  const s = String(val ?? '');
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+function journalRowsForExport(entries, accountsById) {
+  const rows = [];
+  for (const entry of entries) {
+    for (const line of entry.lines || []) {
+      const acc = accountsById.get(String(line.account_id));
+      rows.push({
+        date: entry.entry_date,
+        reference: entry.reference,
+        description: line.description || entry.description,
+        account_code: acc?.code || '',
+        account_name: acc?.name || '',
+        debit: line.debit || 0,
+        credit: line.credit || 0,
+      });
+    }
+  }
+  return rows;
+}
+
+router.get('/accounting/export/quickbooks', authorize('business_owner', 'accountant'), async (req, res) => {
+  const { from, to } = req.query;
+  const filter = { tenant_id: req.tenant_id, status: { $ne: 'voided' } };
+  if (from || to) {
+    filter.entry_date = {};
+    if (from) filter.entry_date.$gte = new Date(from);
+    if (to) filter.entry_date.$lte = new Date(to);
+  }
+  const [entries, accounts] = await Promise.all([
+    JournalEntry.find(filter).sort({ entry_date: 1 }),
+    Account.find({ tenant_id: req.tenant_id }),
+  ]);
+  const accountsById = new Map(accounts.map((a) => [String(a._id), a]));
+  const rows = journalRowsForExport(entries, accountsById);
+  const header = ['Date', 'Transaction Type', 'Num', 'Account', 'Debit', 'Credit', 'Memo'];
+  const csvLines = [header.join(',')];
+  for (const r of rows) {
+    csvLines.push([
+      escapeCsv(r.date ? new Date(r.date).toISOString().slice(0, 10) : ''),
+      escapeCsv('Journal Entry'),
+      escapeCsv(r.reference),
+      escapeCsv(`${r.account_code} ${r.account_name}`.trim()),
+      r.debit || '',
+      r.credit || '',
+      escapeCsv(r.description),
+    ].join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="quickbooks-export-${Date.now()}.csv"`);
+  res.send(csvLines.join('\n'));
+});
+
+router.get('/accounting/export/xero', authorize('business_owner', 'accountant'), async (req, res) => {
+  const { from, to } = req.query;
+  const filter = { tenant_id: req.tenant_id, status: { $ne: 'voided' } };
+  if (from || to) {
+    filter.entry_date = {};
+    if (from) filter.entry_date.$gte = new Date(from);
+    if (to) filter.entry_date.$lte = new Date(to);
+  }
+  const [entries, accounts] = await Promise.all([
+    JournalEntry.find(filter).sort({ entry_date: 1 }),
+    Account.find({ tenant_id: req.tenant_id }),
+  ]);
+  const accountsById = new Map(accounts.map((a) => [String(a._id), a]));
+  const rows = journalRowsForExport(entries, accountsById);
+  const header = ['*Date', '*Amount', 'Payee', 'Description', 'Reference', 'AccountCode'];
+  const csvLines = [header.join(',')];
+  for (const r of rows) {
+    const amount = (r.debit || 0) - (r.credit || 0);
+    csvLines.push([
+      escapeCsv(r.date ? new Date(r.date).toISOString().slice(0, 10) : ''),
+      amount.toFixed(2),
+      escapeCsv('GEMS Export'),
+      escapeCsv(r.description),
+      escapeCsv(r.reference),
+      escapeCsv(r.account_code),
+    ].join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="xero-export-${Date.now()}.csv"`);
+  res.send(csvLines.join('\n'));
+});
+
+router.post('/accounting/reconcile/import', authorize('business_owner', 'accountant'), async (req, res) => {
+  const { rows } = req.body;
+  if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ success: false, message: 'rows[] required.' });
+
+  const lines = rows.map((row, i) => {
+    const amount = parseFloat(row.amount);
+    if (Number.isNaN(amount)) return null;
+    return {
+      id: i,
+      date: row.date || row.transaction_date || '',
+      description: row.description || row.memo || row.narration || '',
+      amount,
+    };
+  }).filter(Boolean);
+
+  if (!lines.length) return res.status(400).json({ success: false, message: 'No valid rows with amount.' });
+
+  const cashAccount = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
+  if (!cashAccount) return res.status(404).json({ success: false, message: 'Cash & Bank account (1001) not found.' });
+
+  const glEntries = await JournalEntry.find({ tenant_id: req.tenant_id, 'lines.account_id': cashAccount._id }).sort({ entry_date: 1 });
+  const glLines = [];
+  for (const entry of glEntries) {
+    for (const line of entry.lines) {
+      if (String(line.account_id) === String(cashAccount._id)) {
+        glLines.push({ id: String(line._id), date: entry.entry_date, description: line.description || entry.description, reference: entry.reference, amount: (line.debit || 0) - (line.credit || 0) });
+      }
+    }
+  }
+
+  const matched = [];
+  const unmatchedBank = [];
+  const usedGlIds = new Set();
+  for (const bankLine of lines) {
+    const match = glLines.find((g) => !usedGlIds.has(g.id) && Math.abs(g.amount - bankLine.amount) < 0.01);
+    if (match) { usedGlIds.add(match.id); matched.push({ bank: bankLine, gl: match }); }
+    else unmatchedBank.push(bankLine);
+  }
+  const unmatchedGl = glLines.filter((g) => !usedGlIds.has(g.id));
+  const bankTotal = lines.reduce((s, l) => s + l.amount, 0);
+  const glTotal = glLines.reduce((s, l) => s + l.amount, 0);
+
+  res.json({
+    success: true,
+    data: {
+      imported: lines.length,
+      matched,
+      unmatchedBank,
+      unmatchedGl,
+      bankTotal,
+      glTotal,
+      difference: bankTotal - glTotal,
+      isBalanced: Math.abs(bankTotal - glTotal) < 0.01,
+    },
+  });
 });
 
 

@@ -19,6 +19,14 @@ const tenantSchema = new Schema({
   trial_ends_at:           Date,
   auto_renew:              { type: Boolean, default: true },
   trial_warning_sent:      { type: Boolean, default: false },
+  storefront_settings: {
+    delivery_fee:              { type: Number, default: 30 },
+    free_delivery_threshold:   { type: Number, default: 500 },
+    store_enabled:             { type: Boolean, default: true },
+    announcement:              { type: String, default: '' },
+    min_order_amount:          { type: Number, default: 0 },
+    custom_domain:             { type: String, default: '', lowercase: true, trim: true },
+  },
 }, { timestamps: true });
 
 // BRANCH
@@ -156,6 +164,7 @@ const orderItemSchema = new Schema({
   quantity:     { type: Number, required: true },
   unit_price:   { type: Number, required: true },
   total:        { type: Number, required: true },
+  refunded_qty: { type: Number, default: 0 },
 });
 
 const orderSchema = new Schema({
@@ -175,6 +184,10 @@ const orderSchema = new Schema({
   payment_status:   { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' },
   status:           { type: String, enum: ['pending','processing','shipped','delivered','cancelled'], default: 'pending' },
   source:           { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
+  refund_amount:    { type: Number, default: 0 },
+  discount_amount:  { type: Number, default: 0 },
+  coupon_code:      String,
+  shift_id:         { type: Schema.Types.ObjectId, ref: 'PosShift' },
   items:            [orderItemSchema],
   created_by:       { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
@@ -275,8 +288,9 @@ const expenseSchema = new Schema({
   account_id:   { type: Schema.Types.ObjectId, ref: 'Account' },
   description:  String,
   expense_date: { type: Date, default: Date.now },
-  receipt:      { file: String, mime_type: String, name: String },
-  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+  receipt:           { file: String, mime_type: String, name: String },
+  journal_entry_id:  { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
+  created_by:        { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
 // DEPARTMENT
@@ -436,9 +450,9 @@ const platformSettingsSchema = new Schema({
   audit_retention_days: { type: Number, default: 90 },
   // Feature flags per plan
   feature_flags: { type: Schema.Types.Mixed, default: {
-    starter:    { crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
-    pro:        { crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
-    enterprise: { crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
+    starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
+    pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
+    enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
   }},
 }, { timestamps: true });
 
@@ -656,6 +670,53 @@ const budgetSchema = new Schema({
 }, { timestamps: true });
 budgetSchema.index({ tenant_id: 1, category: 1, period: 1 }, { unique: true });
 
+// POS SHIFT
+const posShiftSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:      { type: Schema.Types.ObjectId, ref: 'Branch' },
+  shift_number:   { type: String, required: true },
+  opened_by:      { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  closed_by:      { type: Schema.Types.ObjectId, ref: 'User' },
+  status:         { type: String, enum: ['open', 'closed'], default: 'open' },
+  opened_at:      { type: Date, default: Date.now },
+  closed_at:      Date,
+  opening_float:  { type: Number, default: 0 },
+  expected_cash:  { type: Number, default: 0 },
+  actual_cash:    { type: Number, default: 0 },
+  cash_variance:  { type: Number, default: 0 },
+  sales_count:    { type: Number, default: 0 },
+  sales_total:    { type: Number, default: 0 },
+  refunds_total:  { type: Number, default: 0 },
+  card_total:     { type: Number, default: 0 },
+  momo_total:     { type: Number, default: 0 },
+  notes:          String,
+}, { timestamps: true });
+posShiftSchema.index({ tenant_id: 1, opened_by: 1, status: 1 });
+
+// STOREFRONT CUSTOMER
+const storeCustomerSchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:          { type: String, required: true },
+  email:         { type: String, required: true, lowercase: true, trim: true },
+  password_hash: { type: String, required: true },
+  phone:         String,
+}, { timestamps: true });
+storeCustomerSchema.index({ tenant_id: 1, email: 1 }, { unique: true });
+
+// COUPON
+const couponSchema = new Schema({
+  tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  code:              { type: String, required: true, uppercase: true, trim: true },
+  discount_type:     { type: String, enum: ['percent', 'fixed'], default: 'percent' },
+  discount_value:    { type: Number, required: true },
+  min_order_amount:  { type: Number, default: 0 },
+  max_uses:          { type: Number, default: 0 },
+  used_count:        { type: Number, default: 0 },
+  expires_at:        Date,
+  is_active:         { type: Boolean, default: true },
+}, { timestamps: true });
+couponSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
+
 // toJSON aliases for all schemas
 const allSchemas = [
   tenantSchema, branchSchema, userSchema, categorySchema, productSchema,
@@ -667,6 +728,7 @@ const allSchemas = [
   invoiceSchema, creditNoteSchema, accountingPeriodSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
+  posShiftSchema, storeCustomerSchema, couponSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -719,4 +781,7 @@ module.exports = {
   AssetCategory:         mongoose.model('AssetCategory', assetCategorySchema),
   Asset:                 mongoose.model('Asset', assetSchema),
   AssetLog:              mongoose.model('AssetLog', assetLogSchema),
+  PosShift:              mongoose.model('PosShift', posShiftSchema),
+  StoreCustomer:         mongoose.model('StoreCustomer', storeCustomerSchema),
+  Coupon:                mongoose.model('Coupon', couponSchema),
 };
