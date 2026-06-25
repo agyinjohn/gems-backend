@@ -42,7 +42,10 @@ const handlePaystackWebhook = async (req, res) => {
       await fulfillStorefrontOrders({ reference, orderIds: pendingStorefront.map((o) => o._id) });
     }
 
-    const pendingPos = await Order.findOne({ payment_ref: reference, payment_status: 'pending', source: 'pos' });
+    const pendingPos = await Order.findOne({ payment_ref: reference, payment_status: 'pending', source: 'pos' })
+      || (event.data?.metadata?.pos_order_id
+        ? await Order.findOne({ _id: event.data.metadata.pos_order_id, payment_status: 'pending', source: 'pos' })
+        : null);
     if (pendingPos) {
       await fulfillPosPaystackOrder({ reference, orderId: pendingPos._id });
     }

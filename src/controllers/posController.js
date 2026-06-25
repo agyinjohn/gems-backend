@@ -4,7 +4,13 @@ const {
   getPaystackCredentials,
   assertPaystackConfigured,
   resolvePaystackEmail,
+  initializePaystackTransaction,
 } = require('../services/paymentService');
+const {
+  resolveVirtualTerminalCode,
+  getVirtualTerminalPayUrl,
+  fetchVirtualTerminal,
+} = require('../services/virtualTerminalService');
 
 const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
@@ -106,7 +112,11 @@ const initPaystackPayment = async (req, res) => {
     tenantEmail: tenant?.email,
     reference,
   });
-  const channels = payment_method === 'card' ? ['card'] : ['mobile_money'];
+  const channels = payment_method === 'card'
+    ? ['card']
+    : payment_method === 'card_terminal'
+      ? ['card', 'mobile_money']
+      : ['mobile_money'];
 
   if (!subtotal || subtotal <= 0) {
     return res.status(400).json({ success: false, message: 'Cart total must be greater than zero.' });
@@ -132,7 +142,7 @@ const initPaystackPayment = async (req, res) => {
     subtotal,
     total: subtotal,
     payment_status: 'pending',
-    payment_method: payment_method === 'card' ? 'card' : 'momo',
+    payment_method: payment_method === 'card' ? 'card' : payment_method === 'card_terminal' ? 'card_terminal' : 'momo',
     payment_ref: reference,
     status: 'pending',
     source: 'pos',
@@ -140,18 +150,124 @@ const initPaystackPayment = async (req, res) => {
     created_by: req.user._id,
   });
 
+  const basePayload = {
+    order_id: order._id,
+    order_number: orderNumber,
+    reference,
+    amount: subtotal,
+    email: paystackEmail,
+    paystack_public_key: credentials.publicKey,
+    channels,
+  };
+
+  if (payment_method === 'card' || payment_method === 'card_terminal') {
+    try {
+      const initChannels = payment_method === 'card' ? ['card'] : ['card', 'mobile_money'];
+      const metadata = {
+        pos_order_id: String(order._id),
+        order_number: orderNumber,
+        custom_fields: [
+          { display_name: 'POS Order', variable_name: 'order_number', value: orderNumber },
+        ],
+      };
+
+      if (payment_method === 'card_terminal') {
+        const vtCode = await resolveVirtualTerminalCode();
+        if (!vtCode) {
+          await Order.findByIdAndDelete(order._id);
+          return res.status(500).json({
+            success: false,
+            message: 'Paystack Virtual Terminal is not configured. Add VT code in Platform Settings → Payment Gateway.',
+          });
+        }
+        metadata.virtual_terminal = { code: vtCode };
+      }
+
+      const paystackInit = await initializePaystackTransaction({
+        email: paystackEmail,
+        amount: subtotal,
+        reference,
+        channels: initChannels,
+        metadata,
+      });
+
+      let terminalName = null;
+      if (payment_method === 'card_terminal') {
+        try {
+          const vt = await fetchVirtualTerminal(metadata.virtual_terminal.code);
+          terminalName = vt?.name || null;
+        } catch { /* optional */ }
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          ...basePayload,
+          channels: initChannels,
+          payment_mode: payment_method === 'card_terminal' ? 'vt_qr' : 'qr',
+          authorization_url: paystackInit.authorization_url,
+          virtual_terminal_code: metadata.virtual_terminal?.code || null,
+          virtual_terminal_name: terminalName,
+          static_terminal_url: metadata.virtual_terminal?.code
+            ? getVirtualTerminalPayUrl(metadata.virtual_terminal.code)
+            : null,
+        },
+      });
+    } catch (err) {
+      await Order.findByIdAndDelete(order._id);
+      const status = err.status || 500;
+      return res.status(status).json({ success: false, message: err.message || 'Could not start card payment.' });
+    }
+  }
+
   res.json({
     success: true,
     data: {
-      order_id: order._id,
-      order_number: orderNumber,
-      reference,
-      amount: subtotal,
-      email: paystackEmail,
-      paystack_public_key: credentials.publicKey,
-      channels,
+      ...basePayload,
+      payment_mode: 'popup',
     },
   });
+};
+
+const getVirtualTerminalInfo = async (req, res) => {
+  try {
+    const credentials = await getPaystackCredentials();
+    assertPaystackConfigured(credentials);
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+
+  const code = await resolveVirtualTerminalCode();
+  if (!code) {
+    return res.json({
+      success: true,
+      data: { configured: false, message: 'Set paystack_virtual_terminal_code in Platform Settings.' },
+    });
+  }
+
+  try {
+    const vt = await fetchVirtualTerminal(code);
+    return res.json({
+      success: true,
+      data: {
+        configured: true,
+        code: vt.code || code,
+        name: vt.name,
+        active: vt.active,
+        payment_page_url: getVirtualTerminalPayUrl(vt.code || code),
+      },
+    });
+  } catch {
+    return res.json({
+      success: true,
+      data: {
+        configured: true,
+        code,
+        name: code,
+        payment_page_url: getVirtualTerminalPayUrl(code),
+      },
+    });
+  }
 };
 
 const verifyPaystackPayment = async (req, res) => {
@@ -184,4 +300,5 @@ module.exports = {
   getZReport,
   initPaystackPayment,
   verifyPaystackPayment,
+  getVirtualTerminalInfo,
 };

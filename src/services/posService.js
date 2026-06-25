@@ -12,9 +12,10 @@ async function recordShiftSale(shiftId, { amount, payment_method }) {
   if (!shiftId) return;
   const inc = { sales_count: 1, sales_total: amount };
   const method = payment_method === 'paystack' ? 'momo' : payment_method;
-  if (method === 'cash') inc.expected_cash = amount;
-  else if (method === 'card') inc.card_total = amount;
-  else if (method === 'momo') inc.momo_total = amount;
+  const shiftMethod = method === 'card_terminal' ? 'card' : method;
+  if (shiftMethod === 'cash') inc.expected_cash = amount;
+  else if (shiftMethod === 'card') inc.card_total = amount;
+  else if (shiftMethod === 'momo') inc.momo_total = amount;
   await PosShift.findByIdAndUpdate(shiftId, { $inc: inc });
 }
 
@@ -128,7 +129,7 @@ async function completePosSale({
  * Idempotent — safe for client verify + webhook retry.
  */
 async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, branchId, amount_tendered }) {
-  await verifyPaystackTransaction(reference);
+  const paystackData = await verifyPaystackTransaction(reference);
 
   let pending = null;
   if (orderId) {
@@ -138,6 +139,11 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
   }
   if (!pending) {
     const q = { payment_ref: reference, source: 'pos', payment_status: 'pending' };
+    if (tenantId) q.tenant_id = tenantId;
+    pending = await Order.findOne(q);
+  }
+  if (!pending && paystackData?.metadata?.pos_order_id) {
+    const q = { _id: paystackData.metadata.pos_order_id, source: 'pos', payment_status: 'pending' };
     if (tenantId) q.tenant_id = tenantId;
     pending = await Order.findOne(q);
   }
@@ -154,6 +160,12 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
     throw err;
   }
 
+  const channel = paystackData?.channel;
+  let paymentMethod = pending.payment_method || 'card';
+  if (channel === 'mobile_money' || channel === 'ussd') paymentMethod = 'momo';
+  else if (channel === 'card') paymentMethod = 'card';
+  else if (pending.payment_method === 'card_terminal') paymentMethod = 'card';
+
   await Order.findByIdAndDelete(pending._id);
 
   const result = await completePosSale({
@@ -161,7 +173,7 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
     userId: userId || pending.created_by,
     branchId: branchId ?? pending.branch_id,
     items: pending.items.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
-    payment_method: pending.payment_method || 'paystack',
+    payment_method: paymentMethod,
     payment_ref: reference,
     customer_name: pending.customer_name,
     customer_phone: pending.customer_phone,

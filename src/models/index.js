@@ -443,6 +443,8 @@ const platformSettingsSchema = new Schema({
   paystack_public_key:  { type: String, default: '' },
   paystack_secret_key:  { type: String, default: '' },
   paystack_webhook_url: { type: String, default: '' },
+  paystack_virtual_terminal_code: { type: String, default: '' },
+  paystack_terminal_whatsapp:     { type: String, default: '' },
   // Alerts
   trial_warning_days:   { type: Number, default: 3 },
   expiry_alert_days:    { type: Number, default: 7 },

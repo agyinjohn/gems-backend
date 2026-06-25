@@ -148,6 +148,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     trial_days, grace_days, plans, currency, auto_renew_default,
     platform_name, support_email, platform_logo,
     paystack_public_key, paystack_secret_key, paystack_webhook_url,
+    paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days,
     audit_retention_days, feature_flags,
   } = req.body;
@@ -157,6 +158,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     trial_days, grace_days, currency, auto_renew_default,
     platform_name, support_email, platform_logo,
     paystack_public_key, paystack_webhook_url,
+    paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days, audit_retention_days,
   };
   for (const [k, v] of Object.entries(fields)) {
@@ -253,10 +255,10 @@ router.get('/products/:id/movements', authenticate, requireTenant, inventory.get
 
 // POS
 router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
-  const { items, payment_method, amount_tendered, customer_name, customer_phone } = req.body;
+  const { items, payment_method, amount_tendered, customer_name, customer_phone, payment_ref } = req.body;
   if (!items?.length) return res.status(400).json({ success: false, message: 'items required.' });
-  if (payment_method === 'momo' || payment_method === 'card') {
-    return res.status(400).json({ success: false, message: 'Use Paystack flow for card and mobile money payments.' });
+  if (payment_method === 'momo' || payment_method === 'card' || payment_method === 'card_terminal') {
+    return res.status(400).json({ success: false, message: 'Use Paystack flow for QR card, virtual terminal, and mobile money payments.' });
   }
   try {
     const shift = await getOpenShift(req.tenant_id, req.user._id);
@@ -266,6 +268,7 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
       branchId: req.user.branch_id,
       items,
       payment_method: payment_method || 'cash',
+      payment_ref: payment_ref || null,
       customer_name,
       customer_phone,
       shift_id: shift?._id,
@@ -279,6 +282,7 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
 
 router.post('/pos/paystack/init', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.initPaystackPayment);
 router.post('/pos/paystack/verify', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.verifyPaystackPayment);
+router.get('/pos/paystack/terminal', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.getVirtualTerminalInfo);
 router.post('/pos/shifts/open', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.openShift);
 router.get('/pos/shifts/current', authenticate, requireTenant, requireFeature('pos'), pos.getCurrentShift);
 router.post('/pos/shifts/close', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.closeShift);

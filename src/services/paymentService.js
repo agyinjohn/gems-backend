@@ -99,24 +99,29 @@ function paystackRequest({ method, path, body, secretKey }) {
   });
 }
 
-async function initializePaystackTransaction({ email, amount, reference, channels }) {
+async function initializePaystackTransaction({ email, amount, reference, channels, metadata }) {
   const credentials = await getPaystackCredentials();
   assertPaystackConfigured(credentials);
+
+  const body = {
+    email,
+    amount: Math.round(amount * 100),
+    currency: 'GHS',
+    reference,
+    channels,
+  };
+  if (metadata && Object.keys(metadata).length) {
+    body.metadata = metadata;
+  }
 
   const parsed = await paystackRequest({
     method: 'POST',
     path: '/transaction/initialize',
     secretKey: credentials.secretKey,
-    body: {
-      email,
-      amount: Math.round(amount * 100),
-      currency: 'GHS',
-      reference,
-      channels,
-    },
+    body,
   });
 
-  if (!parsed.data?.access_code) {
+  if (!parsed.data?.access_code || !parsed.data?.authorization_url) {
     throw new Error(parsed.message || 'Could not initialize Paystack transaction.');
   }
   return parsed.data;
@@ -238,6 +243,7 @@ module.exports = {
   resolvePaystackEmail,
   initializePaystackTransaction,
   invalidatePaystackCredentialsCache,
+  paystackRequest,
   verifyPaystackSignature,
   verifyPaystackTransaction,
   fulfillStorefrontOrders,
