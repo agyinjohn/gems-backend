@@ -3,7 +3,6 @@ const { getOpenShift, fulfillPosPaystackOrder } = require('../services/posServic
 const {
   getPaystackCredentials,
   assertPaystackConfigured,
-  initializePaystackTransaction,
   resolvePaystackEmail,
 } = require('../services/paymentService');
 
@@ -109,19 +108,17 @@ const initPaystackPayment = async (req, res) => {
   });
   const channels = payment_method === 'card' ? ['card'] : ['mobile_money'];
 
-  let paystackInit;
+  if (!subtotal || subtotal <= 0) {
+    return res.status(400).json({ success: false, message: 'Cart total must be greater than zero.' });
+  }
+
+  let credentials;
   try {
-    const credentials = await getPaystackCredentials();
+    credentials = await getPaystackCredentials();
     assertPaystackConfigured(credentials);
-    paystackInit = await initializePaystackTransaction({
-      email: paystackEmail,
-      amount: subtotal,
-      reference,
-      channels,
-    });
   } catch (err) {
     const status = err.status || 500;
-    return res.status(status).json({ success: false, message: err.message || 'Paystack initialization failed.' });
+    return res.status(status).json({ success: false, message: err.message || 'Paystack is not configured.' });
   }
 
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
@@ -151,8 +148,7 @@ const initPaystackPayment = async (req, res) => {
       reference,
       amount: subtotal,
       email: paystackEmail,
-      paystack_public_key: (await getPaystackCredentials()).publicKey,
-      access_code: paystackInit.access_code,
+      paystack_public_key: credentials.publicKey,
       channels,
     },
   });
