@@ -2,6 +2,7 @@ const { Product, StockMovement, Order, PosShift } = require('../models');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
+const { verifyPaystackTransaction } = require('./paymentService');
 
 async function getOpenShift(tenantId, userId) {
   return PosShift.findOne({ tenant_id: tenantId, opened_by: userId, status: 'open' }).sort({ opened_at: -1 });
@@ -122,8 +123,58 @@ async function completePosSale({
   };
 }
 
+/**
+ * Verify Paystack payment and complete a pending POS sale.
+ * Idempotent — safe for client verify + webhook retry.
+ */
+async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, branchId, amount_tendered }) {
+  await verifyPaystackTransaction(reference);
+
+  let pending = null;
+  if (orderId) {
+    const q = { _id: orderId, source: 'pos', payment_status: 'pending' };
+    if (tenantId) q.tenant_id = tenantId;
+    pending = await Order.findOne(q);
+  }
+  if (!pending) {
+    const q = { payment_ref: reference, source: 'pos', payment_status: 'pending' };
+    if (tenantId) q.tenant_id = tenantId;
+    pending = await Order.findOne(q);
+  }
+
+  if (!pending) {
+    const paidQ = { payment_ref: reference, source: 'pos', payment_status: 'paid' };
+    if (tenantId) paidQ.tenant_id = tenantId;
+    const paid = await Order.findOne(paidQ);
+    if (paid) {
+      return { order: paid, change: 0, amount_tendered: paid.total, already_fulfilled: true };
+    }
+    const err = new Error('Pending POS order not found.');
+    err.status = 404;
+    throw err;
+  }
+
+  await Order.findByIdAndDelete(pending._id);
+
+  const result = await completePosSale({
+    tenantId: pending.tenant_id,
+    userId: userId || pending.created_by,
+    branchId: branchId ?? pending.branch_id,
+    items: pending.items.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
+    payment_method: pending.payment_method || 'paystack',
+    payment_ref: reference,
+    customer_name: pending.customer_name,
+    customer_phone: pending.customer_phone,
+    shift_id: pending.shift_id,
+    amount_tendered,
+  });
+
+  return { ...result, already_fulfilled: false };
+}
+
 module.exports = {
   getOpenShift,
   completePosSale,
   recordShiftRefund,
+  fulfillPosPaystackOrder,
 };

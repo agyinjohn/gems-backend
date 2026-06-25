@@ -1,5 +1,6 @@
 const { Order } = require('../models');
 const { verifyPaystackSignature, verifyPaystackTransaction, fulfillStorefrontOrders } = require('../services/paymentService');
+const { fulfillPosPaystackOrder } = require('../services/posService');
 
 /**
  * POST /api/webhooks/paystack
@@ -36,10 +37,14 @@ const handlePaystackWebhook = async (req, res) => {
   try {
     await verifyPaystackTransaction(reference);
 
-    // Storefront orders store the Paystack reference at checkout
-    const pendingOrders = await Order.find({ payment_ref: reference, payment_status: 'pending', source: 'storefront' });
-    if (pendingOrders.length) {
-      await fulfillStorefrontOrders({ reference, orderIds: pendingOrders.map((o) => o._id) });
+    const pendingStorefront = await Order.find({ payment_ref: reference, payment_status: 'pending', source: 'storefront' });
+    if (pendingStorefront.length) {
+      await fulfillStorefrontOrders({ reference, orderIds: pendingStorefront.map((o) => o._id) });
+    }
+
+    const pendingPos = await Order.findOne({ payment_ref: reference, payment_status: 'pending', source: 'pos' });
+    if (pendingPos) {
+      await fulfillPosPaystackOrder({ reference, orderId: pendingPos._id });
     }
   } catch (err) {
     console.error('[Webhook] Paystack charge.success failed:', err.message);

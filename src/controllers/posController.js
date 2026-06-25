@@ -1,6 +1,5 @@
 const { PosShift, Order, Tenant } = require('../models');
-const { verifyPaystackTransaction } = require('../services/paymentService');
-const { getOpenShift, completePosSale } = require('../services/posService');
+const { getOpenShift, fulfillPosPaystackOrder } = require('../services/posService');
 
 const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
@@ -96,6 +95,11 @@ const initPaystackPayment = async (req, res) => {
   }
 
   const reference = `POS-PAY-${Date.now()}`;
+  const paystackPublicKey = process.env.PAYSTACK_PUBLIC_KEY;
+  if (!paystackPublicKey) {
+    return res.status(500).json({ success: false, message: 'Paystack is not configured. Set PAYSTACK_PUBLIC_KEY and PAYSTACK_SECRET_KEY on the server.' });
+  }
+
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
   const order = await Order.create({
     tenant_id: req.tenant_id,
@@ -123,7 +127,7 @@ const initPaystackPayment = async (req, res) => {
       reference,
       amount: subtotal,
       email: tenant?.email || req.user.email,
-      paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
+      paystack_public_key: paystackPublicKey,
     },
   });
 };
@@ -132,27 +136,23 @@ const verifyPaystackPayment = async (req, res) => {
   const { reference, order_id, amount_tendered } = req.body;
   if (!reference || !order_id) return res.status(400).json({ success: false, message: 'reference and order_id required.' });
 
-  const pending = await Order.findOne({ _id: order_id, tenant_id: req.tenant_id, source: 'pos', payment_status: 'pending' });
-  if (!pending) return res.status(404).json({ success: false, message: 'Pending POS order not found.' });
-
-  await verifyPaystackTransaction(reference);
-
-  await Order.findByIdAndDelete(pending._id);
-
-  const result = await completePosSale({
-    tenantId: req.tenant_id,
-    userId: req.user._id,
-    branchId: req.user.branch_id,
-    items: pending.items.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
-    payment_method: pending.payment_method || 'paystack',
-    payment_ref: reference,
-    customer_name: pending.customer_name,
-    customer_phone: pending.customer_phone,
-    shift_id: pending.shift_id,
-    amount_tendered,
-  });
-
-  res.json({ success: true, data: { ...result.order.toJSON(), change: result.change, amount_tendered: result.amount_tendered } });
+  try {
+    const result = await fulfillPosPaystackOrder({
+      tenantId: req.tenant_id,
+      orderId: order_id,
+      reference,
+      userId: req.user._id,
+      branchId: req.user.branch_id,
+      amount_tendered,
+    });
+    res.json({
+      success: true,
+      data: { ...result.order.toJSON(), change: result.change, amount_tendered: result.amount_tendered },
+    });
+  } catch (err) {
+    const status = err.status || (err.message?.includes('not configured') ? 500 : 400);
+    res.status(status).json({ success: false, message: err.message || 'Payment verification failed.' });
+  }
 };
 
 module.exports = {
