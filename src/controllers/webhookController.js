@@ -15,7 +15,7 @@ const handlePaystackWebhook = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid webhook payload.' });
   }
 
-  if (!verifyPaystackSignature(rawBody, signature)) {
+  if (!(await verifyPaystackSignature(rawBody, signature))) {
     return res.status(401).json({ success: false, message: 'Invalid Paystack signature.' });
   }
 

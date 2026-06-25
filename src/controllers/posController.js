@@ -1,5 +1,10 @@
 const { PosShift, Order, Tenant } = require('../models');
 const { getOpenShift, fulfillPosPaystackOrder } = require('../services/posService');
+const {
+  getPaystackCredentials,
+  assertPaystackConfigured,
+  initializePaystackTransaction,
+} = require('../services/paymentService');
 
 const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
@@ -95,9 +100,22 @@ const initPaystackPayment = async (req, res) => {
   }
 
   const reference = `POS-PAY-${Date.now()}`;
-  const paystackPublicKey = process.env.PAYSTACK_PUBLIC_KEY;
-  if (!paystackPublicKey) {
-    return res.status(500).json({ success: false, message: 'Paystack is not configured. Set PAYSTACK_PUBLIC_KEY and PAYSTACK_SECRET_KEY on the server.' });
+  const paystackEmail = tenant?.email || req.user.email || 'customer@gems.local';
+  const channels = payment_method === 'card' ? ['card'] : ['mobile_money'];
+
+  let paystackInit;
+  try {
+    const credentials = await getPaystackCredentials();
+    assertPaystackConfigured(credentials);
+    paystackInit = await initializePaystackTransaction({
+      email: paystackEmail,
+      amount: subtotal,
+      reference,
+      channels,
+    });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ success: false, message: err.message || 'Paystack initialization failed.' });
   }
 
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
@@ -126,8 +144,10 @@ const initPaystackPayment = async (req, res) => {
       order_number: orderNumber,
       reference,
       amount: subtotal,
-      email: tenant?.email || req.user.email,
-      paystack_public_key: paystackPublicKey,
+      email: paystackEmail,
+      paystack_public_key: (await getPaystackCredentials()).publicKey,
+      access_code: paystackInit.access_code,
+      channels,
     },
   });
 };

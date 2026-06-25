@@ -170,7 +170,9 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
   if (feature_flags !== undefined) { settings.feature_flags = feature_flags; settings.markModified('feature_flags'); }
   await settings.save();
   const { invalidatePlatformSettingsCache } = require('../services/tenantService');
+  const { invalidatePaystackCredentialsCache } = require('../services/paymentService');
   invalidatePlatformSettingsCache();
+  invalidatePaystackCredentialsCache();
   const data = settings.toJSON();
   if (data.paystack_secret_key) data.paystack_secret_key = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' + data.paystack_secret_key.slice(-4);
   res.json({ success: true, data });

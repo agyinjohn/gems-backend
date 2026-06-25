@@ -5,45 +5,123 @@ const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
 
-function getPaystackSecret() {
-  return process.env.PAYSTACK_SECRET_KEY || '';
+let cachedCredentials = null;
+let cacheTime = 0;
+const CACHE_TTL_MS = 60_000;
+
+function looksLikePlaceholderKey(key) {
+  if (!key || typeof key !== 'string') return true;
+  return /your_paystack|changeme|placeholder|xxx{3,}/i.test(key) || key.length < 24;
 }
 
-function verifyPaystackSignature(rawBody, signature) {
-  const secret = getPaystackSecret();
-  if (!secret || !signature) return false;
-  const hash = crypto.createHmac('sha512', secret).update(rawBody).digest('hex');
-  return hash === signature;
+async function getPaystackCredentials() {
+  if (cachedCredentials && Date.now() - cacheTime < CACHE_TTL_MS) return cachedCredentials;
+  const { PlatformSettings } = require('../models');
+  const settings = await PlatformSettings.findOne().lean();
+  const publicKey = (settings?.paystack_public_key || process.env.PAYSTACK_PUBLIC_KEY || '').trim();
+  const secretKey = (settings?.paystack_secret_key || process.env.PAYSTACK_SECRET_KEY || '').trim();
+  cachedCredentials = { publicKey, secretKey };
+  cacheTime = Date.now();
+  return cachedCredentials;
 }
 
-function verifyPaystackTransaction(reference) {
+function invalidatePaystackCredentialsCache() {
+  cachedCredentials = null;
+  cacheTime = 0;
+}
+
+function assertPaystackConfigured(credentials) {
+  const { publicKey, secretKey } = credentials;
+  if (looksLikePlaceholderKey(publicKey) || looksLikePlaceholderKey(secretKey)) {
+    const err = new Error(
+      'Paystack is not configured. Set PAYSTACK_PUBLIC_KEY and PAYSTACK_SECRET_KEY in gems-backend/.env (or Platform Settings).'
+    );
+    err.status = 500;
+    throw err;
+  }
+  if (!publicKey.startsWith('pk_') || !secretKey.startsWith('sk_')) {
+    const err = new Error('Paystack keys look invalid. Public keys start with pk_ and secret keys with sk_.');
+    err.status = 500;
+    throw err;
+  }
+}
+
+function paystackRequest({ method, path, body, secretKey }) {
   return new Promise((resolve, reject) => {
-    const secret = getPaystackSecret();
-    if (!secret) return reject(new Error('Paystack secret key not configured.'));
-
+    const payload = body ? JSON.stringify(body) : null;
     const options = {
       hostname: 'api.paystack.co',
-      path: `/transaction/verify/${encodeURIComponent(reference)}`,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${secret}` },
+      path,
+      method,
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+      },
     };
 
-    let body = '';
+    let responseBody = '';
     const req = https.request(options, (res) => {
-      res.on('data', (chunk) => { body += chunk; });
+      res.on('data', (chunk) => { responseBody += chunk; });
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(body);
-          if (parsed.data?.status === 'success') resolve(parsed.data);
-          else reject(new Error(parsed.message || 'Payment verification failed.'));
+          const parsed = JSON.parse(responseBody);
+          if (parsed.status) resolve(parsed);
+          else reject(new Error(parsed.message || 'Paystack request failed.'));
         } catch (err) {
           reject(err);
         }
       });
     });
     req.on('error', reject);
+    if (payload) req.write(payload);
     req.end();
   });
+}
+
+async function initializePaystackTransaction({ email, amount, reference, channels }) {
+  const credentials = await getPaystackCredentials();
+  assertPaystackConfigured(credentials);
+
+  const parsed = await paystackRequest({
+    method: 'POST',
+    path: '/transaction/initialize',
+    secretKey: credentials.secretKey,
+    body: {
+      email,
+      amount: Math.round(amount * 100),
+      currency: 'GHS',
+      reference,
+      channels,
+    },
+  });
+
+  if (!parsed.data?.access_code) {
+    throw new Error(parsed.message || 'Could not initialize Paystack transaction.');
+  }
+  return parsed.data;
+}
+
+async function verifyPaystackSignature(rawBody, signature) {
+  const { secretKey } = await getPaystackCredentials();
+  if (!secretKey || !signature) return false;
+  const hash = crypto.createHmac('sha512', secretKey).update(rawBody).digest('hex');
+  return hash === signature;
+}
+
+async function verifyPaystackTransaction(reference) {
+  const { secretKey } = await getPaystackCredentials();
+  if (!secretKey || looksLikePlaceholderKey(secretKey)) {
+    throw new Error('Paystack secret key not configured.');
+  }
+
+  const parsed = await paystackRequest({
+    method: 'GET',
+    path: `/transaction/verify/${encodeURIComponent(reference)}`,
+    secretKey,
+  });
+
+  if (parsed.data?.status === 'success') return parsed.data;
+  throw new Error(parsed.message || 'Payment verification failed.');
 }
 
 /**
@@ -133,6 +211,10 @@ async function failStorefrontOrders(orderIds) {
 }
 
 module.exports = {
+  getPaystackCredentials,
+  assertPaystackConfigured,
+  initializePaystackTransaction,
+  invalidatePaystackCredentialsCache,
   verifyPaystackSignature,
   verifyPaystackTransaction,
   fulfillStorefrontOrders,
