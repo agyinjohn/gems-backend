@@ -14,6 +14,27 @@ function looksLikePlaceholderKey(key) {
   return /your_paystack|changeme|placeholder|xxx{3,}/i.test(key) || key.length < 24;
 }
 
+function isValidPaystackEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  const value = email.trim().toLowerCase();
+  if (!value || value.endsWith('.local')) return false;
+  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value);
+}
+
+async function resolvePaystackEmail({ customerEmail, staffEmail, tenantEmail, reference }) {
+  const candidates = [customerEmail, staffEmail, tenantEmail];
+  for (const raw of candidates) {
+    if (isValidPaystackEmail(raw)) return raw.trim().toLowerCase();
+  }
+  const { PlatformSettings } = require('../models');
+  const settings = await PlatformSettings.findOne().lean();
+  if (isValidPaystackEmail(settings?.support_email)) {
+    return settings.support_email.trim().toLowerCase();
+  }
+  const safeRef = String(reference || Date.now()).replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'sale';
+  return `pos-${safeRef}@gthink.com`;
+}
+
 async function getPaystackCredentials() {
   if (cachedCredentials && Date.now() - cacheTime < CACHE_TTL_MS) return cachedCredentials;
   const { PlatformSettings } = require('../models');
@@ -213,6 +234,8 @@ async function failStorefrontOrders(orderIds) {
 module.exports = {
   getPaystackCredentials,
   assertPaystackConfigured,
+  isValidPaystackEmail,
+  resolvePaystackEmail,
   initializePaystackTransaction,
   invalidatePaystackCredentialsCache,
   verifyPaystackSignature,

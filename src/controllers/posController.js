@@ -4,6 +4,7 @@ const {
   getPaystackCredentials,
   assertPaystackConfigured,
   initializePaystackTransaction,
+  resolvePaystackEmail,
 } = require('../services/paymentService');
 
 const openShift = async (req, res) => {
@@ -100,7 +101,12 @@ const initPaystackPayment = async (req, res) => {
   }
 
   const reference = `POS-PAY-${Date.now()}`;
-  const paystackEmail = tenant?.email || req.user.email || 'customer@gems.local';
+  const paystackEmail = await resolvePaystackEmail({
+    customerEmail: req.body.customer_email,
+    staffEmail: req.user.email,
+    tenantEmail: tenant?.email,
+    reference,
+  });
   const channels = payment_method === 'card' ? ['card'] : ['mobile_money'];
 
   let paystackInit;
