@@ -150,6 +150,21 @@ async function verifyPaystackTransaction(reference) {
   throw new Error(parsed.message || 'Payment verification failed.');
 }
 
+async function fetchPaystackTransaction(reference) {
+  const { secretKey } = await getPaystackCredentials();
+  if (!secretKey || looksLikePlaceholderKey(secretKey)) {
+    throw new Error('Paystack secret key not configured.');
+  }
+
+  const parsed = await paystackRequest({
+    method: 'GET',
+    path: `/transaction/verify/${encodeURIComponent(reference)}`,
+    secretKey,
+  });
+
+  return parsed.data || null;
+}
+
 /**
  * Mark storefront orders paid, decrement stock, log payment, post GL.
  * Idempotent — skips orders that are already paid.
@@ -246,6 +261,7 @@ module.exports = {
   paystackRequest,
   verifyPaystackSignature,
   verifyPaystackTransaction,
+  fetchPaystackTransaction,
   fulfillStorefrontOrders,
   failStorefrontOrders,
 };

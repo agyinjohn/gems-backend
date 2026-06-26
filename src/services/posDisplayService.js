@@ -1,4 +1,5 @@
 const { Order, PosCustomerDisplay } = require('../models');
+const { releaseStockForItems, mapOrderItems } = require('./posReservationService');
 
 const DISPLAY_TTL_MS = 30 * 60 * 1000;
 
@@ -141,6 +142,39 @@ async function listPendingPaystackOrders({ tenantId, userId, shiftId }) {
     reference: o.payment_ref,
     authorization_url: o.paystack_checkout_url || null,
     created_at: o.createdAt,
+    expires_at: o.pending_expires_at || null,
+  }));
+}
+
+async function getDisplayQueue({ tenantId, branchId }) {
+  const filter = {
+    tenant_id: tenantId,
+    source: 'pos',
+    payment_status: 'pending',
+    paystack_checkout_url: { $exists: true, $ne: '' },
+  };
+  if (branchId) filter.branch_id = branchId;
+
+  const orders = await Order.find(filter)
+    .sort({ createdAt: 1 })
+    .limit(10)
+    .lean();
+
+  const focus = await PosCustomerDisplay.findOne({
+    tenant_id: tenantId,
+    branch_key: branchKey(branchId),
+    status: 'active',
+  }).lean();
+
+  return orders.map((o) => ({
+    order_id: String(o._id),
+    order_number: o.order_number,
+    customer_name: o.customer_name,
+    amount: o.total,
+    authorization_url: o.paystack_checkout_url,
+    reference: o.payment_ref,
+    is_focused: focus ? String(focus.order_id) === String(o._id) : false,
+    expires_at: o.pending_expires_at || null,
   }));
 }
 
@@ -158,6 +192,7 @@ async function cancelPendingPaystackOrder({ tenantId, orderId }) {
     throw err;
   }
 
+  await releaseStockForItems({ tenantId, items: mapOrderItems(order) });
   await Order.findByIdAndDelete(order._id);
   await clearCustomerDisplayByOrderId(orderId);
   return { order_number: order.order_number };
@@ -171,4 +206,5 @@ module.exports = {
   showOrderOnDisplay,
   listPendingPaystackOrders,
   cancelPendingPaystackOrder,
+  getDisplayQueue,
 };

@@ -38,6 +38,7 @@ async function completePosSale({
   customer_phone,
   shift_id,
   amount_tendered,
+  fromReservation = false,
 }) {
   let subtotal = 0;
   let cogsTotal = 0;
@@ -46,7 +47,13 @@ async function completePosSale({
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, tenant_id: tenantId, is_active: true });
     if (!p) throw Object.assign(new Error(`Product not found.`), { status: 400 });
-    if (p.stock_qty < item.quantity) throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
+    if (fromReservation) {
+      if ((p.reserved_qty || 0) < item.quantity) {
+        throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
+      }
+    } else if (p.stock_qty - (p.reserved_qty || 0) < item.quantity) {
+      throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
+    }
     const total = p.price * item.quantity;
     subtotal += total;
     cogsTotal += (p.cost_price || 0) * item.quantity;
@@ -73,7 +80,17 @@ async function completePosSale({
   });
 
   for (const item of enrichedItems) {
-    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+    const stockUpdate = fromReservation
+      ? { $inc: { stock_qty: -item.quantity, reserved_qty: -item.quantity } }
+      : { $inc: { stock_qty: -item.quantity } };
+    const updated = await Product.findOneAndUpdate(
+      { _id: item.product_id, tenant_id: tenantId },
+      stockUpdate,
+      { new: true },
+    );
+    if (updated && updated.reserved_qty < 0) {
+      await Product.findByIdAndUpdate(updated._id, { reserved_qty: 0 });
+    }
     await StockMovement.create({
       tenant_id: tenantId,
       product_id: item.product_id,
@@ -167,8 +184,6 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
   else if (channel === 'card') paymentMethod = 'card';
   else if (pending.payment_method === 'card_terminal') paymentMethod = 'card';
 
-  await Order.findByIdAndDelete(pending._id);
-
   const result = await completePosSale({
     tenantId: pending.tenant_id,
     userId: userId || pending.created_by,
@@ -180,8 +195,10 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
     customer_phone: pending.customer_phone,
     shift_id: pending.shift_id,
     amount_tendered,
+    fromReservation: true,
   });
 
+  await Order.findByIdAndDelete(pending._id);
   await clearCustomerDisplayByOrderId(pending._id);
 
   return { ...result, already_fulfilled: false };

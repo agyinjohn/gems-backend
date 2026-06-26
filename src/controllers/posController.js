@@ -18,7 +18,14 @@ const {
   showOrderOnDisplay,
   listPendingPaystackOrders,
   cancelPendingPaystackOrder,
+  getDisplayQueue,
 } = require('../services/posDisplayService');
+const { syncPendingPaystackOrders, PENDING_ORDER_TTL_MS } = require('../services/posPendingService');
+const {
+  reserveStockForItems,
+  releaseStockForItems,
+  availableQty,
+} = require('../services/posReservationService');
 
 const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
@@ -107,7 +114,7 @@ const initPaystackPayment = async (req, res) => {
     const { Product } = require('../models');
     const p = await Product.findOne({ _id: item.product_id, tenant_id: req.tenant_id, is_active: true });
     if (!p) return res.status(400).json({ success: false, message: 'Product not found.' });
-    if (p.stock_qty < item.quantity) return res.status(400).json({ success: false, message: `Insufficient stock for ${p.name}.` });
+    if (availableQty(p) < item.quantity) return res.status(400).json({ success: false, message: `Insufficient stock for ${p.name}.` });
     const total = p.price * item.quantity;
     subtotal += total;
     enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
@@ -152,11 +159,30 @@ const initPaystackPayment = async (req, res) => {
     payment_status: 'pending',
     payment_method: payment_method === 'card' ? 'card' : payment_method === 'card_terminal' ? 'card_terminal' : 'momo',
     payment_ref: reference,
+    pending_expires_at: new Date(Date.now() + PENDING_ORDER_TTL_MS),
     status: 'pending',
     source: 'pos',
     items: enrichedItems,
     created_by: req.user._id,
   });
+
+  try {
+    await reserveStockForItems({
+      tenantId: req.tenant_id,
+      items: enrichedItems.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
+    });
+  } catch (err) {
+    await Order.findByIdAndDelete(order._id);
+    return res.status(err.status || 400).json({ success: false, message: err.message || 'Could not reserve stock.' });
+  }
+
+  const rollbackPending = async () => {
+    await releaseStockForItems({
+      tenantId: req.tenant_id,
+      items: enrichedItems.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
+    });
+    await Order.findByIdAndDelete(order._id);
+  };
 
   const basePayload = {
     order_id: order._id,
@@ -182,7 +208,7 @@ const initPaystackPayment = async (req, res) => {
       if (payment_method === 'card_terminal') {
         const vtCode = await resolveVirtualTerminalCode();
         if (!vtCode) {
-          await Order.findByIdAndDelete(order._id);
+          await rollbackPending();
           return res.status(500).json({
             success: false,
             message: 'Paystack Virtual Terminal is not configured. Add VT code in Platform Settings → Payment Gateway.',
@@ -235,10 +261,11 @@ const initPaystackPayment = async (req, res) => {
           static_terminal_url: metadata.virtual_terminal?.code
             ? getVirtualTerminalPayUrl(metadata.virtual_terminal.code)
             : null,
+          expires_at: order.pending_expires_at,
         },
       });
     } catch (err) {
-      await Order.findByIdAndDelete(order._id);
+      await rollbackPending();
       const status = err.status || 500;
       return res.status(status).json({ success: false, message: err.message || 'Could not start card payment.' });
     }
@@ -249,6 +276,7 @@ const initPaystackPayment = async (req, res) => {
     data: {
       ...basePayload,
       payment_mode: 'popup',
+      expires_at: order.pending_expires_at,
     },
   });
 };
@@ -353,12 +381,21 @@ const clearDisplaySession = async (req, res) => {
 
 const getPendingPaystackOrders = async (req, res) => {
   const shift = await getOpenShift(req.tenant_id, req.user._id);
-  const data = await listPendingPaystackOrders({
+  const { pending, events } = await syncPendingPaystackOrders({
     tenantId: req.tenant_id,
     userId: req.user._id,
+    branchId: req.user.branch_id || null,
     shiftId: shift?._id,
   });
-  res.json({ success: true, data });
+  res.json({ success: true, data: pending, events });
+};
+
+const getDisplayQueueSession = async (req, res) => {
+  const queue = await getDisplayQueue({
+    tenantId: req.tenant_id,
+    branchId: req.user.branch_id || null,
+  });
+  res.json({ success: true, data: queue });
 };
 
 const cancelPaystackPending = async (req, res) => {
@@ -409,4 +446,5 @@ module.exports = {
   clearDisplaySession,
   getPendingPaystackOrders,
   cancelPaystackPending,
+  getDisplayQueueSession,
 };

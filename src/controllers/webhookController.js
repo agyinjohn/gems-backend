@@ -1,6 +1,7 @@
 const { Order } = require('../models');
 const { verifyPaystackSignature, verifyPaystackTransaction, fulfillStorefrontOrders } = require('../services/paymentService');
 const { fulfillPosPaystackOrder } = require('../services/posService');
+const { failPendingPaystackOrder } = require('../services/posPendingService');
 
 /**
  * POST /api/webhooks/paystack
@@ -26,12 +27,31 @@ const handlePaystackWebhook = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid JSON payload.' });
   }
 
-  // Always acknowledge quickly so Paystack does not retry unnecessarily
   res.status(200).json({ success: true, received: true });
 
-  if (event.event !== 'charge.success') return;
-
   const reference = event.data?.reference;
+
+  if (event.event === 'charge.failed' && reference) {
+    try {
+      const pendingPos = await Order.findOne({ payment_ref: reference, payment_status: 'pending', source: 'pos' })
+        || (event.data?.metadata?.pos_order_id
+          ? await Order.findOne({ _id: event.data.metadata.pos_order_id, payment_status: 'pending', source: 'pos' })
+          : null);
+      if (pendingPos) {
+        await failPendingPaystackOrder({
+          tenantId: pendingPos.tenant_id,
+          order: pendingPos,
+          reason: 'payment_failed',
+          message: event.data?.gateway_response || 'Payment failed.',
+        });
+      }
+    } catch (err) {
+      console.error('[Webhook] Paystack charge.failed failed:', err.message);
+    }
+    return;
+  }
+
+  if (event.event !== 'charge.success') return;
   if (!reference) return;
 
   try {

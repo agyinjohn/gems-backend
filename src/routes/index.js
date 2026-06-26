@@ -286,6 +286,7 @@ router.get('/pos/paystack/pending', authenticate, requireTenant, requireFeature(
 router.post('/pos/paystack/cancel', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.cancelPaystackPending);
 router.get('/pos/paystack/terminal', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.getVirtualTerminalInfo);
 router.get('/pos/display/current', authenticate, requireTenant, requireFeature('pos'), pos.getCustomerDisplaySession);
+router.get('/pos/display/queue', authenticate, requireTenant, requireFeature('pos'), pos.getDisplayQueueSession);
 router.post('/pos/display/show', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.publishDisplayOrder);
 router.post('/pos/display/clear', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.clearDisplaySession);
 router.post('/pos/shifts/open', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.openShift);
@@ -391,7 +392,18 @@ router.get('/pos/products', authenticate, requireTenant, requireFeature('pos'), 
     if (cat) filter.category_id = cat._id;
   }
   const products = await Product.find(filter).populate('category_id', 'name').sort('name').limit(200);
-  const data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name || 'General', barcode: p.barcode || null }));
+  const data = products.map((p) => {
+    const physical = p.stock_qty || 0;
+    const reserved = p.reserved_qty || 0;
+    const available = Math.max(0, physical - reserved);
+    return {
+      ...p.toObject(),
+      id: p._id,
+      category_name: p.category_id?.name || 'General',
+      barcode: p.barcode || null,
+      stock_qty: available,
+    };
+  });
   res.json({ success: true, data });
 });
 
