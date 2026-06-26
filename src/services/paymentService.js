@@ -146,8 +146,24 @@ async function verifyPaystackTransaction(reference) {
     secretKey,
   });
 
-  if (parsed.data?.status === 'success') return parsed.data;
+  if (parsed.data?.status === 'success' && parsed.data?.paid_at) return parsed.data;
   throw new Error(parsed.message || 'Payment verification failed.');
+}
+
+function isPaystackTransactionPaid(tx, expectedTotalGhs, expectedOrderId) {
+  if (!tx || tx.status !== 'success' || !tx.paid_at) return false;
+
+  const expectedKobo = Math.round(Number(expectedTotalGhs) * 100);
+  if (expectedKobo > 0 && Number(tx.amount) !== expectedKobo) return false;
+
+  const metaOrderId = tx.metadata?.pos_order_id || tx.metadata?.custom_fields?.find?.(
+    (f) => f.variable_name === 'pos_order_id',
+  )?.value;
+  if (expectedOrderId && metaOrderId && String(metaOrderId) !== String(expectedOrderId)) {
+    return false;
+  }
+
+  return true;
 }
 
 async function fetchPaystackTransaction(reference) {
@@ -262,6 +278,7 @@ module.exports = {
   verifyPaystackSignature,
   verifyPaystackTransaction,
   fetchPaystackTransaction,
+  isPaystackTransactionPaid,
   fulfillStorefrontOrders,
   failStorefrontOrders,
 };

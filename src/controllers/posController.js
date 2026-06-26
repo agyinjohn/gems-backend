@@ -391,11 +391,11 @@ const getPendingPaystackOrders = async (req, res) => {
 };
 
 const getDisplayQueueSession = async (req, res) => {
-  const queue = await getDisplayQueue({
+  const { queue, paid_flash } = await getDisplayQueue({
     tenantId: req.tenant_id,
     branchId: req.user.branch_id || null,
   });
-  res.json({ success: true, data: queue });
+  res.json({ success: true, data: queue, paid_flash });
 };
 
 const cancelPaystackPending = async (req, res) => {
@@ -425,6 +425,7 @@ const verifyPaystackPayment = async (req, res) => {
     });
     res.json({
       success: true,
+      already_fulfilled: !!result.already_fulfilled,
       data: { ...result.order.toJSON(), change: result.change, amount_tendered: result.amount_tendered },
     });
   } catch (err) {

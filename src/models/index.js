@@ -715,6 +715,13 @@ const posCustomerDisplaySchema = new Schema({
   published_at:       Date,
   expires_at:         Date,
   status:             { type: String, enum: ['active', 'cleared', 'expired'], default: 'active' },
+  paid_flash: {
+    order_id:       { type: Schema.Types.ObjectId, ref: 'Order' },
+    order_number:   String,
+    customer_name:  String,
+    amount:         Number,
+    at:             Date,
+  },
 }, { timestamps: true });
 posCustomerDisplaySchema.index({ tenant_id: 1, branch_key: 1 }, { unique: true });
 

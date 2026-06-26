@@ -153,7 +153,9 @@ async function getDisplayQueue({ tenantId, branchId }) {
     payment_status: 'pending',
     paystack_checkout_url: { $exists: true, $ne: '' },
   };
-  if (branchId) filter.branch_id = branchId;
+  if (branchId) {
+    filter.$or = [{ branch_id: branchId }, { branch_id: null }];
+  }
 
   const orders = await Order.find(filter)
     .sort({ createdAt: 1 })
@@ -166,7 +168,30 @@ async function getDisplayQueue({ tenantId, branchId }) {
     status: 'active',
   }).lean();
 
-  return orders.map((o) => ({
+  const displayDoc = await PosCustomerDisplay.findOne({
+    tenant_id: tenantId,
+    branch_key: branchKey(branchId),
+  }).lean();
+
+  let paid_flash = null;
+  if (displayDoc?.paid_flash?.at) {
+    const age = Date.now() - new Date(displayDoc.paid_flash.at).getTime();
+    if (age < 10_000) {
+      paid_flash = {
+        order_id: String(displayDoc.paid_flash.order_id || ''),
+        order_number: displayDoc.paid_flash.order_number,
+        customer_name: displayDoc.paid_flash.customer_name,
+        amount: displayDoc.paid_flash.amount,
+      };
+    } else {
+      await PosCustomerDisplay.updateOne(
+        { _id: displayDoc._id },
+        { $unset: { paid_flash: 1 } },
+      );
+    }
+  }
+
+  const queue = orders.map((o) => ({
     order_id: String(o._id),
     order_number: o.order_number,
     customer_name: o.customer_name,
@@ -176,6 +201,33 @@ async function getDisplayQueue({ tenantId, branchId }) {
     is_focused: focus ? String(focus.order_id) === String(o._id) : false,
     expires_at: o.pending_expires_at || null,
   }));
+
+  return { queue, paid_flash };
+}
+
+async function setPaidDisplayFlash({ tenantId, branchId, orderId, customerName, amount, orderNumber }) {
+  await PosCustomerDisplay.findOneAndUpdate(
+    { tenant_id: tenantId, branch_key: branchKey(branchId) },
+    {
+      $set: {
+        paid_flash: {
+          order_id: orderId,
+          order_number: orderNumber,
+          customer_name: customerName,
+          amount,
+          at: new Date(),
+        },
+      },
+      $setOnInsert: {
+        tenant_id: tenantId,
+        branch_id: branchId || null,
+        branch_key: branchKey(branchId),
+        order_id: orderId,
+        status: 'cleared',
+      },
+    },
+    { upsert: true },
+  );
 }
 
 async function cancelPendingPaystackOrder({ tenantId, orderId }) {
@@ -207,4 +259,5 @@ module.exports = {
   listPendingPaystackOrders,
   cancelPendingPaystackOrder,
   getDisplayQueue,
+  setPaidDisplayFlash,
 };

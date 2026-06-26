@@ -1,15 +1,16 @@
 const { Order } = require('../models');
-const { fetchPaystackTransaction } = require('./paymentService');
+const { fetchPaystackTransaction, isPaystackTransactionPaid } = require('./paymentService');
 const { fulfillPosPaystackOrder } = require('./posService');
 const { releaseStockForItems, mapOrderItems } = require('./posReservationService');
 const {
   listPendingPaystackOrders,
-  clearCustomerDisplayByOrderId,
   getDisplayQueue,
+  clearCustomerDisplayByOrderId,
 } = require('./posDisplayService');
 
-const PAYSTACK_CHECK_MIN_AGE_MS = 12 * 1000;
-const FAILED_PAYSTACK_STATUSES = new Set(['failed', 'reversed', 'abandoned', 'cancelled']);
+const PAYSTACK_CHECK_MIN_AGE_MS = 45 * 1000;
+/** Only hard-fail on Paystack statuses that mean the charge will not complete. */
+const FAILED_PAYSTACK_STATUSES = new Set(['failed', 'reversed']);
 
 async function failPendingPaystackOrder({ tenantId, order, reason, message }) {
   if (!order || order.payment_status !== 'pending') return null;
@@ -60,8 +61,19 @@ async function expireStalePendingOrders({ tenantId, userId, shiftId }) {
 
 async function syncPendingPaystackOrders({ tenantId, userId, branchId, shiftId }) {
   const events = [];
+  const eventKeys = new Set();
 
-  events.push(...await expireStalePendingOrders({ tenantId, userId, shiftId }));
+  const pushEvent = (ev) => {
+    if (!ev) return;
+    const key = `${ev.type}:${ev.order_id}`;
+    if (eventKeys.has(key)) return;
+    eventKeys.add(key);
+    events.push(ev);
+  };
+
+  for (const ev of await expireStalePendingOrders({ tenantId, userId, shiftId })) {
+    pushEvent(ev);
+  }
 
   const pendingOrders = await Order.find({
     tenant_id: tenantId,
@@ -87,7 +99,9 @@ async function syncPendingPaystackOrders({ tenantId, userId, branchId, shiftId }
       continue;
     }
 
-    if (tx?.status === 'success') {
+    if (!tx) continue;
+
+    if (isPaystackTransactionPaid(tx, order.total, order._id)) {
       try {
         const result = await fulfillPosPaystackOrder({
           tenantId,
@@ -96,22 +110,25 @@ async function syncPendingPaystackOrders({ tenantId, userId, branchId, shiftId }
           userId,
           branchId,
         });
-        events.push({
-          type: 'completed',
-          order_id: String(order._id),
-          order_number: result.order.order_number,
-          customer_name: order.customer_name,
-          total: order.total,
-        });
+        if (!result.already_fulfilled) {
+          pushEvent({
+            type: 'completed',
+            order_id: String(order._id),
+            order_number: result.order.order_number,
+            customer_name: order.customer_name,
+            total: order.total,
+          });
+        }
       } catch (err) {
         if (err.message?.includes('Insufficient stock')) {
+          const fresh = await Order.findById(order._id);
           const ev = await failPendingPaystackOrder({
             tenantId,
-            order: await Order.findById(order._id),
+            order: fresh,
             reason: 'insufficient_stock',
             message: 'Payment received but items no longer available. Refund customer on Paystack.',
           });
-          if (ev) events.push({ ...ev, reason: 'insufficient_stock' });
+          if (ev) pushEvent({ ...ev, reason: 'insufficient_stock' });
         }
       }
       continue;
@@ -122,16 +139,16 @@ async function syncPendingPaystackOrders({ tenantId, userId, branchId, shiftId }
         tenantId,
         order,
         reason: 'payment_failed',
-        message: tx.gateway_response || 'Payment was declined or cancelled.',
+        message: tx.gateway_response || 'Payment was declined.',
       });
-      if (ev) events.push(ev);
+      pushEvent(ev);
     }
   }
 
   const pending = await listPendingPaystackOrders({ tenantId, userId, shiftId });
-  const queue = await getDisplayQueue({ tenantId, branchId });
+  const display = await getDisplayQueue({ tenantId, branchId });
 
-  return { pending, events, queue };
+  return { pending, events, queue: display.queue, paid_flash: display.paid_flash };
 }
 
 module.exports = {
