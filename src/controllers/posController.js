@@ -1,5 +1,6 @@
 const { PosShift, Order, Tenant } = require('../models');
 const { getOpenShift, fulfillPosPaystackOrder } = require('../services/posService');
+const { buildZReport, listShifts, getShiftDetail } = require('../services/posShiftService');
 const {
   getPaystackCredentials,
   assertPaystackConfigured,
@@ -74,32 +75,22 @@ const closeShift = async (req, res) => {
   });
 };
 
+const listShiftHistory = async (req, res) => {
+  const data = await listShifts(req.tenant_id, req.user, req.query);
+  res.json({ success: true, ...data });
+};
+
+const getShiftHistoryDetail = async (req, res) => {
+  const data = await getShiftDetail(req.tenant_id, req.user, req.params.id);
+  if (!data) return res.status(404).json({ success: false, message: 'Shift not found.' });
+  res.json({ success: true, data });
+};
+
 const getZReport = async (req, res) => {
   const shift = await PosShift.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!shift) return res.status(404).json({ success: false, message: 'Shift not found.' });
   res.json({ success: true, data: buildZReport(shift) });
 };
-
-function buildZReport(shift) {
-  const expectedCash = shift.expected_cash ?? shift.opening_float;
-  const cashSales = Math.max(0, expectedCash - (shift.opening_float || 0));
-  return {
-    shift_number: shift.shift_number,
-    opened_at: shift.opened_at,
-    closed_at: shift.closed_at,
-    opening_float: shift.opening_float,
-    sales_count: shift.sales_count,
-    sales_total: shift.sales_total,
-    refunds_total: shift.refunds_total,
-    cash_sales: cashSales,
-    card_total: shift.card_total || 0,
-    momo_total: shift.momo_total || 0,
-    expected_cash: expectedCash,
-    actual_cash: shift.actual_cash,
-    cash_variance: shift.cash_variance,
-    status: shift.status,
-  };
-}
 
 const initPaystackPayment = async (req, res) => {
   const { items, customer_name, customer_phone, payment_method } = req.body;
@@ -438,6 +429,8 @@ module.exports = {
   openShift,
   getCurrentShift,
   closeShift,
+  listShiftHistory,
+  getShiftHistoryDetail,
   getZReport,
   initPaystackPayment,
   verifyPaystackPayment,

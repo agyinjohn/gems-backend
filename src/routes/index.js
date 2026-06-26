@@ -291,8 +291,10 @@ router.post('/pos/display/show', authenticate, requireTenant, requireFeature('po
 router.post('/pos/display/clear', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.clearDisplaySession);
 router.post('/pos/shifts/open', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.openShift);
 router.get('/pos/shifts/current', authenticate, requireTenant, requireFeature('pos'), pos.getCurrentShift);
+router.get('/pos/shifts', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.listShiftHistory);
 router.post('/pos/shifts/close', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.closeShift);
 router.get('/pos/shifts/:id/z-report', authenticate, requireTenant, requireFeature('pos'), pos.getZReport);
+router.get('/pos/shifts/:id', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.getShiftHistoryDetail);
 
 router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
   const { order_number, items, reason } = req.body;
