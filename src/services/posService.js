@@ -3,6 +3,7 @@ const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
 const { verifyPaystackTransaction } = require('./paymentService');
+const { clearCustomerDisplayByOrderId } = require('./posDisplayService');
 
 async function getOpenShift(tenantId, userId) {
   return PosShift.findOne({ tenant_id: tenantId, opened_by: userId, status: 'open' }).sort({ opened_at: -1 });
@@ -180,6 +181,8 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
     shift_id: pending.shift_id,
     amount_tendered,
   });
+
+  await clearCustomerDisplayByOrderId(pending._id);
 
   return { ...result, already_fulfilled: false };
 }

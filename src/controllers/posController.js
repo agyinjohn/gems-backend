@@ -11,6 +11,14 @@ const {
   getVirtualTerminalPayUrl,
   fetchVirtualTerminal,
 } = require('../services/virtualTerminalService');
+const {
+  publishCustomerDisplay,
+  getCustomerDisplay,
+  clearCustomerDisplay,
+  showOrderOnDisplay,
+  listPendingPaystackOrders,
+  cancelPendingPaystackOrder,
+} = require('../services/posDisplayService');
 
 const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
@@ -199,6 +207,22 @@ const initPaystackPayment = async (req, res) => {
         } catch { /* optional */ }
       }
 
+      order.paystack_checkout_url = paystackInit.authorization_url;
+      await order.save();
+
+      await publishCustomerDisplay({
+        tenantId: req.tenant_id,
+        branchId: req.user.branch_id || null,
+        orderId: order._id,
+        orderNumber: orderNumber,
+        customerName: order.customer_name,
+        amount: subtotal,
+        authorizationUrl: paystackInit.authorization_url,
+        reference,
+        paymentMethod: order.payment_method,
+        publishedBy: req.user._id,
+      });
+
       return res.json({
         success: true,
         data: {
@@ -270,6 +294,85 @@ const getVirtualTerminalInfo = async (req, res) => {
   }
 };
 
+const getCustomerDisplaySession = async (req, res) => {
+  const session = await getCustomerDisplay({
+    tenantId: req.tenant_id,
+    branchId: req.user.branch_id || null,
+  });
+
+  if (!session) {
+    return res.json({ success: true, data: null });
+  }
+
+  res.json({
+    success: true,
+    data: {
+      order_id: String(session.order_id),
+      order_number: session.order_number,
+      customer_name: session.customer_name,
+      amount: session.amount,
+      authorization_url: session.authorization_url,
+      reference: session.reference,
+      payment_method: session.payment_method,
+      published_at: session.published_at,
+    },
+  });
+};
+
+const publishDisplayOrder = async (req, res) => {
+  const { order_id } = req.body;
+  if (!order_id) return res.status(400).json({ success: false, message: 'order_id required.' });
+
+  try {
+    const session = await showOrderOnDisplay({
+      tenantId: req.tenant_id,
+      branchId: req.user.branch_id || null,
+      orderId: order_id,
+      userId: req.user._id,
+    });
+    res.json({
+      success: true,
+      data: {
+        order_id: String(session.order_id),
+        authorization_url: session.authorization_url,
+        amount: session.amount,
+      },
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message || 'Could not show on display.' });
+  }
+};
+
+const clearDisplaySession = async (req, res) => {
+  await clearCustomerDisplay({
+    tenantId: req.tenant_id,
+    branchId: req.user.branch_id || null,
+  });
+  res.json({ success: true, message: 'Customer display cleared.' });
+};
+
+const getPendingPaystackOrders = async (req, res) => {
+  const shift = await getOpenShift(req.tenant_id, req.user._id);
+  const data = await listPendingPaystackOrders({
+    tenantId: req.tenant_id,
+    userId: req.user._id,
+    shiftId: shift?._id,
+  });
+  res.json({ success: true, data });
+};
+
+const cancelPaystackPending = async (req, res) => {
+  const { order_id } = req.body;
+  if (!order_id) return res.status(400).json({ success: false, message: 'order_id required.' });
+
+  try {
+    const result = await cancelPendingPaystackOrder({ tenantId: req.tenant_id, orderId: order_id });
+    res.json({ success: true, message: `Cancelled ${result.order_number}.`, data: result });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message || 'Could not cancel.' });
+  }
+};
+
 const verifyPaystackPayment = async (req, res) => {
   const { reference, order_id, amount_tendered } = req.body;
   if (!reference || !order_id) return res.status(400).json({ success: false, message: 'reference and order_id required.' });
@@ -301,4 +404,9 @@ module.exports = {
   initPaystackPayment,
   verifyPaystackPayment,
   getVirtualTerminalInfo,
+  getCustomerDisplaySession,
+  publishDisplayOrder,
+  clearDisplaySession,
+  getPendingPaystackOrders,
+  cancelPaystackPending,
 };

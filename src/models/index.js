@@ -181,6 +181,7 @@ const orderSchema = new Schema({
   total:            { type: Number, default: 0 },
   payment_ref:      String,
   payment_method:   String,
+  paystack_checkout_url: String,
   payment_status:   { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' },
   status:           { type: String, enum: ['pending','processing','shipped','delivered','cancelled'], default: 'pending' },
   source:           { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
@@ -695,6 +696,25 @@ const posShiftSchema = new Schema({
 }, { timestamps: true });
 posShiftSchema.index({ tenant_id: 1, opened_by: 1, status: 1 });
 
+// POS CUSTOMER DISPLAY (one active session per branch)
+const posCustomerDisplaySchema = new Schema({
+  tenant_id:          { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:          { type: Schema.Types.ObjectId, ref: 'Branch' },
+  branch_key:         { type: String, required: true, default: 'default' },
+  order_id:           { type: Schema.Types.ObjectId, ref: 'Order', required: true },
+  order_number:       String,
+  customer_name:      String,
+  amount:             Number,
+  authorization_url:  String,
+  reference:          String,
+  payment_method:     String,
+  published_by:       { type: Schema.Types.ObjectId, ref: 'User' },
+  published_at:       Date,
+  expires_at:         Date,
+  status:             { type: String, enum: ['active', 'cleared', 'expired'], default: 'active' },
+}, { timestamps: true });
+posCustomerDisplaySchema.index({ tenant_id: 1, branch_key: 1 }, { unique: true });
+
 // STOREFRONT CUSTOMER
 const storeCustomerSchema = new Schema({
   tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -730,7 +750,7 @@ const allSchemas = [
   invoiceSchema, creditNoteSchema, accountingPeriodSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
-  posShiftSchema, storeCustomerSchema, couponSchema,
+  posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -784,6 +804,7 @@ module.exports = {
   Asset:                 mongoose.model('Asset', assetSchema),
   AssetLog:              mongoose.model('AssetLog', assetLogSchema),
   PosShift:              mongoose.model('PosShift', posShiftSchema),
+  PosCustomerDisplay:    mongoose.model('PosCustomerDisplay', posCustomerDisplaySchema),
   StoreCustomer:         mongoose.model('StoreCustomer', storeCustomerSchema),
   Coupon:                mongoose.model('Coupon', couponSchema),
 };

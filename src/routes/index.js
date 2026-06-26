@@ -282,7 +282,12 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
 
 router.post('/pos/paystack/init', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.initPaystackPayment);
 router.post('/pos/paystack/verify', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.verifyPaystackPayment);
+router.get('/pos/paystack/pending', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.getPendingPaystackOrders);
+router.post('/pos/paystack/cancel', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.cancelPaystackPending);
 router.get('/pos/paystack/terminal', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.getVirtualTerminalInfo);
+router.get('/pos/display/current', authenticate, requireTenant, requireFeature('pos'), pos.getCustomerDisplaySession);
+router.post('/pos/display/show', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.publishDisplayOrder);
+router.post('/pos/display/clear', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.clearDisplaySession);
 router.post('/pos/shifts/open', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.openShift);
 router.get('/pos/shifts/current', authenticate, requireTenant, requireFeature('pos'), pos.getCurrentShift);
 router.post('/pos/shifts/close', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), pos.closeShift);
