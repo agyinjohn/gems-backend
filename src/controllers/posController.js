@@ -1,5 +1,5 @@
 const { PosShift, Order, Tenant } = require('../models');
-const { getOpenShift, fulfillPosPaystackOrder } = require('../services/posService');
+const { getOpenShift, fulfillPosPaystackOrder, requireOpenShift } = require('../services/posService');
 const { buildZReport, listShifts, getShiftDetail } = require('../services/posShiftService');
 const {
   getPaystackCredentials,
@@ -105,7 +105,13 @@ const initPaystackPayment = async (req, res) => {
   const { items, customer_name, customer_phone, payment_method } = req.body;
   if (!items?.length) return res.status(400).json({ success: false, message: 'items required.' });
 
-  const shift = await getOpenShift(req.tenant_id, req.user._id);
+  let shift;
+  try {
+    shift = await requireOpenShift(req.tenant_id, req.user._id);
+  } catch (err) {
+    return res.status(err.status || 403).json({ success: false, message: err.message });
+  }
+
   const tenant = await Tenant.findById(req.tenant_id);
 
   let subtotal = 0;
@@ -150,7 +156,7 @@ const initPaystackPayment = async (req, res) => {
   const order = await Order.create({
     tenant_id: req.tenant_id,
     branch_id: req.user.branch_id || null,
-    shift_id: shift?._id || null,
+    shift_id: shift._id,
     order_number: orderNumber,
     customer_name: customer_name || 'Walk-in Customer',
     customer_phone: customer_phone || '',

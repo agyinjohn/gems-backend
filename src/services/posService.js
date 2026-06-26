@@ -9,6 +9,14 @@ async function getOpenShift(tenantId, userId) {
   return PosShift.findOne({ tenant_id: tenantId, opened_by: userId, status: 'open' }).sort({ opened_at: -1 });
 }
 
+async function requireOpenShift(tenantId, userId) {
+  const shift = await getOpenShift(tenantId, userId);
+  if (!shift) {
+    throw Object.assign(new Error('Open a shift before making sales.'), { status: 403 });
+  }
+  return shift;
+}
+
 async function recordShiftSale(shiftId, { amount, payment_method }) {
   if (!shiftId) return;
   const inc = { sales_count: 1, sales_total: amount };
@@ -214,6 +222,7 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
 
 module.exports = {
   getOpenShift,
+  requireOpenShift,
   completePosSale,
   recordShiftRefund,
   fulfillPosPaystackOrder,

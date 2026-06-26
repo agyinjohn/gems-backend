@@ -19,7 +19,7 @@ const accounting = require('../services/accountingService');
 const pos = require('../controllers/posController');
 const storeCustomer = require('../controllers/storeCustomerController');
 const { validateCoupon } = require('../services/couponService');
-const { completePosSale, getOpenShift, recordShiftRefund } = require('../services/posService');
+const { completePosSale, getOpenShift, requireOpenShift, recordShiftRefund } = require('../services/posService');
 const accountingRouter = require('./accounting');
 const reportsRouter = require('./reports');
 const {
@@ -261,7 +261,7 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
     return res.status(400).json({ success: false, message: 'Use Paystack flow for QR card, virtual terminal, and mobile money payments.' });
   }
   try {
-    const shift = await getOpenShift(req.tenant_id, req.user._id);
+    const shift = await requireOpenShift(req.tenant_id, req.user._id);
     const result = await completePosSale({
       tenantId: req.tenant_id,
       userId: req.user._id,
@@ -271,7 +271,7 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
       payment_ref: payment_ref || null,
       customer_name,
       customer_phone,
-      shift_id: shift?._id,
+      shift_id: shift._id,
       amount_tendered,
     });
     res.status(201).json({ success: true, data: { ...result.order.toJSON(), amount_tendered: result.amount_tendered, change: result.change } });
@@ -299,6 +299,12 @@ router.get('/pos/shifts/:id', authenticate, requireTenant, requireFeature('pos')
 router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
   const { order_number, items, reason } = req.body;
   if (!order_number) return res.status(400).json({ success: false, message: 'order_number required.' });
+
+  try {
+    await requireOpenShift(req.tenant_id, req.user._id);
+  } catch (err) {
+    return res.status(err.status || 403).json({ success: false, message: err.message });
+  }
 
   const order = await Order.findOne({ tenant_id: req.tenant_id, order_number, source: 'pos', payment_status: 'paid' });
   if (!order) return res.status(404).json({ success: false, message: 'POS sale not found or already refunded.' });
