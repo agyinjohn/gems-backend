@@ -32,13 +32,17 @@ const openShift = async (req, res) => {
   const existing = await getOpenShift(req.tenant_id, req.user._id);
   if (existing) return res.status(400).json({ success: false, message: 'You already have an open shift.', data: existing });
 
+  const openingFloat = parseFloat(req.body.opening_float) || 0;
+  const cashierName = String(req.body.cashier_name || '').trim() || req.user.name || req.user.email || 'Cashier';
+
   const shift = await PosShift.create({
     tenant_id: req.tenant_id,
     branch_id: req.user.branch_id || null,
     opened_by: req.user._id,
+    cashier_name: cashierName,
     shift_number: `SHIFT-${Date.now()}`,
-    opening_float: parseFloat(req.body.opening_float) || 0,
-    expected_cash: parseFloat(req.body.opening_float) || 0,
+    opening_float: openingFloat,
+    expected_cash: openingFloat,
     status: 'open',
   });
   res.status(201).json({ success: true, data: shift });
@@ -46,7 +50,12 @@ const openShift = async (req, res) => {
 
 const getCurrentShift = async (req, res) => {
   const shift = await getOpenShift(req.tenant_id, req.user._id);
-  res.json({ success: true, data: shift });
+  if (!shift) return res.json({ success: true, data: null });
+  const data = shift.toObject();
+  if (!data.cashier_name) {
+    data.cashier_name = req.user.name || req.user.email || 'Cashier';
+  }
+  res.json({ success: true, data });
 };
 
 const closeShift = async (req, res) => {

@@ -1,11 +1,18 @@
 const { PosShift, Order } = require('../models');
 
+function displayCashierName(shift) {
+  if (shift.cashier_name) return shift.cashier_name;
+  if (shift.opened_by?.name) return shift.opened_by.name;
+  return null;
+}
+
 function buildZReport(shift) {
   const openingFloat = shift.opening_float || 0;
   const expectedCash = shift.expected_cash ?? openingFloat;
   const cashSales = Math.max(0, expectedCash - openingFloat);
   return {
     shift_number: shift.shift_number,
+    cashier_name: displayCashierName(shift),
     opened_at: shift.opened_at,
     closed_at: shift.closed_at,
     opening_float: openingFloat,
@@ -71,6 +78,7 @@ async function listShifts(tenantId, user, query = {}) {
       momo_total: s.momo_total,
       cash_variance: s.cash_variance,
       notes: s.notes,
+      cashier_name: displayCashierName(s),
       opened_by: s.opened_by ? { id: s.opened_by._id, name: s.opened_by.name, email: s.opened_by.email } : null,
       closed_by: s.closed_by ? { id: s.closed_by._id, name: s.closed_by.name, email: s.closed_by.email } : null,
       branch: s.branch_id ? { id: s.branch_id._id, name: s.branch_id.name } : null,
@@ -192,6 +200,7 @@ async function getShiftDetail(tenantId, user, shiftId) {
       card_total: shift.card_total,
       momo_total: shift.momo_total,
       notes: shift.notes,
+      cashier_name: displayCashierName(shift),
       opened_by: shift.opened_by ? { id: shift.opened_by._id, name: shift.opened_by.name, email: shift.opened_by.email } : null,
       closed_by: shift.closed_by ? { id: shift.closed_by._id, name: shift.closed_by.name, email: shift.closed_by.email } : null,
       branch: shift.branch_id ? { id: shift.branch_id._id, name: shift.branch_id.name } : null,

@@ -681,6 +681,7 @@ const posShiftSchema = new Schema({
   tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   branch_id:      { type: Schema.Types.ObjectId, ref: 'Branch' },
   shift_number:   { type: String, required: true },
+  cashier_name:   String,
   opened_by:      { type: Schema.Types.ObjectId, ref: 'User', required: true },
   closed_by:      { type: Schema.Types.ObjectId, ref: 'User' },
   status:         { type: String, enum: ['open', 'closed'], default: 'open' },
