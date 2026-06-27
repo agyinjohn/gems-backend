@@ -39,6 +39,12 @@ const deleteCategory = async (req, res) => {
   res.json({ success: true, message: 'Category deleted.' });
 };
 
+function normalizeImages(images) {
+  if (images === undefined || images === null) return [];
+  const list = Array.isArray(images) ? images : [images];
+  return list.map((url) => String(url).trim()).filter(Boolean).slice(0, 8);
+}
+
 const getProducts = async (req, res) => {
   const { search, category_id, is_active, low_stock } = req.query;
   const filter = { tenant_id: req.tenant_id };
@@ -57,11 +63,17 @@ const getProduct = async (req, res) => {
   res.json({ success: true, data: { ...p.toObject(), id: p._id, category_name: p.category_id?.name } });
 };
 
+function normalizeCategoryId(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const str = String(value).trim();
+  return str || null;
+}
+
 const createProduct = async (req, res) => {
   const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images, attributes } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
   const finalSku = sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`;
-  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: category_id || null, price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: images || [], attributes: attributes || {}, created_by: req.user._id });
+  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: normalizeCategoryId(category_id), price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: normalizeImages(images), attributes: attributes || {}, created_by: req.user._id });
   if (stock_qty > 0) await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
   await audit(req, 'CREATE_PRODUCT', 'inventory', `${req.user.name} added product "${product.name}"`, { sku: product.sku, price: product.price });
   res.status(201).json({ success: true, message: 'Product created.', data: product });
@@ -73,14 +85,14 @@ const updateProduct = async (req, res) => {
   if (name !== undefined) update.name = name;
   if (barcode !== undefined) update.barcode = barcode?.trim() || null;
   if (description !== undefined) update.description = description;
-  if (category_id !== undefined) update.category_id = category_id;
+  if (category_id !== undefined) update.category_id = normalizeCategoryId(category_id);
   if (price !== undefined) update.price = price;
   if (cost_price !== undefined) update.cost_price = cost_price;
   if (stock_qty !== undefined) update.stock_qty = stock_qty;
   if (low_stock_threshold !== undefined) update.low_stock_threshold = low_stock_threshold;
   if (unit !== undefined) update.unit = unit;
   if (is_active !== undefined) update.is_active = is_active;
-  if (images !== undefined) update.images = images;
+  if (images !== undefined) update.images = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
   const product = await Product.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });

@@ -1,6 +1,15 @@
 const errorHandler = (err, req, res, next) => {
   console.error('Error:', err.message);
 
+  if (err.name === 'MulterError') {
+    const message = err.code === 'LIMIT_FILE_SIZE'
+      ? 'Each image must be 5MB or smaller.'
+      : err.code === 'LIMIT_FILE_COUNT'
+        ? 'You can upload up to 8 images at a time.'
+        : err.message;
+    return res.status(400).json({ success: false, message });
+  }
+
   // Postgres unique violation
   if (err.code === '23505') {
     return res.status(409).json({ success: false, message: 'A record with this value already exists.' });

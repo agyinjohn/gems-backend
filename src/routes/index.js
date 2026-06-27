@@ -10,7 +10,10 @@ const auth = require('../controllers/authController');
 const users = require('../controllers/usersController');
 const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
+const upload = require('../controllers/uploadController');
+const { imageUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
+const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
@@ -252,6 +255,14 @@ router.put('/products/:id', authenticate, requireTenant, authorize('business_own
 router.delete('/products/:id', authenticate, requireTenant, businessOwnerOnly, inventory.deleteProduct);
 router.post('/products/:id/adjust-stock', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.adjustStock);
 router.get('/products/:id/movements', authenticate, requireTenant, inventory.getStockMovements);
+router.post(
+  '/uploads/product-images',
+  authenticate,
+  requireTenant,
+  authorize('business_owner', 'branch_manager', 'warehouse_staff'),
+  imageUpload.array('images', 8),
+  upload.uploadProductImages,
+);
 
 // POS
 router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), authorize('business_owner', 'sales_staff', 'branch_manager'), async (req, res) => {
@@ -608,124 +619,27 @@ router.get('/payment-logs', authenticate, requireTenant, requireFeature('account
   res.json({ success: true, data: logs, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), summary });
 });
 
-// SUPPLIERS
-router.get('/suppliers', authenticate, requireTenant, async (req, res) => {
-  const data = await Supplier.find({ tenant_id: req.tenant_id, is_active: true }).sort('name');
-  res.json({ success: true, data });
-});
-router.post('/suppliers', authenticate, requireTenant, authorize('business_owner','procurement_officer'), async (req, res) => {
-  const { name, email, phone, address, payment_terms, notes } = req.body;
-  if (!name) return res.status(400).json({ success: false, message: 'Supplier name is required.' });
-  const data = await Supplier.create({ tenant_id: req.tenant_id, name, email, phone, address, payment_terms, notes });
-  res.status(201).json({ success: true, data });
-});
-router.put('/suppliers/:id', authenticate, requireTenant, authorize('business_owner','procurement_officer'), async (req, res) => {
-  const { name, email, phone, address, payment_terms, notes } = req.body;
-  const data = await Supplier.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { name, email, phone, address, payment_terms, notes }, { new: true });
-  if (!data) return res.status(404).json({ success: false, message: 'Supplier not found.' });
-  res.json({ success: true, data });
-});
-router.delete('/suppliers/:id', authenticate, requireTenant, authorize('business_owner','procurement_officer'), async (req, res) => {
-  await Supplier.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { is_active: false });
-  res.json({ success: true, message: 'Supplier deactivated.' });
-});
+// SUPPLIERS & PURCHASE ORDERS
+const procurementRoles = ['business_owner', 'procurement_officer'];
+const procurementApproveRoles = ['business_owner', 'accountant'];
+const procurementReceiveRoles = ['business_owner', 'warehouse_staff', 'procurement_officer'];
+const procurementPayRoles = ['business_owner', 'accountant', 'procurement_officer'];
 
-// PURCHASE ORDERS
-router.get('/purchase-orders', authenticate, requireTenant, async (req, res) => {
-  const filter = { tenant_id: req.tenant_id };
-  if (req.query.status) {
-    const statuses = req.query.status.split(',');
-    filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
-  }
-  if (req.query.payment_status) filter.payment_status = req.query.payment_status;
-  const data = await PurchaseOrder.find(filter).populate('supplier_id', 'name').sort({ createdAt: -1 });
-  res.json({ success: true, data });
-});
-router.get('/purchase-orders/:id', authenticate, requireTenant, async (req, res) => {
-  const po = await PurchaseOrder.findOne({ _id: req.params.id, tenant_id: req.tenant_id }).populate('supplier_id', 'name');
-  if (!po) return res.status(404).json({ success: false, message: 'PO not found.' });
-  res.json({ success: true, data: po });
-});
-router.post('/purchase-orders', authenticate, requireTenant, authorize('business_owner','procurement_officer'), async (req, res) => {
-  const { supplier_id, expected_date, notes, items } = req.body;
-  if (!supplier_id || !items?.length) return res.status(400).json({ success: false, message: 'supplier_id and items required.' });
-  let total_cost = 0;
-  const enriched = [];
-  for (const item of items) {
-    const p = await Product.findOne({ _id: item.product_id, tenant_id: req.tenant_id });
-    if (!p) return res.status(400).json({ success: false, message: 'Product not found.' });
-    const itemTotal = parseFloat(item.unit_cost) * parseInt(item.quantity_ordered);
-    total_cost += itemTotal;
-    enriched.push({ product_id: p._id, product_name: p.name, quantity_ordered: item.quantity_ordered, unit_cost: item.unit_cost, total: itemTotal });
-  }
-  const po = await PurchaseOrder.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, po_number: `PO-${Date.now()}`, supplier_id, total_cost, items: enriched, notes, expected_date: expected_date || null, created_by: req.user._id });
-  res.status(201).json({ success: true, data: po });
-});
-router.patch('/purchase-orders/:id/approve', authenticate, requireTenant, authorize('business_owner','accountant'), async (req, res) => {
-  const po = await PurchaseOrder.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { status: 'approved', approved_by: req.user._id, approved_at: new Date() }, { new: true });
-  res.json({ success: true, data: po });
-});
-router.patch('/purchase-orders/:id/send', authenticate, requireTenant, authorize('business_owner','procurement_officer'), async (req, res) => {
-  const po = await PurchaseOrder.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!po) return res.status(404).json({ success: false, message: 'PO not found.' });
-  if (po.status !== 'approved') return res.status(400).json({ success: false, message: 'Only approved POs can be marked as sent.' });
-  po.status = 'sent';
-  await po.save();
-  res.json({ success: true, data: po });
-});
-router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, authorize('business_owner','accountant','procurement_officer'), async (req, res) => {
-  const po = await PurchaseOrder.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!po) return res.status(404).json({ success: false, message: 'PO not found.' });
-  if (po.payment_status === 'paid') return res.status(400).json({ success: false, message: 'Already fully paid.' });
+router.get('/suppliers', authenticate, requireTenant, requireFeature('procurement'), procurement.listSuppliers);
+router.post('/suppliers', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.createSupplier);
+router.put('/suppliers/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.updateSupplier);
+router.delete('/suppliers/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.deactivateSupplier);
 
-  const { amount, method = 'bank_transfer', reference, note } = req.body;
-
-  // Calculate how much is still outstanding on this PO
-  const alreadyPaid = po.amount_paid || 0;
-  const outstanding = po.total_cost - alreadyPaid;
-  const paying = amount ? Math.min(parseFloat(amount), outstanding) : outstanding;
-  if (paying <= 0) return res.status(400).json({ success: false, message: 'Nothing left to pay on this PO.' });
-
-  po.amount_paid = parseFloat((alreadyPaid + paying).toFixed(2));
-  po.payment_status = po.amount_paid >= po.total_cost - 0.01 ? 'paid' : 'partial';
-  if (po.payment_status === 'paid') po.paid_at = new Date();
-
-  // Store payment record on the PO
-  if (!po.payments) po.payments = [];
-  po.payments.push({ amount: paying, method, reference: reference || null, note: note || null, date: new Date() });
-  await po.save();
-
-  await logPayment({ tenant_id: req.tenant_id, source: 'purchase_order', reference: po.po_number, amount: paying, method, status: 'success', description: `Supplier payment â€” ${po.po_number}${reference ? ' ref: ' + reference : ''}`, source_id: po._id, recorded_by: req.user._id });
-
-  // Post GL: Dr Accounts Payable / Cr Cash & Bank (for the amount actually paid)
-  await accounting.postPurchasePaymentEntry({ tenantId: req.tenant_id, amount: paying, reference: `${po.po_number}-${Date.now()}`, date: new Date(), sourceId: po._id, createdBy: req.user._id }).catch(() => {});
-
-  res.json({ success: true, data: po, paid: paying, outstanding: parseFloat((po.total_cost - po.amount_paid).toFixed(2)) });
-});
-router.post('/purchase-orders/:id/receive', authenticate, requireTenant, authorize('business_owner','warehouse_staff','procurement_officer'), async (req, res) => {
-  const { items } = req.body;
-  const po = await PurchaseOrder.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!po) return res.status(404).json({ success: false, message: 'PO not found.' });
-  let receivedTotal = 0;
-  for (const item of items) {
-    if (!item.receive_qty || item.receive_qty <= 0) continue;
-    const line = po.items.id(item._id);
-    if (line) {
-      line.quantity_received += item.receive_qty;
-      receivedTotal += item.receive_qty * (line.unit_cost || 0);
-    }
-    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: item.receive_qty } });
-    await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'purchase', quantity: item.receive_qty, reference: po.po_number, created_by: req.user._id });
-  }
-  const allDone = po.items.every(i => i.quantity_received >= i.quantity_ordered);
-  const anyDone = po.items.some(i => i.quantity_received > 0);
-  po.status = allDone ? 'completed' : anyDone ? 'partially_received' : 'approved';
-  await po.save();
-  if (receivedTotal > 0) {
-    await accounting.postPurchaseOrderEntry({ tenantId: req.tenant_id, amount: receivedTotal, reference: po.po_number, date: new Date(), sourceId: po._id, createdBy: req.user._id }).catch(() => {});
-  }
-  res.json({ success: true, message: 'Goods received.' });
-});
+router.get('/purchase-orders', authenticate, requireTenant, requireFeature('procurement'), procurement.listPurchaseOrders);
+router.get('/purchase-orders/:id', authenticate, requireTenant, requireFeature('procurement'), procurement.getPurchaseOrder);
+router.post('/purchase-orders', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.createPurchaseOrder);
+router.put('/purchase-orders/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.updatePurchaseOrder);
+router.patch('/purchase-orders/:id/submit', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.submitPurchaseOrder);
+router.patch('/purchase-orders/:id/approve', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementApproveRoles), procurement.approvePurchaseOrder);
+router.patch('/purchase-orders/:id/send', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.sendPurchaseOrder);
+router.patch('/purchase-orders/:id/cancel', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles, 'accountant'), procurement.cancelPurchaseOrder);
+router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementPayRoles), procurement.payPurchaseOrder);
+router.post('/purchase-orders/:id/receive', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementReceiveRoles), procurement.receiveGoods);
 
 
 router.get('/notifications', authenticate, async (req, res) => {
