@@ -10,8 +10,9 @@ const auth = require('../controllers/authController');
 const users = require('../controllers/usersController');
 const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
+const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
-const { imageUpload } = require('../middleware/uploadMiddleware');
+const { imageUpload, hrDocUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
@@ -664,8 +665,19 @@ router.get('/notifications', authenticate, async (req, res) => {
 
 // EMPLOYEE SELF-SERVICE
 router.get('/ess/me', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id }).populate('department_id', 'name');
-  res.json({ success: true, data: employee ? { ...employee.toJSON(), department_name: employee.department_id?.name } : null });
+  const hrService = require('../services/hrService');
+  const employee = await Employee.findOne({ user_id: req.user._id }).populate('department_id', 'name').populate('manager_id', 'name');
+  if (!employee) return res.json({ success: true, data: null });
+  res.json({
+    success: true,
+    data: {
+      ...employee.toJSON(),
+      id: employee._id,
+      department_name: employee.department_id?.name || null,
+      manager_name: employee.manager_id?.name || null,
+      leave_balance: hrService.getLeaveBalances(employee),
+    },
+  });
 });
 router.get('/ess/leave-requests', authenticate, async (req, res) => {
   const employee = await Employee.findOne({ user_id: req.user._id });
@@ -731,56 +743,24 @@ router.put('/departments/:id', authenticate, requireTenant, authorize('business_
   res.json({ success: true, data });
 });
 
-// EMPLOYEES
-router.get('/employees', authenticate, requireTenant, async (req, res) => {
-  const data = await Employee.find({ tenant_id: req.tenant_id }).populate('department_id', 'name').sort('name');
-  const mapped = data.map(e => ({ ...e.toJSON(), department_name: e.department_id?.name || null }));
-  res.json({ success: true, data: mapped });
-});
-router.post('/employees', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const { name, email, phone, department_id, job_title, gross_salary, start_date, employee_code,
-    photo, date_of_birth, gender, nationality, marital_status, national_id, address, employment_type,
-    emergency_name, emergency_phone, emergency_relation } = req.body;
-  if (!name || !gross_salary) return res.status(400).json({ success: false, message: 'name and gross_salary required.' });
-  const code = employee_code || `EMP-${Date.now().toString().slice(-6)}`;
-  const data = await Employee.create({
-    tenant_id: req.tenant_id, employee_code: code, name, email, phone,
-    department_id: department_id || null, job_title, gross_salary, start_date: start_date || null,
-    photo, date_of_birth: date_of_birth || null, gender, nationality, marital_status,
-    national_id, address, employment_type: employment_type || 'full_time',
-    emergency_name, emergency_phone, emergency_relation,
-  });
-  res.status(201).json({ success: true, data });
-});
-
-router.put('/employees/:id', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const allowed = ['name','email','phone','department_id','job_title','gross_salary','start_date','status',
-    'photo','date_of_birth','gender','nationality','marital_status','national_id','address','employment_type',
-    'emergency_name','emergency_phone','emergency_relation'];
-  const update = {};
-  allowed.forEach(k => { if (req.body[k] !== undefined) update[k] = req.body[k]; });
-  const data = await Employee.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
-  if (!data) return res.status(404).json({ success: false, message: 'Employee not found.' });
-  res.json({ success: true, data });
-});
-
-router.post('/employees/:id/documents', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const { name, type, file, mime_type } = req.body;
-  if (!name || !file) return res.status(400).json({ success: false, message: 'name and file required.' });
-  const emp = await Employee.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
-  emp.documents.push({ name, type: type || 'other', file, mime_type, uploaded_at: new Date() });
-  await emp.save();
-  res.json({ success: true, data: emp.documents });
-});
-
-router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const emp = await Employee.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
-  emp.documents = emp.documents.filter(d => String(d._id) !== req.params.docId);
-  await emp.save();
-  res.json({ success: true, message: 'Document deleted.' });
-});
+// EMPLOYEES & HR
+const hrRoles = ['business_owner', 'hr_manager'];
+router.get('/hr/summary', authenticate, requireTenant, authorize(...hrRoles), hr.hrSummary);
+router.get('/employees/linkable-users', authenticate, requireTenant, authorize(...hrRoles), hr.listLinkableUsers);
+router.get('/employees', authenticate, requireTenant, hr.listEmployees);
+router.get('/employees/:id', authenticate, requireTenant, hr.getEmployee);
+router.post('/employees', authenticate, requireTenant, authorize(...hrRoles), hr.createEmployee);
+router.put('/employees/:id', authenticate, requireTenant, authorize(...hrRoles), hr.updateEmployee);
+router.patch('/employees/:id/terminate', authenticate, requireTenant, authorize(...hrRoles), hr.terminateEmployee);
+router.post(
+  '/employees/:id/documents',
+  authenticate,
+  requireTenant,
+  authorize(...hrRoles),
+  hrDocUpload.single('file'),
+  hr.uploadDocument,
+);
+router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, authorize(...hrRoles), hr.deleteDocument);
 
 // ATTENDANCE
 router.get('/attendance', authenticate, requireTenant, async (req, res) => {
@@ -813,10 +793,7 @@ router.post('/leave-requests', authenticate, requireTenant, authorize('business_
   const data = await LeaveRequest.create({ tenant_id: req.tenant_id, employee_id, leave_type: leave_type || 'annual', start_date, end_date, reason });
   res.status(201).json({ success: true, data });
 });
-router.patch('/leave-requests/:id', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const data = await LeaveRequest.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { status: req.body.status, reviewed_by: req.user._id }, { new: true });
-  res.json({ success: true, data });
-});
+router.patch('/leave-requests/:id', authenticate, requireTenant, authorize('business_owner', 'hr_manager', 'branch_manager'), hr.approveLeave);
 
 // PAYROLL
 router.get('/payroll', authenticate, requireTenant, async (req, res) => {
@@ -824,16 +801,8 @@ router.get('/payroll', authenticate, requireTenant, async (req, res) => {
   const mapped = data.map(p => ({ ...p.toJSON(), employee_name: p.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
-router.post('/payroll', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const { employee_id, month, year, allowances, deductions } = req.body;
-  if (!employee_id) return res.status(400).json({ success: false, message: 'employee_id required.' });
-  const emp = await Employee.findOne({ _id: employee_id, tenant_id: req.tenant_id });
-  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
-  const gross = emp.gross_salary;
-  const net = gross + parseFloat(allowances || 0) - parseFloat(deductions || 0);
-  const data = await PayrollRun.create({ tenant_id: req.tenant_id, employee_id, month, year, gross_salary: gross, allowances: allowances || 0, deductions: deductions || 0, net_salary: net });
-  res.status(201).json({ success: true, data });
-});
+router.post('/payroll', authenticate, requireTenant, authorize(...hrRoles), hr.runPayroll);
+router.post('/payroll/bulk', authenticate, requireTenant, authorize(...hrRoles), hr.runBulkPayroll);
 router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
   const data = await PayrollRun.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { status: 'approved', approved_by: req.user._id }, { new: true });
   if (data) {

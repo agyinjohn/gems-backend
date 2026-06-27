@@ -12,4 +12,14 @@ const imageUpload = multer({
   },
 });
 
-module.exports = { imageUpload, MAX_FILES };
+const hrDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = file.mimetype?.startsWith('image/') || file.mimetype === 'application/pdf';
+    if (ok) return cb(null, true);
+    cb(new Error('Only images and PDF files are allowed.'));
+  },
+});
+
+module.exports = { imageUpload, hrDocUpload, MAX_FILES };

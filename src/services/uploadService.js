@@ -4,13 +4,12 @@ function httpError(message, status = 400) {
   return Object.assign(new Error(message), { status });
 }
 
-function uploadImageBuffer(buffer, folder, filename) {
+function uploadBuffer(buffer, folder, resourceType = 'image') {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
         folder,
-        resource_type: 'image',
-        public_id: filename ? undefined : undefined,
+        resource_type: resourceType,
         use_filename: true,
         unique_filename: true,
       },
@@ -20,15 +19,15 @@ function uploadImageBuffer(buffer, folder, filename) {
   });
 }
 
-async function uploadProductImages(tenantId, files) {
+async function uploadImages(tenantId, files, folderSuffix = 'products') {
   if (!isCloudinaryConfigured()) {
     throw httpError('Image upload is not configured. Set Cloudinary environment variables.', 503);
   }
   if (!files?.length) throw httpError('No images provided.');
 
-  const folder = `gems/${tenantId}/products`;
+  const folder = `gems/${tenantId}/${folderSuffix}`;
   const uploads = await Promise.all(
-    files.map((file) => uploadImageBuffer(file.buffer, folder, file.originalname)),
+    files.map((file) => uploadBuffer(file.buffer, folder, 'image')),
   );
 
   return uploads.map((result) => ({
@@ -37,4 +36,18 @@ async function uploadProductImages(tenantId, files) {
   }));
 }
 
-module.exports = { uploadProductImages, isCloudinaryConfigured };
+async function uploadProductImages(tenantId, files) {
+  return uploadImages(tenantId, files, 'products');
+}
+
+async function uploadHrFile(tenantId, employeeId, file) {
+  if (!isCloudinaryConfigured()) {
+    throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
+  }
+  const folder = `gems/${tenantId}/hr/${employeeId}`;
+  const resourceType = file.mimetype === 'application/pdf' ? 'raw' : 'image';
+  const result = await uploadBuffer(file.buffer, folder, resourceType);
+  return { url: result.secure_url, public_id: result.public_id };
+}
+
+module.exports = { uploadProductImages, uploadImages, uploadHrFile, isCloudinaryConfigured };
