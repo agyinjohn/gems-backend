@@ -107,48 +107,7 @@ async function glAccountActivity(tid, codes, from, to, direction = 'debit') {
 }
 
 async function buildGlPl(tid, from, to) {
-  const match = { tenant_id: tid, status: { $ne: 'voided' } };
-  if (from || to) {
-    match.entry_date = {};
-    if (from) match.entry_date.$gte = new Date(from);
-    if (to) match.entry_date.$lte = new Date(to);
-  }
-  const rows = await JournalEntry.aggregate([
-    { $match: match },
-    { $unwind: '$lines' },
-    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
-    { $unwind: '$acc' },
-    { $match: { 'acc.type': { $in: ['revenue', 'expense'] }, 'acc.is_group': { $ne: true } } },
-    { $group: { _id: { type: '$acc.type', code: '$acc.code', name: '$acc.name' }, debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
-  ]);
-
-  let revenue = 0;
-  let cogs = 0;
-  const expensesByCategory = [];
-
-  for (const row of rows) {
-    if (row._id.type === 'revenue') {
-      revenue += row.credit - row.debit;
-    } else if (row._id.code === '5001') {
-      cogs += row.debit - row.credit;
-    } else {
-      const amt = row.debit - row.credit;
-      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: amt });
-    }
-  }
-
-  const operatingExpenses = expensesByCategory.reduce((s, e) => s + e.total, 0);
-  const totalExpenses = operatingExpenses + cogs;
-  return {
-    source: 'gl',
-    revenue,
-    cogs,
-    gross_profit: revenue - cogs,
-    total_expenses: totalExpenses,
-    net_profit: revenue - totalExpenses,
-    expenses_by_category: expensesByCategory.sort((a, b) => b.total - a.total),
-    monthly: [],
-  };
+  return accounting.buildGlPl(tid, from, to);
 }
 
 // ACCOUNTING
@@ -506,30 +465,9 @@ router.get('/accounting/pl', async (req, res) => {
 });
 
 router.get('/accounting/summary', async (req, res) => {
-  const tid = req.tenant_id;
-  const now = new Date();
-  const yearStart = new Date(now.getFullYear(), 0, 1);
-  const [rev, exp, monthlyRev, expByCategory, cogsAgg] = await Promise.all([
-    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-    Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-    Order.aggregate([
-      { $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: yearStart } } },
-      { $group: { _id: { month: { $month: '$createdAt' } }, revenue: { $sum: '$total' } } },
-      { $sort: { '_id.month': 1 } },
-      { $project: { month: { $arrayElemAt: [['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], '$_id.month'] }, revenue: 1 } },
-    ]),
-    Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: { $ifNull: ['$category','Uncategorized'] }, total: { $sum: '$amount' } } }, { $sort: { total: -1 } }]),
-    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
-  ]);
-  const totalRevenue = rev[0]?.total || 0;
-  const totalExpenses = exp[0]?.total || 0;
-  const cogs = cogsAgg[0]?.cogs || 0;
-  res.json({ success: true, data: {
-    revenue: totalRevenue, expenses: totalExpenses, cogs,
-    gross_profit: totalRevenue - cogs, net_profit: totalRevenue - totalExpenses,
-    monthly_revenue: monthlyRev,
-    expenses_by_category: expByCategory.map(e => ({ category: e._id, total: e.total })),
-  }});
+  const period = ['mtd', 'ytd', 'all'].includes(req.query.period) ? req.query.period : 'ytd';
+  const data = await accounting.buildAccountingOverview(req.tenant_id, { period });
+  res.json({ success: true, data });
 });
 
 router.get('/accounting/gl/:accountId', async (req, res) => {

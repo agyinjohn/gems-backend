@@ -1,4 +1,6 @@
-const { JournalEntry, Account, AccountingPeriod } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense } = require('../models');
+
+const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const STANDARD_COA = [
   { code: '1000', name: 'Assets',               type: 'asset',     level: 1, is_group: true,  parent_code: null },
@@ -428,6 +430,348 @@ async function buildGlCashFlow(tenantId, from, to) {
   };
 }
 
+async function getGlBalanceMap(tenantId, asOf = null) {
+  const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (asOf) match.entry_date = { $lte: asOf };
+  const rows = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $group: {
+      _id: { code: '$acc.code', type: '$acc.type', name: '$acc.name', is_group: '$acc.is_group' },
+      debit: { $sum: '$lines.debit' },
+      credit: { $sum: '$lines.credit' },
+    }},
+  ]);
+  const map = {};
+  for (const r of rows) {
+    map[r._id.code] = { ...r._id, net: round2(r.debit - r.credit) };
+  }
+  return map;
+}
+
+function glNet(map, code) {
+  return map[code]?.net || 0;
+}
+
+/** Balance-sheet position from full GL map (all posting accounts, not hardcoded subset). */
+function buildPositionFromGlMap(glMap) {
+  const gl = (code) => glMap[code]?.net || 0;
+
+  let totalAssets = 0;
+  let totalLiabilities = 0;
+  let equityAccounts = 0;
+
+  for (const a of Object.values(glMap)) {
+    if (a.is_group) continue;
+    if (a.type === 'asset') totalAssets += a.net;
+    else if (a.type === 'liability') totalLiabilities += (-a.net);
+    else if (a.type === 'equity') equityAccounts += (-a.net);
+  }
+
+  const revenueBal = Object.values(glMap)
+    .filter((a) => a.type === 'revenue' && !a.is_group)
+    .reduce((s, a) => s + (-a.net), 0);
+  const expenseBal = Object.values(glMap)
+    .filter((a) => a.type === 'expense' && !a.is_group)
+    .reduce((s, a) => s + a.net, 0);
+  const currentNetIncome = round2(revenueBal - expenseBal);
+
+  totalAssets = round2(totalAssets);
+  totalLiabilities = round2(totalLiabilities);
+  equityAccounts = round2(equityAccounts);
+  const totalEquity = round2(equityAccounts + currentNetIncome);
+
+  return {
+    cash: gl('1001'),
+    accounts_receivable: gl('1110'),
+    accounts_payable: round2(-gl('2001')),
+    vat_payable: round2(-gl('2110')),
+    vat_input: gl('1135'),
+    inventory: gl('1120'),
+    prepaid: gl('1130'),
+    ppe: gl('1210'),
+    accumulated_depreciation: gl('1220'),
+    salaries_payable: round2(-gl('2130')),
+    ssnit_payable: round2(-gl('2140')),
+    paye_payable: round2(-gl('2141')),
+    total_assets: totalAssets,
+    total_liabilities: totalLiabilities,
+    total_equity: totalEquity,
+    current_net_income: currentNetIncome,
+    is_balanced: Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.02,
+  };
+}
+
+async function buildGlPl(tenantId, from, to) {
+  const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) match.entry_date.$lte = new Date(to);
+  }
+  const rows = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $match: { 'acc.type': { $in: ['revenue', 'expense'] }, 'acc.is_group': { $ne: true } } },
+    { $group: { _id: { type: '$acc.type', code: '$acc.code', name: '$acc.name' }, debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+  ]);
+
+  let revenue = 0;
+  let cogs = 0;
+  const expensesByCategory = [];
+
+  for (const row of rows) {
+    if (row._id.type === 'revenue') {
+      revenue += row.credit - row.debit;
+    } else if (row._id.code === '5001') {
+      cogs += row.debit - row.credit;
+    } else {
+      const amt = row.debit - row.credit;
+      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: round2(amt) });
+    }
+  }
+
+  const operatingExpenses = expensesByCategory.reduce((s, e) => s + e.total, 0);
+  const totalExpenses = operatingExpenses + cogs;
+  const allExpenses = [...expensesByCategory];
+  if (cogs > 0) allExpenses.unshift({ category: 'Cost of Goods Sold', code: '5001', total: round2(cogs) });
+  allExpenses.sort((a, b) => b.total - a.total);
+
+  return {
+    source: 'gl',
+    revenue: round2(revenue),
+    cogs: round2(cogs),
+    gross_profit: round2(revenue - cogs),
+    operating_expenses: round2(operatingExpenses),
+    total_expenses: round2(totalExpenses),
+    net_profit: round2(revenue - totalExpenses),
+    expenses_by_category: allExpenses,
+  };
+}
+
+async function buildGlMonthlyRevenue(tenantId, months = 6) {
+  const start = new Date();
+  start.setMonth(start.getMonth() - (months - 1));
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+
+  const rows = await JournalEntry.aggregate([
+    { $match: { tenant_id: tenantId, status: { $ne: 'voided' }, entry_date: { $gte: start } } },
+    { $unwind: '$lines' },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $match: { 'acc.type': 'revenue', 'acc.is_group': { $ne: true } } },
+    { $group: {
+      _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
+      revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
+    }},
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
+  ]);
+
+  const byKey = Object.fromEntries(
+    rows.map((r) => [`${r._id.year}-${r._id.month}`, round2(r.revenue)]),
+  );
+
+  const result = [];
+  const cursor = new Date(start);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+
+  while (cursor <= end) {
+    const y = cursor.getFullYear();
+    const m = cursor.getMonth() + 1;
+    result.push({
+      month: MONTH_LABELS[m] || '',
+      year: y,
+      label: `${MONTH_LABELS[m] || ''} ${y}`,
+      revenue: byKey[`${y}-${m}`] || 0,
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  return result.slice(-months);
+}
+
+function buildArAging(invoices) {
+  const now = Date.now();
+  const buckets = {
+    current: { count: 0, amount: 0 },
+    days_31_60: { count: 0, amount: 0 },
+    days_61_90: { count: 0, amount: 0 },
+    over_90: { count: 0, amount: 0 },
+  };
+
+  for (const inv of invoices) {
+    const due = parseFloat(inv.amount_due || 0);
+    if (due <= 0.01) continue;
+    const dueDate = new Date(inv.due_date || inv.issue_date).getTime();
+    const daysPastDue = Math.max(0, Math.floor((now - dueDate) / 86400000));
+    let key = 'current';
+    if (daysPastDue > 90) key = 'over_90';
+    else if (daysPastDue > 60) key = 'days_61_90';
+    else if (daysPastDue > 30) key = 'days_31_60';
+    buckets[key].count += 1;
+    buckets[key].amount = round2(buckets[key].amount + due);
+  }
+
+  const total = Object.values(buckets).reduce(
+    (s, b) => ({ count: s.count + b.count, amount: round2(s.amount + b.amount) }),
+    { count: 0, amount: 0 },
+  );
+
+  return { ...buckets, total };
+}
+
+async function buildAccountingOverview(tenantId, options = {}) {
+  const period = options.period || 'ytd';
+  const now = new Date();
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  let from = null;
+  let to = new Date();
+  to.setHours(23, 59, 59, 999);
+  let periodLabel = 'All time';
+  if (period === 'mtd') {
+    from = monthStart;
+    periodLabel = 'Month to date';
+  } else if (period === 'ytd') {
+    from = yearStart;
+    periodLabel = 'Year to date';
+  } else {
+    to = null;
+  }
+
+  const jePeriodMatch = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (from || to) {
+    jePeriodMatch.entry_date = {};
+    if (from) jePeriodMatch.entry_date.$gte = from;
+    if (to) jePeriodMatch.entry_date.$lte = to;
+  }
+
+  const [
+    pl,
+    glMap,
+    monthlyRevenue,
+    openInvoices,
+    recentJournal,
+    recentExpenses,
+    accountRows,
+    jeCount,
+    jePeriodCount,
+    periods,
+    overdueCount,
+  ] = await Promise.all([
+    buildGlPl(tenantId, from, to),
+    getGlBalanceMap(tenantId),
+    buildGlMonthlyRevenue(tenantId, 6),
+    Invoice.find({
+      tenant_id: tenantId,
+      status: { $in: ['sent', 'partially_paid', 'overdue'] },
+      amount_due: { $gt: 0.01 },
+    }).select('invoice_number customer_name amount_due due_date issue_date status'),
+    JournalEntry.find({ tenant_id: tenantId, status: { $ne: 'voided' } })
+      .sort({ entry_date: -1 })
+      .limit(8)
+      .select('reference description entry_date source status lines'),
+    Expense.find({ tenant_id: tenantId })
+      .sort({ expense_date: -1 })
+      .limit(8)
+      .select('title category amount expense_date'),
+    Account.find({ tenant_id: tenantId, is_active: true, is_group: { $ne: true } }).select('code name type'),
+    JournalEntry.countDocuments({ tenant_id: tenantId, status: { $ne: 'voided' } }),
+    JournalEntry.countDocuments(jePeriodMatch),
+    AccountingPeriod.find({ tenant_id: tenantId }).sort({ start_date: -1 }).limit(12),
+    Invoice.countDocuments({
+      tenant_id: tenantId,
+      status: { $in: ['sent', 'partially_paid', 'overdue'] },
+      amount_due: { $gt: 0.01 },
+      due_date: { $lt: now },
+    }),
+  ]);
+
+  const position = buildPositionFromGlMap(glMap);
+
+  const accountsByType = ['asset', 'liability', 'equity', 'revenue', 'expense'].map((type) => {
+    const typed = accountRows.filter((a) => a.type === type);
+    let balance = 0;
+    if (type === 'revenue') balance = pl.revenue;
+    else if (type === 'expense') balance = pl.total_expenses;
+    else {
+      balance = typed.reduce((s, a) => {
+        const net = glNet(glMap, a.code);
+        if (type === 'liability' || type === 'equity') return s + (-net);
+        return s + net;
+      }, 0);
+    }
+    return { type, count: typed.length, balance: round2(balance), scope: type === 'revenue' || type === 'expense' ? period : 'position' };
+  });
+
+  const currentPeriod = periods.find((p) => {
+    const start = new Date(p.start_date);
+    const end = new Date(p.end_date);
+    return p.status === 'open' && start <= now && end >= now;
+  }) || periods.find((p) => p.status === 'open') || null;
+
+  const arAging = buildArAging(openInvoices);
+  const invoiceArTotal = round2(openInvoices.reduce((s, i) => s + parseFloat(i.amount_due || 0), 0));
+  const arGlVsInvoiceDiff = round2(invoiceArTotal - position.accounts_receivable);
+
+  const recentJournalEntries = recentJournal.map((j) => ({
+    id: j._id,
+    reference: j.reference,
+    description: j.description,
+    entry_date: j.entry_date,
+    source: j.source,
+    status: j.status,
+    total_debit: round2((j.lines || []).reduce((s, l) => s + (l.debit || 0), 0)),
+  }));
+
+  return {
+    source: 'gl',
+    period,
+    period_label: periodLabel,
+    as_of: now.toISOString(),
+    pl,
+    position,
+    counts: {
+      journal_entries: jeCount,
+      journal_entries_in_period: jePeriodCount,
+      accounts: accountRows.length,
+      open_invoices: openInvoices.length,
+      overdue_invoices: overdueCount,
+      open_periods: periods.filter((p) => p.status === 'open').length,
+    },
+    ar_aging: arAging,
+    invoice_ar_total: invoiceArTotal,
+    ar_gl_vs_invoice_diff: arGlVsInvoiceDiff,
+    monthly_revenue: monthlyRevenue,
+    expenses_by_category: pl.expenses_by_category,
+    recent_journal: recentJournalEntries,
+    recent_expenses: recentExpenses,
+    current_period: currentPeriod
+      ? {
+          id: currentPeriod._id,
+          name: currentPeriod.name,
+          status: currentPeriod.status,
+          start_date: currentPeriod.start_date,
+          end_date: currentPeriod.end_date,
+        }
+      : null,
+    accounts_by_type: accountsByType,
+    // Legacy fields for backward compatibility
+    revenue: pl.revenue,
+    expenses: pl.total_expenses,
+    cogs: pl.cogs,
+    gross_profit: pl.gross_profit,
+    net_profit: pl.net_profit,
+  };
+}
+
 module.exports = {
   STANDARD_COA,
   seedChartOfAccounts,
@@ -448,5 +792,8 @@ module.exports = {
   postAssetAcquisitionEntry,
   postDepreciationEntry,
   buildGlCashFlow,
+  buildGlPl,
+  buildAccountingOverview,
+  buildPositionFromGlMap,
   round2,
 };
