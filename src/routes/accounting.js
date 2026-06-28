@@ -624,39 +624,17 @@ router.get('/accounting/vat-return', async (req, res) => {
 function round2(n) { return Math.round((parseFloat(n) || 0) * 100) / 100; }
 
 router.get('/accounting/pl', async (req, res) => {
-  const tid = req.tenant_id;
-  const { from, to, source } = req.query;
-
-  if (source === 'orders') {
-  const match = { tenant_id: tid, payment_status: 'paid' };
-  const expMatch = { tenant_id: tid };
-  if (from || to) {
-    match.createdAt = {}; expMatch.expense_date = {};
-    if (from) { match.createdAt.$gte = new Date(from); expMatch.expense_date.$gte = new Date(from); }
-    if (to)   { match.createdAt.$lte = new Date(to);   expMatch.expense_date.$lte = new Date(to); }
+  try {
+    const data = await accounting.buildPlView(req.tenant_id, {
+      from: req.query.from,
+      to: req.query.to,
+      source: req.query.source,
+      period: req.query.period,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  const [rev, cogs, expByCategory, monthly] = await Promise.all([
-    Order.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
-    Order.aggregate([{ $match: match }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
-    Expense.aggregate([{ $match: expMatch }, { $group: { _id: { $ifNull: ['$category','Uncategorized'] }, total: { $sum: '$amount' } } }, { $sort: { total: -1 } }]),
-    Order.aggregate([
-      { $match: match },
-      { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' } } },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-      { $project: { month: { $arrayElemAt: [['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], '$_id.month'] }, year: '$_id.year', revenue: 1 } },
-    ]),
-  ]);
-  const revenue = rev[0]?.total || 0;
-  const totalExpenses = expByCategory.reduce((s, e) => s + e.total, 0);
-  res.json({ success: true, data: {
-    source: 'orders',
-    revenue, gross_profit: revenue - (cogs[0]?.cogs || 0), total_expenses: totalExpenses, net_profit: revenue - totalExpenses,
-    expenses_by_category: expByCategory.map(e => ({ category: e._id, total: e.total })), monthly,
-  }});
-  }
-
-  const data = await buildGlPl(tid, from, to);
-  return res.json({ success: true, data });
 });
 
 router.get('/accounting/summary', async (req, res) => {

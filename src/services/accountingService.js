@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill, CreditNote, BankReconciliation } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -701,7 +701,11 @@ async function buildGlPl(tenantId, from, to) {
   if (from || to) {
     match.entry_date = {};
     if (from) match.entry_date.$gte = new Date(from);
-    if (to) match.entry_date.$lte = new Date(to);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.entry_date.$lte = end;
+    }
   }
   const rows = await JournalEntry.aggregate([
     { $match: match },
@@ -715,33 +719,204 @@ async function buildGlPl(tenantId, from, to) {
   let revenue = 0;
   let cogs = 0;
   const expensesByCategory = [];
+  const revenueByAccount = [];
 
   for (const row of rows) {
     if (row._id.type === 'revenue') {
-      revenue += row.credit - row.debit;
+      const amt = round2(row.credit - row.debit);
+      revenue += amt;
+      if (Math.abs(amt) > 0.001) {
+        revenueByAccount.push({ code: row._id.code, name: row._id.name, total: amt });
+      }
     } else if (row._id.code === '5001') {
-      cogs += row.debit - row.credit;
+      cogs += round2(row.debit - row.credit);
     } else {
-      const amt = row.debit - row.credit;
-      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: round2(amt) });
+      const amt = round2(row.debit - row.credit);
+      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: amt });
     }
   }
 
-  const operatingExpenses = expensesByCategory.reduce((s, e) => s + e.total, 0);
-  const totalExpenses = operatingExpenses + cogs;
+  revenue = round2(revenue);
+  const operatingExpenses = round2(expensesByCategory.reduce((s, e) => s + e.total, 0));
+  const totalExpenses = round2(operatingExpenses + cogs);
   const allExpenses = [...expensesByCategory];
   if (cogs > 0) allExpenses.unshift({ category: 'Cost of Goods Sold', code: '5001', total: round2(cogs) });
   allExpenses.sort((a, b) => b.total - a.total);
+  revenueByAccount.sort((a, b) => b.total - a.total);
+
+  const grossProfit = round2(revenue - cogs);
+  const netProfit = round2(revenue - totalExpenses);
 
   return {
     source: 'gl',
-    revenue: round2(revenue),
+    revenue,
     cogs: round2(cogs),
-    gross_profit: round2(revenue - cogs),
-    operating_expenses: round2(operatingExpenses),
-    total_expenses: round2(totalExpenses),
-    net_profit: round2(revenue - totalExpenses),
+    gross_profit: grossProfit,
+    operating_expenses: operatingExpenses,
+    total_expenses: totalExpenses,
+    net_profit: netProfit,
+    gross_margin_pct: revenue > 0 ? round2((grossProfit / revenue) * 100) : 0,
+    net_margin_pct: revenue > 0 ? round2((netProfit / revenue) * 100) : 0,
     expenses_by_category: allExpenses,
+    revenue_by_account: revenueByAccount,
+  };
+}
+
+function resolvePlDateRange(options = {}) {
+  const { from, to, period } = options;
+  const now = new Date();
+
+  if (from || to) {
+    return {
+      from: from || null,
+      to: to || null,
+      period_key: 'custom',
+      period_label: from && to ? `${from} to ${to}` : from ? `From ${from}` : to ? `Until ${to}` : 'Custom range',
+    };
+  }
+
+  if (period === 'mtd') {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return {
+      from: start.toISOString().slice(0, 10),
+      to: now.toISOString().slice(0, 10),
+      period_key: 'mtd',
+      period_label: 'Month to date',
+    };
+  }
+
+  if (period === 'all') {
+    return { from: null, to: null, period_key: 'all', period_label: 'All time' };
+  }
+
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  return {
+    from: yearStart.toISOString().slice(0, 10),
+    to: now.toISOString().slice(0, 10),
+    period_key: 'ytd',
+    period_label: 'Year to date',
+  };
+}
+
+async function buildGlMonthlyRevenueInRange(tenantId, from, to) {
+  const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.entry_date.$lte = end;
+    }
+  }
+
+  const rows = await JournalEntry.aggregate([
+    { $match: match },
+    { $unwind: '$lines' },
+    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
+    { $unwind: '$acc' },
+    { $match: { 'acc.type': 'revenue', 'acc.is_group': { $ne: true } } },
+    { $group: {
+      _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
+      revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
+    }},
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
+  ]);
+
+  return rows.map((r) => ({
+    month: MONTH_LABELS[r._id.month] || '',
+    year: r._id.year,
+    label: `${MONTH_LABELS[r._id.month] || ''} ${r._id.year}`,
+    revenue: round2(r.revenue),
+  }));
+}
+
+async function buildOrdersPl(tenantId, from, to) {
+  const match = { tenant_id: tenantId, payment_status: 'paid' };
+  const expMatch = { tenant_id: tenantId };
+  if (from || to) {
+    match.createdAt = {};
+    expMatch.expense_date = {};
+    if (from) {
+      match.createdAt.$gte = new Date(from);
+      expMatch.expense_date.$gte = new Date(from);
+    }
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.createdAt.$lte = end;
+      expMatch.expense_date.$lte = end;
+    }
+  }
+
+  const [rev, cogs, expByCategory, monthly] = await Promise.all([
+    Order.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
+    Order.aggregate([{ $match: match }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
+    Expense.aggregate([
+      { $match: expMatch },
+      { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, total: { $sum: '$amount' } } },
+      { $sort: { total: -1 } },
+    ]),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' } } },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+      { $project: {
+        month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] },
+        year: '$_id.year',
+        label: { $concat: [{ $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, ' ', { $toString: '$_id.year' }] },
+        revenue: 1,
+      } },
+    ]),
+  ]);
+
+  const revenue = round2(rev[0]?.total || 0);
+  const cogsTotal = round2(cogs[0]?.cogs || 0);
+  const expensesByCategory = expByCategory.map((e) => ({
+    category: e._id,
+    total: round2(e.total),
+  }));
+  const totalExpenses = round2(expensesByCategory.reduce((s, e) => s + e.total, 0));
+  const grossProfit = round2(revenue - cogsTotal);
+  const netProfit = round2(revenue - totalExpenses);
+
+  return {
+    source: 'orders',
+    revenue,
+    cogs: cogsTotal,
+    gross_profit: grossProfit,
+    operating_expenses: totalExpenses,
+    total_expenses: totalExpenses,
+    net_profit: netProfit,
+    gross_margin_pct: revenue > 0 ? round2((grossProfit / revenue) * 100) : 0,
+    net_margin_pct: revenue > 0 ? round2((netProfit / revenue) * 100) : 0,
+    expenses_by_category: expensesByCategory,
+    revenue_by_account: [],
+    monthly: monthly.map((m) => ({ ...m, revenue: round2(m.revenue) })),
+  };
+}
+
+async function buildPlView(tenantId, options = {}) {
+  const source = options.source === 'orders' ? 'orders' : 'gl';
+  const range = resolvePlDateRange(options);
+  const report = source === 'orders'
+    ? await buildOrdersPl(tenantId, range.from, range.to)
+    : await buildGlPl(tenantId, range.from, range.to);
+
+  if (source === 'gl') {
+    report.monthly = await buildGlMonthlyRevenueInRange(tenantId, range.from, range.to);
+  }
+
+  return {
+    ...report,
+    filters: {
+      from: range.from,
+      to: range.to,
+      source,
+      period: range.period_key,
+    },
+    period_label: range.period_label,
+    generated_at: new Date().toISOString(),
   };
 }
 
@@ -2009,6 +2184,8 @@ module.exports = {
   postDepreciationEntry,
   buildGlCashFlow,
   buildGlPl,
+  buildPlView,
+  buildOrdersPl,
   buildAccountingOverview,
   buildPositionFromGlMap,
   buildAccountsCoaView,
