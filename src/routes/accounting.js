@@ -269,35 +269,106 @@ router.patch('/accounts/:id/active', authorize('business_owner', 'accountant'), 
   res.json({ success: true, data: account });
 });
 router.get('/expenses', async (req, res) => {
-  const data = await Expense.find({ tenant_id: req.tenant_id }).populate('created_by', 'name').sort({ expense_date: -1 });
+  if (req.query.view === 'full') {
+    const data = await accounting.buildExpensesView(req.tenant_id, {
+      from: req.query.from || null,
+      to: req.query.to || null,
+      category: req.query.category || null,
+      search: req.query.search || '',
+    });
+    return res.json({ success: true, data });
+  }
+  const data = await Expense.find({ tenant_id: req.tenant_id })
+    .populate('created_by', 'name')
+    .sort({ expense_date: -1 });
   res.json({ success: true, data });
 });
+
 router.post('/expenses', authorize('business_owner', 'accountant'), async (req, res) => {
   const { title, category, amount, account_id, description, expense_date, receipt } = req.body;
-  if (!title || !amount) return res.status(400).json({ success: false, message: 'title and amount required.' });
-  const data = await Expense.create({ tenant_id: req.tenant_id, title, category, amount, account_id: account_id || null, description, expense_date: expense_date || Date.now(), receipt: receipt || null, created_by: req.user._id });
+  if (!title || amount === undefined || amount === null || amount === '') {
+    return res.status(400).json({ success: false, message: 'title and amount required.' });
+  }
+  const parsedAmount = parseFloat(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ success: false, message: 'amount must be greater than zero.' });
+  }
+  if (account_id) {
+    const acc = await Account.findOne({
+      _id: account_id,
+      tenant_id: req.tenant_id,
+      is_active: true,
+      is_group: { $ne: true },
+      type: 'expense',
+    });
+    if (!acc) return res.status(400).json({ success: false, message: 'Invalid expense GL account.' });
+  }
+  const data = await Expense.create({
+    tenant_id: req.tenant_id,
+    title: String(title).trim(),
+    category: category || '',
+    amount: parsedAmount,
+    account_id: account_id || null,
+    description: description || '',
+    expense_date: expense_date || Date.now(),
+    receipt: receipt || null,
+    created_by: req.user._id,
+  });
   try {
     await postExpenseToGl(data, req.user._id);
   } catch (err) {
     await Expense.findByIdAndDelete(data._id);
     return res.status(400).json({ success: false, message: err.message || 'Failed to post expense to ledger.' });
   }
-  res.status(201).json({ success: true, data });
+  const populated = await Expense.findById(data._id)
+    .populate('created_by', 'name')
+    .populate('account_id', 'code name')
+    .populate('journal_entry_id', 'reference status');
+  res.status(201).json({ success: true, data: populated });
 });
 router.put('/expenses/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   const { title, category, amount, account_id, description, expense_date, receipt } = req.body;
   const existing = await Expense.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!existing) return res.status(404).json({ success: false, message: 'Expense not found.' });
-  const update = { title, category, amount, account_id: account_id || null, description, expense_date };
+  const parsedAmount = parseFloat(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ success: false, message: 'amount must be greater than zero.' });
+  }
+  if (account_id) {
+    const acc = await Account.findOne({
+      _id: account_id,
+      tenant_id: req.tenant_id,
+      is_active: true,
+      is_group: { $ne: true },
+      type: 'expense',
+    });
+    if (!acc) return res.status(400).json({ success: false, message: 'Invalid expense GL account.' });
+  }
+  const update = {
+    title: String(title || existing.title).trim(),
+    category: category ?? existing.category,
+    amount: parsedAmount,
+    account_id: account_id || null,
+    description: description ?? existing.description,
+    expense_date: expense_date || existing.expense_date,
+  };
   if (receipt !== undefined) update.receipt = receipt || null;
   await voidExpenseJournalEntry(existing, req.user._id, 'Expense updated');
-  const data = await Expense.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
+  const data = await Expense.findOneAndUpdate(
+    { _id: req.params.id, tenant_id: req.tenant_id },
+    update,
+    { new: true },
+  );
   try {
     await postExpenseToGl(data, req.user._id);
   } catch (err) {
     return res.status(400).json({ success: false, message: err.message || 'Expense saved but ledger posting failed.' });
   }
-  res.json({ success: true, data });
+  const populated = await Expense.findById(data._id)
+    .populate('created_by', 'name')
+    .populate('account_id', 'code name')
+    .populate('journal_entry_id', 'reference status');
+  res.json({ success: true, data: populated });
 });
 router.delete('/expenses/:id', authorize('business_owner', 'accountant'), async (req, res) => {
   const existing = await Expense.findOne({ _id: req.params.id, tenant_id: req.tenant_id });

@@ -964,6 +964,102 @@ async function buildAccountingOverview(tenantId, options = {}) {
   };
 }
 
+const EXPENSE_CATEGORIES = [
+  { value: 'office', label: 'Office', account_code: '5200' },
+  { value: 'rent', label: 'Rent', account_code: '5300' },
+  { value: 'utilities', label: 'Utilities', account_code: '5300' },
+  { value: 'marketing', label: 'Marketing', account_code: '5400' },
+  { value: 'salaries', label: 'Salaries', account_code: '5100' },
+  { value: 'payroll', label: 'Payroll', account_code: '5100' },
+  { value: 'cogs', label: 'Cost of Goods Sold', account_code: '5001' },
+  { value: 'bank charges', label: 'Bank Charges', account_code: '5600' },
+  { value: 'depreciation', label: 'Depreciation', account_code: '5500' },
+  { value: 'other', label: 'Other', account_code: '5900' },
+];
+
+async function buildExpensesView(tenantId, options = {}) {
+  const { from, to, category, search, limit = 500 } = options;
+  const match = { tenant_id: tenantId };
+  if (from || to) {
+    match.expense_date = {};
+    if (from) match.expense_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.expense_date.$lte = end;
+    }
+  }
+  if (category) match.category = new RegExp(`^${category}$`, 'i');
+
+  const expenses = await Expense.find(match)
+    .populate('created_by', 'name')
+    .populate('account_id', 'code name type')
+    .populate('journal_entry_id', 'reference status entry_date')
+    .sort({ expense_date: -1 })
+    .limit(limit);
+
+  let rows = expenses.map((e) => {
+    const json = e.toJSON();
+    const acct = e.account_id && typeof e.account_id === 'object' ? e.account_id : null;
+    const je = e.journal_entry_id && typeof e.journal_entry_id === 'object' ? e.journal_entry_id : null;
+    return {
+      ...json,
+      account_id: acct?._id || json.account_id || null,
+      account_code: acct?.code || null,
+      account_name: acct?.name || null,
+      gl_reference: je?.reference || null,
+      gl_status: je?.status || null,
+      is_posted: !!je || !!json.journal_entry_id,
+    };
+  });
+
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((e) =>
+      e.title.toLowerCase().includes(q)
+      || (e.category || '').toLowerCase().includes(q)
+      || (e.description || '').toLowerCase().includes(q)
+      || (e.account_name || '').toLowerCase().includes(q)
+      || (e.gl_reference || '').toLowerCase().includes(q)
+    );
+  }
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+
+  const total = rows.reduce((s, e) => s + parseFloat(e.amount || 0), 0);
+  const mtd = rows
+    .filter((e) => new Date(e.expense_date) >= monthStart)
+    .reduce((s, e) => s + parseFloat(e.amount || 0), 0);
+  const ytd = rows
+    .filter((e) => new Date(e.expense_date) >= yearStart)
+    .reduce((s, e) => s + parseFloat(e.amount || 0), 0);
+
+  const byCategory = {};
+  for (const e of rows) {
+    const cat = e.category || 'Uncategorized';
+    byCategory[cat] = (byCategory[cat] || 0) + parseFloat(e.amount || 0);
+  }
+
+  return {
+    expenses: rows,
+    categories: EXPENSE_CATEGORIES,
+    summary: {
+      count: rows.length,
+      total: round2(total),
+      mtd: round2(mtd),
+      ytd: round2(ytd),
+      with_receipts: rows.filter((e) => e.receipt?.file).length,
+      posted: rows.filter((e) => e.is_posted).length,
+      unposted: rows.filter((e) => !e.is_posted).length,
+      by_category: Object.entries(byCategory)
+        .map(([cat, amt]) => ({ category: cat, total: round2(amt) }))
+        .sort((a, b) => b.total - a.total),
+    },
+  };
+}
+
 module.exports = {
   STANDARD_COA,
   seedChartOfAccounts,
@@ -994,5 +1090,7 @@ module.exports = {
   displayBalanceFromNet,
   isDebitNormalType,
   STANDARD_CODE_SET,
+  EXPENSE_CATEGORIES,
+  buildExpensesView,
   round2,
 };
