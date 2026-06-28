@@ -809,7 +809,20 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
     const emp = await Employee.findById(data.employee_id).select('name');
     const ref = `${emp?.name || data.employee_id}-${data.month}-${data.year}`;
     await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${ref}`, amount: data.net_salary, method: 'bank_transfer', status: 'success', payer_name: emp?.name, description: `Payroll approved for ${emp?.name || data.employee_id} â€” ${data.month}/${data.year}`, source_id: data._id, recorded_by: req.user._id });
-    await accounting.postPayrollEntry({ tenantId: req.tenant_id, amount: data.net_salary, reference: ref, date: new Date(), sourceId: data._id, createdBy: req.user._id }).catch(() => {});
+    await accounting.postPayrollEntry({
+      tenantId: req.tenant_id,
+      grossSalary: data.gross_salary,
+      allowances: data.allowances || 0,
+      paye: data.paye || 0,
+      ssnitEmployee: data.ssnit_employee || 0,
+      ssnitEmployer: data.ssnit_employer || 0,
+      netSalary: data.net_salary,
+      reference: ref,
+      date: new Date(),
+      sourceId: data._id,
+      createdBy: req.user._id,
+      payFromCash: true,
+    }).catch((err) => console.error('[Payroll] GL post failed:', err.message));
   }
   res.json({ success: true, data });
 });

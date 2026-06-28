@@ -269,7 +269,7 @@ const journalEntrySchema = new Schema({
   description:  { type: String, required: true },
   total_debit:  { type: Number, default: 0 },
   total_credit: { type: Number, default: 0 },
-  source:       { type: String, enum: ['manual','sale','purchase','payroll','expense'], default: 'manual' },
+  source:       { type: String, enum: ['manual','sale','purchase','payroll','expense','vendor_bill'], default: 'manual' },
   source_id:    Schema.Types.ObjectId,
   entry_date:   { type: Date, default: Date.now },
   lines:        [journalLineSchema],
@@ -649,6 +649,7 @@ const invoiceSchema = new Schema({
   status:         { type: String, enum: ['draft','sent','partially_paid','paid','overdue','void'], default: 'draft' },
   notes:          String,
   order_id:       { type: Schema.Types.ObjectId, ref: 'Order' },
+  journal_entry_id: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
   created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 invoiceSchema.index({ tenant_id: 1, invoice_number: 1 }, { unique: true });
@@ -679,6 +680,66 @@ const accountingPeriodSchema = new Schema({
   closed_at:  Date,
 }, { timestamps: true });
 accountingPeriodSchema.index({ tenant_id: 1, start_date: 1 }, { unique: true });
+
+const vendorBillLineSchema = new Schema({
+  description: String,
+  quantity:    { type: Number, default: 1 },
+  unit_price:  { type: Number, default: 0 },
+  tax_rate:    { type: Number, default: 0 },
+  total:       { type: Number, default: 0 },
+}, { _id: false });
+
+const vendorBillPaymentSchema = new Schema({
+  amount:    { type: Number, required: true },
+  method:    { type: String, default: 'bank_transfer' },
+  reference: String,
+  note:      String,
+  date:      { type: Date, default: Date.now },
+}, { _id: true });
+
+const vendorBillSchema = new Schema({
+  tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  bill_number:      { type: String, required: true },
+  vendor_name:      { type: String, required: true },
+  supplier_id:      { type: Schema.Types.ObjectId, ref: 'Supplier' },
+  issue_date:       { type: Date, default: Date.now },
+  due_date:         { type: Date, required: true },
+  lines:            [vendorBillLineSchema],
+  subtotal:         { type: Number, default: 0 },
+  tax_amount:       { type: Number, default: 0 },
+  total:            { type: Number, default: 0 },
+  amount_paid:      { type: Number, default: 0 },
+  amount_due:       { type: Number, default: 0 },
+  expense_account_id: { type: Schema.Types.ObjectId, ref: 'Account' },
+  journal_entry_id: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
+  payments:         [vendorBillPaymentSchema],
+  status:           { type: String, enum: ['draft','posted','partially_paid','paid','void'], default: 'draft' },
+  notes:            String,
+  created_by:       { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+vendorBillSchema.index({ tenant_id: 1, bill_number: 1 }, { unique: true });
+
+const bankReconLineSchema = new Schema({
+  date:        Date,
+  description: String,
+  amount:      Number,
+  matched_gl_id: String,
+  matched:     { type: Boolean, default: false },
+}, { _id: true });
+
+const bankReconciliationSchema = new Schema({
+  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  account_id:      { type: Schema.Types.ObjectId, ref: 'Account', required: true },
+  statement_date:  { type: Date, required: true },
+  opening_balance: { type: Number, default: 0 },
+  closing_balance: { type: Number, default: 0 },
+  bank_lines:      [bankReconLineSchema],
+  matched_pairs:   [{ bank_line_id: String, gl_line_id: String }],
+  status:          { type: String, enum: ['draft','completed'], default: 'draft' },
+  completed_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+  completed_at:    Date,
+  notes:           String,
+}, { timestamps: true });
 
 // BUDGET
 const budgetSchema = new Schema({
@@ -772,7 +833,7 @@ const allSchemas = [
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
   attendanceSchema, leaveRequestSchema, payrollRunSchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
-  invoiceSchema, creditNoteSchema, accountingPeriodSchema,
+  invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema,
@@ -821,6 +882,8 @@ module.exports = {
   Invoice:               mongoose.model('Invoice', invoiceSchema),
   CreditNote:            mongoose.model('CreditNote', creditNoteSchema),
   AccountingPeriod:      mongoose.model('AccountingPeriod', accountingPeriodSchema),
+  VendorBill:            mongoose.model('VendorBill', vendorBillSchema),
+  BankReconciliation:    mongoose.model('BankReconciliation', bankReconciliationSchema),
   ChatConversation:      mongoose.model('ChatConversation', chatConversationSchema),
   ChatMessage:           mongoose.model('ChatMessage', chatMessageSchema),
   Role:                  mongoose.model('Role', roleSchema),

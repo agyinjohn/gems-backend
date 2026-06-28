@@ -1,4 +1,5 @@
 const { StorageLocation, Asset, AssetCategory, AssetLog, Product } = require('../models');
+const accounting = require('../services/accountingService');
 const audit = require('../utils/audit');
 
 // ── STORAGE LOCATIONS ─────────────────────────────────────────────────────────
@@ -126,6 +127,17 @@ const createAsset = async (req, res) => {
     created_by: req.user._id,
   });
   await audit(req, 'CREATE_ASSET', 'assets', `${req.user.name} added asset "${name}"`, { asset_code });
+  if (parseFloat(purchase_value) > 0) {
+    await accounting.postAssetAcquisitionEntry({
+      tenantId: req.tenant_id,
+      amount: parseFloat(purchase_value),
+      reference: asset_code,
+      date: purchase_date ? new Date(purchase_date) : new Date(),
+      sourceId: asset._id,
+      createdBy: req.user._id,
+      paidFromCash: true,
+    }).catch((err) => console.error('[Assets] GL acquisition failed:', err.message));
+  }
   res.status(201).json({ success: true, data: asset });
 };
 
