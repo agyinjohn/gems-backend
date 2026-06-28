@@ -378,8 +378,32 @@ router.delete('/expenses/:id', authorize('business_owner', 'accountant'), async 
   res.json({ success: true, message: 'Deleted.' });
 });
 router.get('/journal-entries', async (req, res) => {
-  const data = await JournalEntry.find({ tenant_id: req.tenant_id }).sort({ entry_date: -1 }).limit(100);
-  res.json({ success: true, data });
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildJournalView(req.tenant_id, {
+        from: req.query.from,
+        to: req.query.to,
+        source: req.query.source,
+        status: req.query.status,
+        search: req.query.search,
+      });
+      return res.json({ success: true, data });
+    }
+    const data = await JournalEntry.find({ tenant_id: req.tenant_id }).sort({ entry_date: -1 }).limit(100);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/journal-entries/:id', async (req, res) => {
+  try {
+    const data = await accounting.buildJournalEntryDetail(req.tenant_id, req.params.id);
+    if (!data) return res.status(404).json({ success: false, message: 'Journal entry not found.' });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 router.post('/journal-entries', authorize('business_owner', 'accountant'), async (req, res) => {
   const { description, entry_date, lines } = req.body;
@@ -402,7 +426,8 @@ router.post('/journal-entries', authorize('business_owner', 'accountant'), async
       createdBy: req.user._id,
       reference: `JE-${Date.now()}`,
     });
-    res.status(201).json({ success: true, data });
+    const detail = await accounting.buildJournalEntryDetail(req.tenant_id, data._id);
+    res.status(201).json({ success: true, data: detail || data });
   } catch (err) {
     res.status(err.status || 400).json({ success: false, message: err.message });
   }

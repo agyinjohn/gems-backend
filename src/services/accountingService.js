@@ -1060,6 +1060,140 @@ async function buildExpensesView(tenantId, options = {}) {
   };
 }
 
+const JOURNAL_SOURCES = [
+  { value: 'manual', label: 'Manual' },
+  { value: 'sale', label: 'Sale' },
+  { value: 'purchase', label: 'Purchase' },
+  { value: 'payroll', label: 'Payroll' },
+  { value: 'expense', label: 'Expense' },
+  { value: 'vendor_bill', label: 'Vendor bill' },
+];
+
+function enrichJournalEntry(entry, accMap) {
+  const json = entry.toJSON ? entry.toJSON() : entry;
+  const enrichedLines = (json.lines || []).map((l) => {
+    const acct = accMap[String(l.account_id)] || null;
+    return {
+      ...l,
+      account_code: acct?.code || null,
+      account_name: acct?.name || null,
+      account_type: acct?.type || null,
+    };
+  });
+  return {
+    ...json,
+    lines: enrichedLines,
+    line_count: enrichedLines.length,
+    is_balanced: Math.abs((json.total_debit || 0) - (json.total_credit || 0)) < 0.01,
+  };
+}
+
+async function buildJournalView(tenantId, options = {}) {
+  const { from, to, source, status, search, limit = 500 } = options;
+  const match = { tenant_id: tenantId };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.entry_date.$lte = end;
+    }
+  }
+  if (source) match.source = source;
+  if (status) match.status = status;
+
+  const entries = await JournalEntry.find(match)
+    .populate('created_by', 'name')
+    .populate('voided_by', 'name')
+    .sort({ entry_date: -1, createdAt: -1 })
+    .limit(limit);
+
+  const accountIds = new Set();
+  for (const e of entries) {
+    for (const l of e.lines) {
+      if (l.account_id) accountIds.add(String(l.account_id));
+    }
+  }
+  const accounts = accountIds.size
+    ? await Account.find({ tenant_id: tenantId, _id: { $in: [...accountIds] } }).select('code name type')
+    : [];
+  const accMap = Object.fromEntries(accounts.map((a) => [String(a._id), a]));
+
+  let rows = entries.map((e) => enrichJournalEntry(e, accMap));
+
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((e) =>
+      (e.reference || '').toLowerCase().includes(q)
+      || (e.description || '').toLowerCase().includes(q)
+      || (e.source || '').toLowerCase().includes(q)
+      || (e.created_by?.name || '').toLowerCase().includes(q)
+      || (e.void_reason || '').toLowerCase().includes(q)
+      || (e.lines || []).some((l) =>
+        (l.account_code || '').toLowerCase().includes(q)
+        || (l.account_name || '').toLowerCase().includes(q)
+        || (l.description || '').toLowerCase().includes(q)
+      )
+    );
+  }
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+
+  const postedRows = rows.filter((e) => e.status !== 'voided');
+  const voidedRows = rows.filter((e) => e.status === 'voided');
+
+  const bySource = {};
+  for (const e of postedRows) {
+    const src = e.source || 'manual';
+    bySource[src] = (bySource[src] || 0) + 1;
+  }
+
+  const sumDebits = (list) => list.reduce((s, e) => s + parseFloat(e.total_debit || 0), 0);
+  const mtdPosted = postedRows.filter((e) => new Date(e.entry_date) >= monthStart);
+  const ytdPosted = postedRows.filter((e) => new Date(e.entry_date) >= yearStart);
+
+  return {
+    entries: rows,
+    sources: JOURNAL_SOURCES,
+    summary: {
+      count: rows.length,
+      posted: postedRows.length,
+      voided: voidedRows.length,
+      total_debit: round2(sumDebits(postedRows)),
+      total_credit: round2(sumDebits(postedRows)),
+      mtd_count: mtdPosted.length,
+      mtd_debit: round2(sumDebits(mtdPosted)),
+      ytd_count: ytdPosted.length,
+      manual_count: postedRows.filter((e) => e.source === 'manual').length,
+      system_count: postedRows.filter((e) => e.source !== 'manual').length,
+      by_source: Object.entries(bySource)
+        .map(([src, cnt]) => ({
+          source: src,
+          label: JOURNAL_SOURCES.find((s) => s.value === src)?.label || src,
+          count: cnt,
+        }))
+        .sort((a, b) => b.count - a.count),
+    },
+  };
+}
+
+async function buildJournalEntryDetail(tenantId, entryId) {
+  const entry = await JournalEntry.findOne({ _id: entryId, tenant_id: tenantId })
+    .populate('created_by', 'name')
+    .populate('voided_by', 'name');
+  if (!entry) return null;
+
+  const accountIds = entry.lines.map((l) => l.account_id).filter(Boolean);
+  const accounts = accountIds.length
+    ? await Account.find({ tenant_id: tenantId, _id: { $in: accountIds } }).select('code name type')
+    : [];
+  const accMap = Object.fromEntries(accounts.map((a) => [String(a._id), a]));
+  return enrichJournalEntry(entry, accMap);
+}
+
 module.exports = {
   STANDARD_COA,
   seedChartOfAccounts,
@@ -1092,5 +1226,8 @@ module.exports = {
   STANDARD_CODE_SET,
   EXPENSE_CATEGORIES,
   buildExpensesView,
+  JOURNAL_SOURCES,
+  buildJournalView,
+  buildJournalEntryDetail,
   round2,
 };
