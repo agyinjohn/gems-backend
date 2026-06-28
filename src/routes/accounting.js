@@ -462,45 +462,29 @@ router.get('/accounting/balance-sheet', async (req, res) => {
 });
 
 router.get('/accounting/vat-return', async (req, res) => {
-  const tid = req.tenant_id;
-  const match = { tenant_id: tid, status: { $ne: 'voided' } };
-  if (req.query.from || req.query.to) {
-    match.entry_date = {};
-    if (req.query.from) match.entry_date.$gte = new Date(req.query.from);
-    if (req.query.to)   match.entry_date.$lte = new Date(req.query.to);
+  try {
+    const data = await accounting.buildVatReturnView(req.tenant_id, {
+      from: req.query.from,
+      to: req.query.to,
+      period: req.query.period || (req.query.from || req.query.to ? 'custom' : undefined),
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
   }
-  const [vatPayable, vatInput] = await Promise.all([
-    Account.findOne({ tenant_id: tid, code: '2110' }),
-    Account.findOne({ tenant_id: tid, code: '1135' }),
-  ]);
-  if (!vatPayable) return res.status(404).json({ success: false, message: 'VAT Payable account (2110) not found.' });
+});
 
-  const [outputAgg, inputAgg] = await Promise.all([
-    JournalEntry.aggregate([
-      { $match: match },
-      { $unwind: '$lines' },
-      { $match: { 'lines.account_id': vatPayable._id } },
-      { $group: { _id: null, output_vat: { $sum: '$lines.credit' }, adjustments: { $sum: '$lines.debit' } } },
-    ]),
-    vatInput ? JournalEntry.aggregate([
-      { $match: match },
-      { $unwind: '$lines' },
-      { $match: { 'lines.account_id': vatInput._id } },
-      { $group: { _id: null, input_vat: { $sum: '$lines.debit' }, reversals: { $sum: '$lines.credit' } } },
-    ]) : [],
-  ]);
-
-  const output_vat = round2((outputAgg[0]?.output_vat || 0) - (outputAgg[0]?.adjustments || 0));
-  const input_vat  = round2((inputAgg[0]?.input_vat || 0) - (inputAgg[0]?.reversals || 0));
-  const net_vat_payable = round2(output_vat - input_vat);
-
-  res.json({ success: true, data: {
-    period: { from: req.query.from || null, to: req.query.to || null },
-    output_vat,
-    input_vat,
-    net_vat_payable,
-    status: net_vat_payable >= 0 ? 'payable' : 'reclaimable',
-  }});
+router.get('/accounting/tax', async (req, res) => {
+  try {
+    const data = await accounting.buildTaxView(req.tenant_id, {
+      from: req.query.from,
+      to: req.query.to,
+      period: req.query.period || (req.query.from || req.query.to ? 'custom' : undefined),
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
 });
 
 function round2(n) { return Math.round((parseFloat(n) || 0) * 100) / 100; }

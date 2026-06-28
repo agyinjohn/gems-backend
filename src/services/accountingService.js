@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation, Budget } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation, Budget, TaxRate } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -832,6 +832,162 @@ async function buildBudgetView(tenantId, options = {}) {
     },
     categories: EXPENSE_CATEGORIES,
   };
+}
+
+async function buildTaxRatesView(tenantId) {
+  const rates = await TaxRate.find({ tenant_id: tenantId }).sort('name');
+  const rows = rates.map((r) => {
+    const json = r.toJSON?.() || r;
+    return {
+      id: json.id || String(json._id),
+      name: json.name,
+      rate: round2(json.rate),
+      applies_to: json.applies_to || 'both',
+      is_active: json.is_active !== false,
+    };
+  });
+
+  return {
+    generated_at: new Date().toISOString(),
+    rows,
+    summary: {
+      total: rows.length,
+      active: rows.filter((r) => r.is_active).length,
+      inactive: rows.filter((r) => !r.is_active).length,
+      sales_rates: rows.filter((r) => r.is_active && (r.applies_to === 'sales' || r.applies_to === 'both')).length,
+      purchase_rates: rows.filter((r) => r.is_active && (r.applies_to === 'purchases' || r.applies_to === 'both')).length,
+    },
+  };
+}
+
+function buildJournalDateMatch(tenantId, from, to) {
+  const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.entry_date.$lte = end;
+    }
+  }
+  return match;
+}
+
+async function buildVatReturnView(tenantId, options = {}) {
+  const range = resolveReportDateRange(options);
+  if (range.requires_dates) {
+    return {
+      empty: true,
+      message: 'Select a from and/or to date for a custom range.',
+      filters: { from: null, to: null, period: 'custom' },
+      period_label: range.period_label,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
+  const match = buildJournalDateMatch(tenantId, range.from, range.to);
+  const [vatPayable, vatInput] = await Promise.all([
+    Account.findOne({ tenant_id: tenantId, code: '2110' }),
+    Account.findOne({ tenant_id: tenantId, code: '1135' }),
+  ]);
+
+  if (!vatPayable) {
+    const err = new Error('VAT Payable account (2110) not found. Seed the chart of accounts first.');
+    err.status = 404;
+    throw err;
+  }
+
+  const outputPipeline = [
+    { $match: match },
+    { $unwind: '$lines' },
+    { $match: { 'lines.account_id': vatPayable._id } },
+    {
+      $group: {
+        _id: null,
+        credits: { $sum: '$lines.credit' },
+        debits: { $sum: '$lines.debit' },
+        entries: { $addToSet: '$_id' },
+      },
+    },
+  ];
+
+  const inputPipeline = vatInput ? [
+    { $match: match },
+    { $unwind: '$lines' },
+    { $match: { 'lines.account_id': vatInput._id } },
+    {
+      $group: {
+        _id: null,
+        debits: { $sum: '$lines.debit' },
+        credits: { $sum: '$lines.credit' },
+        entries: { $addToSet: '$_id' },
+      },
+    },
+  ] : [];
+
+  const [outputAgg, inputAgg] = await Promise.all([
+    JournalEntry.aggregate(outputPipeline),
+    inputPipeline.length ? JournalEntry.aggregate(inputPipeline) : Promise.resolve([]),
+  ]);
+
+  const outputCredits = round2(outputAgg[0]?.credits || 0);
+  const outputDebits = round2(outputAgg[0]?.debits || 0);
+  const inputDebits = round2(inputAgg[0]?.debits || 0);
+  const inputCredits = round2(inputAgg[0]?.credits || 0);
+  const output_vat = round2(outputCredits - outputDebits);
+  const input_vat = round2(inputDebits - inputCredits);
+  const net_vat_payable = round2(output_vat - input_vat);
+  const status = net_vat_payable >= 0 ? 'payable' : 'reclaimable';
+
+  const asOf = range.to ? parseOptionalDate(range.to) : new Date();
+  const asOfFilter = asOf ? new Date(asOf) : new Date();
+  asOfFilter.setHours(23, 59, 59, 999);
+  const glMap = await getGlBalanceMap(tenantId, asOfFilter);
+  const gl_vat_payable = round2(-glNet(glMap, '2110'));
+  const gl_vat_input = round2(glNet(glMap, '1135'));
+
+  return {
+    filters: {
+      from: range.from,
+      to: range.to,
+      period: range.period_key,
+    },
+    period_label: range.period_label,
+    generated_at: new Date().toISOString(),
+    accounts: {
+      vat_payable_code: '2110',
+      vat_payable_name: vatPayable.name,
+      vat_input_code: vatInput?.code || '1135',
+      vat_input_name: vatInput?.name || 'VAT Input',
+      vat_input_configured: !!vatInput,
+    },
+    output_vat,
+    input_vat,
+    net_vat_payable,
+    status,
+    status_label: status === 'payable' ? 'Payable to tax authority' : 'Reclaimable from tax authority',
+    breakdown: {
+      output: { credits: outputCredits, debits: outputDebits, net: output_vat, entry_count: outputAgg[0]?.entries?.length || 0 },
+      input: { debits: inputDebits, credits: inputCredits, net: input_vat, entry_count: inputAgg[0]?.entries?.length || 0 },
+    },
+    gl_balances: {
+      vat_payable: gl_vat_payable,
+      vat_input: gl_vat_input,
+      as_of: formatLocalDate(asOfFilter),
+    },
+    checks: {
+      vat_input_account_present: !!vatInput,
+    },
+  };
+}
+
+async function buildTaxView(tenantId, options = {}) {
+  const [rates, vat] = await Promise.all([
+    buildTaxRatesView(tenantId),
+    buildVatReturnView(tenantId, options),
+  ]);
+  return { ...rates, vat };
 }
 
 async function getGlBalanceMap(tenantId, asOf = null) {
@@ -2626,6 +2782,9 @@ module.exports = {
   buildGlCashFlow,
   buildCashFlowView,
   buildBudgetView,
+  buildTaxRatesView,
+  buildVatReturnView,
+  buildTaxView,
   resolveReportDateRange,
   buildGlPl,
   buildPlView,
