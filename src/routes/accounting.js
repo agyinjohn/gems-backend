@@ -136,6 +136,16 @@ router.get('/accounting/trial-balance', async (req, res) => {
 });
 
 router.get('/accounts', async (req, res) => {
+  if (req.query.view === 'coa') {
+    const data = await accounting.buildAccountsCoaView(req.tenant_id, {
+      include_groups: req.query.include_groups !== 'false',
+      active_only: req.query.active_only !== 'false',
+      type: req.query.type || null,
+      search: req.query.search || '',
+    });
+    return res.json({ success: true, data });
+  }
+
   const tid = req.tenant_id;
   const [accounts, jeBalances] = await Promise.all([
     Account.find({ tenant_id: tid, is_active: true }).sort('code'),
@@ -145,29 +155,118 @@ router.get('/accounts', async (req, res) => {
       { $group: { _id: '$lines.account_id', balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
     ]),
   ]);
-  const jeMap = Object.fromEntries(jeBalances.map(b => [String(b._id), b.balance]));
-  const data = accounts.map(a => ({ ...a.toJSON(), balance: jeMap[String(a._id)] || 0 }));
+  const jeMap = Object.fromEntries(jeBalances.map((b) => [String(b._id), b.balance]));
+  const data = accounts.map((a) => {
+    const rawNet = jeMap[String(a._id)] || 0;
+    return {
+      ...a.toJSON(),
+      balance: rawNet,
+      display_balance: accounting.displayBalanceFromNet(a.type, rawNet),
+    };
+  });
   res.json({ success: true, data });
 });
+
 router.post('/accounts', authorize('business_owner', 'accountant'), async (req, res) => {
-  const { code, name, type, description } = req.body;
+  const { code, name, type, description, opening_balance, parent_id } = req.body;
   if (!code || !name || !type) return res.status(400).json({ success: false, message: 'code, name and type required.' });
-  const exists = await Account.findOne({ tenant_id: req.tenant_id, code });
+  if (!['asset', 'liability', 'equity', 'revenue', 'expense'].includes(type)) {
+    return res.status(400).json({ success: false, message: 'Invalid account type.' });
+  }
+  const exists = await Account.findOne({ tenant_id: req.tenant_id, code: String(code).trim() });
   if (exists) return res.status(400).json({ success: false, message: 'Account code already exists.' });
-  const data = await Account.create({ tenant_id: req.tenant_id, code, name, type, description });
+
+  let parent = null;
+  if (parent_id) {
+    parent = await Account.findOne({ _id: parent_id, tenant_id: req.tenant_id, is_group: true });
+    if (!parent) return res.status(400).json({ success: false, message: 'Parent group account not found.' });
+  }
+
+  const data = await Account.create({
+    tenant_id: req.tenant_id,
+    code: String(code).trim(),
+    name: String(name).trim(),
+    type,
+    description: description || '',
+    parent_id: parent?._id || null,
+    level: parent ? (parent.level || 1) + 1 : 3,
+    is_group: false,
+    is_active: true,
+  });
+
+  const opening = parseFloat(opening_balance || 0);
+  if (opening !== 0) {
+    try {
+      await accounting.postOpeningBalanceEntry(req.tenant_id, data, opening, req.user._id);
+    } catch (err) {
+      await Account.findByIdAndDelete(data._id);
+      return res.status(400).json({ success: false, message: err.message || 'Failed to post opening balance.' });
+    }
+  }
+
   res.status(201).json({ success: true, data });
 });
+
 router.put('/accounts/:id', authorize('business_owner', 'accountant'), async (req, res) => {
-  const { name, type, description } = req.body;
-  // Note: balance is NOT stored on the Account document — it is computed live
-  // from journal entry lines. To change a balance, post a journal entry instead.
+  const { name, type, description, opening_balance } = req.body;
+  const existing = await Account.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!existing) return res.status(404).json({ success: false, message: 'Account not found.' });
+  if (existing.is_group) return res.status(400).json({ success: false, message: 'Group accounts cannot be edited here.' });
+
   const data = await Account.findOneAndUpdate(
     { _id: req.params.id, tenant_id: req.tenant_id },
     { name, type, description },
-    { new: true }
+    { new: true },
   );
-  if (!data) return res.status(404).json({ success: false, message: 'Account not found.' });
+
+  if (opening_balance !== undefined && opening_balance !== null && opening_balance !== '') {
+    const jeBalances = await JournalEntry.aggregate([
+      { $match: { tenant_id: req.tenant_id, status: { $ne: 'voided' } } },
+      { $unwind: '$lines' },
+      { $match: { 'lines.account_id': existing._id } },
+      { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
+    ]);
+    const rawNet = jeBalances[0]?.balance || 0;
+    const oldDisplayed = accounting.displayBalanceFromNet(existing.type, rawNet);
+    const newDisplayed = parseFloat(opening_balance);
+    const diff = round2(newDisplayed - oldDisplayed);
+    if (Math.abs(diff) > 0.001) {
+      try {
+        await accounting.postBalanceAdjustmentEntry(req.tenant_id, data, diff, req.user._id);
+      } catch (err) {
+        return res.status(400).json({ success: false, message: err.message || 'Balance adjustment failed.' });
+      }
+    }
+  }
+
   res.json({ success: true, data });
+});
+
+router.patch('/accounts/:id/active', authorize('business_owner', 'accountant'), async (req, res) => {
+  const { is_active } = req.body;
+  if (typeof is_active !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'is_active boolean required.' });
+  }
+
+  const account = await Account.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!account) return res.status(404).json({ success: false, message: 'Account not found.' });
+
+  if (!is_active) {
+    const jeBalances = await JournalEntry.aggregate([
+      { $match: { tenant_id: req.tenant_id, status: { $ne: 'voided' } } },
+      { $unwind: '$lines' },
+      { $match: { 'lines.account_id': account._id } },
+      { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
+    ]);
+    const displayed = accounting.displayBalanceFromNet(account.type, jeBalances[0]?.balance || 0);
+    if (Math.abs(displayed) > 0.01) {
+      return res.status(400).json({ success: false, message: 'Cannot deactivate an account with a non-zero balance.' });
+    }
+  }
+
+  account.is_active = is_active;
+  await account.save();
+  res.json({ success: true, data: account });
 });
 router.get('/expenses', async (req, res) => {
   const data = await Expense.find({ tenant_id: req.tenant_id }).populate('created_by', 'name').sort({ expense_date: -1 });
@@ -471,20 +570,9 @@ router.get('/accounting/summary', async (req, res) => {
 });
 
 router.get('/accounting/gl/:accountId', async (req, res) => {
-  const account = await Account.findOne({ _id: req.params.accountId, tenant_id: req.tenant_id });
-  if (!account) return res.status(404).json({ success: false, message: 'Account not found.' });
-  const entries = await JournalEntry.find({ tenant_id: req.tenant_id, 'lines.account_id': account._id }).sort({ entry_date: -1 }).limit(100);
-  const lines = [];
-  let running = 0;
-  for (const entry of [...entries].reverse()) {
-    for (const line of entry.lines) {
-      if (String(line.account_id) === String(account._id)) {
-        running += (line.debit || 0) - (line.credit || 0);
-        lines.push({ date: entry.entry_date, reference: entry.reference, description: line.description || entry.description, debit: line.debit, credit: line.credit, balance: running });
-      }
-    }
-  }
-  res.json({ success: true, data: { account, lines: lines.reverse() } });
+  const data = await accounting.buildAccountLedger(req.tenant_id, req.params.accountId);
+  if (!data) return res.status(404).json({ success: false, message: 'Account not found.' });
+  res.json({ success: true, data });
 });
 
 router.post('/accounting/reconcile', async (req, res) => {

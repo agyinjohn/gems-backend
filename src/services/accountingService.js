@@ -45,6 +45,198 @@ function round2(n) {
   return Math.round((parseFloat(n) || 0) * 100) / 100;
 }
 
+const STANDARD_CODE_SET = new Set(STANDARD_COA.map((a) => a.code));
+
+function isDebitNormalType(type) {
+  return type === 'asset' || type === 'expense';
+}
+
+function displayBalanceFromNet(type, rawNet) {
+  return isDebitNormalType(type) ? round2(rawNet) : round2(-rawNet);
+}
+
+async function postOpeningBalanceEntry(tenantId, account, displayBalance, createdBy) {
+  const amount = Math.abs(round2(displayBalance));
+  if (amount <= 0) return null;
+
+  const equity = await Account.findOne({ tenant_id: tenantId, code: '3001', is_active: true });
+  if (!equity) throw new Error("Owner's Equity account (3001) not found. Run Update COA first.");
+
+  const isDebitNormal = isDebitNormalType(account.type);
+  const targetDebit = isDebitNormal ? (displayBalance > 0 ? amount : 0) : (displayBalance < 0 ? amount : 0);
+  const targetCredit = isDebitNormal ? (displayBalance < 0 ? amount : 0) : (displayBalance > 0 ? amount : 0);
+
+  return postJournalEntry({
+    tenantId,
+    description: `Opening balance — ${account.name}`,
+    date: new Date(),
+    lines: [
+      { accountCode: account.code, debit: targetDebit, credit: targetCredit, description: `Opening balance ${account.code}` },
+      { accountCode: '3001', debit: targetCredit, credit: targetDebit, description: `Opening balance offset — ${account.code}` },
+    ],
+    source: 'manual',
+    sourceId: account._id,
+    createdBy,
+    reference: `OB-${account.code}-${Date.now()}`,
+  });
+}
+
+async function postBalanceAdjustmentEntry(tenantId, account, diff, createdBy) {
+  const amount = Math.abs(round2(diff));
+  if (amount <= 0.001) return null;
+
+  const equity = await Account.findOne({ tenant_id: tenantId, code: '3001', is_active: true });
+  if (!equity) throw new Error("Owner's Equity account (3001) not found.");
+
+  const isDebitNormal = isDebitNormalType(account.type);
+  const targetDebit = isDebitNormal ? (diff > 0 ? amount : 0) : (diff < 0 ? amount : 0);
+  const targetCredit = isDebitNormal ? (diff < 0 ? amount : 0) : (diff > 0 ? amount : 0);
+
+  return postJournalEntry({
+    tenantId,
+    description: `Balance adjustment — ${account.name}`,
+    date: new Date(),
+    lines: [
+      { accountCode: account.code, debit: targetDebit, credit: targetCredit, description: `Adjust ${account.name}` },
+      { accountCode: '3001', debit: targetCredit, credit: targetDebit, description: `Offset — ${account.name} adjustment` },
+    ],
+    source: 'manual',
+    sourceId: account._id,
+    createdBy,
+    reference: `ADJ-${account.code}-${Date.now()}`,
+  });
+}
+
+async function buildAccountsCoaView(tenantId, options = {}) {
+  const includeGroups = options.include_groups !== false;
+  const activeOnly = options.active_only !== false;
+  const typeFilter = options.type || null;
+  const search = String(options.search || '').trim().toLowerCase();
+
+  const filter = { tenant_id: tenantId };
+  if (activeOnly) filter.is_active = true;
+  if (typeFilter) filter.type = typeFilter;
+
+  const [accounts, jeStats] = await Promise.all([
+    Account.find(filter).sort('code'),
+    JournalEntry.aggregate([
+      { $match: { tenant_id: tenantId, status: { $ne: 'voided' } } },
+      { $unwind: '$lines' },
+      { $group: {
+        _id: '$lines.account_id',
+        balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } },
+        debit_total: { $sum: '$lines.debit' },
+        credit_total: { $sum: '$lines.credit' },
+        entry_ids: { $addToSet: '$_id' },
+        last_activity: { $max: '$entry_date' },
+      }},
+      { $project: {
+        balance: 1,
+        debit_total: 1,
+        credit_total: 1,
+        last_activity: 1,
+        entry_count: { $size: '$entry_ids' },
+      }},
+    ]),
+  ]);
+
+  const statsMap = Object.fromEntries(jeStats.map((s) => [String(s._id), s]));
+  const byId = Object.fromEntries(accounts.map((a) => [String(a._id), a]));
+
+  const rows = accounts
+    .filter((a) => includeGroups || !a.is_group)
+    .map((a) => {
+      const json = a.toJSON();
+      const stats = statsMap[String(a._id)] || {
+        balance: 0, debit_total: 0, credit_total: 0, entry_count: 0, last_activity: null,
+      };
+      const rawNet = round2(stats.balance);
+      const parent = a.parent_id ? byId[String(a.parent_id)] : null;
+      return {
+        ...json,
+        parent_code: parent?.code || null,
+        parent_name: parent?.name || null,
+        balance: rawNet,
+        display_balance: displayBalanceFromNet(a.type, rawNet),
+        debit_total: round2(stats.debit_total),
+        credit_total: round2(stats.credit_total),
+        entry_count: stats.entry_count || 0,
+        last_activity: stats.last_activity,
+        is_system: STANDARD_CODE_SET.has(a.code),
+      };
+    })
+    .filter((a) => {
+      if (!search) return true;
+      return a.code.toLowerCase().includes(search)
+        || a.name.toLowerCase().includes(search)
+        || (a.description || '').toLowerCase().includes(search);
+    });
+
+  const posting = rows.filter((a) => !a.is_group);
+  const summary = {
+    total: rows.length,
+    posting: posting.length,
+    groups: rows.filter((a) => a.is_group).length,
+    with_activity: posting.filter((a) => a.entry_count > 0).length,
+    by_type: ['asset', 'liability', 'equity', 'revenue', 'expense'].map((type) => ({
+      type,
+      count: posting.filter((a) => a.type === type).length,
+      balance: round2(
+        posting.filter((a) => a.type === type).reduce((s, a) => s + a.display_balance, 0),
+      ),
+    })),
+  };
+
+  return { accounts: rows, summary };
+}
+
+async function buildAccountLedger(tenantId, accountId, limit = 100) {
+  const account = await Account.findOne({ _id: accountId, tenant_id: tenantId });
+  if (!account) return null;
+
+  const entries = await JournalEntry.find({
+    tenant_id: tenantId,
+    status: { $ne: 'voided' },
+    'lines.account_id': account._id,
+  }).sort({ entry_date: -1, createdAt: -1 }).limit(limit);
+
+  const lines = [];
+  let runningRaw = 0;
+  for (const entry of [...entries].reverse()) {
+    for (const line of entry.lines) {
+      if (String(line.account_id) !== String(account._id)) continue;
+      runningRaw += (line.debit || 0) - (line.credit || 0);
+      lines.push({
+        date: entry.entry_date,
+        reference: entry.reference,
+        description: line.description || entry.description,
+        source: entry.source,
+        debit: round2(line.debit || 0),
+        credit: round2(line.credit || 0),
+        balance_raw: round2(runningRaw),
+        balance: displayBalanceFromNet(account.type, runningRaw),
+      });
+    }
+  }
+
+  return {
+    account: {
+      id: account._id,
+      code: account.code,
+      name: account.name,
+      type: account.type,
+      is_group: account.is_group,
+      display_balance: displayBalanceFromNet(account.type, runningRaw),
+    },
+    lines: lines.reverse(),
+    totals: {
+      debit: round2(lines.reduce((s, l) => s + l.debit, 0)),
+      credit: round2(lines.reduce((s, l) => s + l.credit, 0)),
+      entries: entries.length,
+    },
+  };
+}
+
 async function seedChartOfAccounts(tenantId) {
   for (const acc of STANDARD_COA) {
     await Account.findOneAndUpdate(
@@ -795,5 +987,12 @@ module.exports = {
   buildGlPl,
   buildAccountingOverview,
   buildPositionFromGlMap,
+  buildAccountsCoaView,
+  buildAccountLedger,
+  postOpeningBalanceEntry,
+  postBalanceAdjustmentEntry,
+  displayBalanceFromNet,
+  isDebitNormalType,
+  STANDARD_CODE_SET,
   round2,
 };
