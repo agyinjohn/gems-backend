@@ -720,12 +720,38 @@ const vendorBillSchema = new Schema({
 vendorBillSchema.index({ tenant_id: 1, bill_number: 1 }, { unique: true });
 
 const bankReconLineSchema = new Schema({
+  line_id:       String,
   date:          String,
   description:   String,
   amount:        Number,
   matched_gl_id: String,
   matched:       { type: Boolean, default: false },
 }, { _id: true });
+
+const bankReconGlLineSchema = new Schema({
+  gl_line_id:           String,
+  entry_id:             String,
+  date:                 String,
+  reference:            String,
+  description:          String,
+  source:               String,
+  amount:               Number,
+  matched:              { type: Boolean, default: false },
+  matched_bank_line_id: String,
+}, { _id: true });
+
+const bankReconMatchedPairSchema = new Schema({
+  bank_line_id:     String,
+  gl_line_id:       String,
+  bank_date:        String,
+  bank_description: String,
+  bank_amount:      Number,
+  gl_date:          String,
+  gl_reference:     String,
+  gl_description:   String,
+  gl_amount:        Number,
+  match_score:      Number,
+}, { _id: false });
 
 const bankReconciliationSchema = new Schema({
   tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -738,11 +764,13 @@ const bankReconciliationSchema = new Schema({
   bank_total:        { type: Number, default: null },
   gl_period_total:   { type: Number, default: null },
   bank_line_count:   { type: Number, default: null },
+  gl_line_count:     { type: Number, default: null },
   matched_count:     { type: Number, default: null },
   match_rate:        { type: Number, default: null },
   period_difference: { type: Number, default: null },
   bank_lines:        [bankReconLineSchema],
-  matched_pairs:     [{ bank_line_id: String, gl_line_id: String }],
+  gl_lines:          [bankReconGlLineSchema],
+  matched_pairs:     [bankReconMatchedPairSchema],
   status:            { type: String, enum: ['draft','completed'], default: 'draft' },
   completed_by:      { type: Schema.Types.ObjectId, ref: 'User' },
   completed_at:      Date,

@@ -1349,12 +1349,58 @@ function parseOptionalDate(value) {
   return new Date(`${iso}T12:00:00.000Z`);
 }
 
+function normalizeStoredBankLines(bankLines) {
+  return (bankLines || []).map((line, i) => ({
+    line_id: String(line.line_id ?? line.id ?? i),
+    date: line.date || '',
+    description: line.description || '',
+    amount: round2(parseFloat(line.amount)),
+    matched: !!line.matched,
+    matched_gl_id: line.matched_gl_id ? String(line.matched_gl_id) : undefined,
+  }));
+}
+
+function normalizeStoredGlLines(glLines) {
+  return (glLines || []).map((line) => ({
+    gl_line_id: String(line.gl_line_id ?? line.id ?? ''),
+    entry_id: line.entry_id ? String(line.entry_id) : undefined,
+    date: formatDateOnly(line.date) || line.date || '',
+    reference: line.reference || '',
+    description: line.description || '',
+    source: line.source || '',
+    amount: round2(parseFloat(line.amount)),
+    matched: !!line.matched,
+    matched_bank_line_id: line.matched_bank_line_id ? String(line.matched_bank_line_id) : undefined,
+  }));
+}
+
+function normalizeStoredMatchedPairs(pairs) {
+  return (pairs || []).map((pair) => ({
+    bank_line_id: String(pair.bank_line_id ?? pair.bank?.id ?? ''),
+    gl_line_id: String(pair.gl_line_id ?? pair.gl?.id ?? ''),
+    bank_date: pair.bank_date || pair.bank?.date || '',
+    bank_description: pair.bank_description || pair.bank?.description || '',
+    bank_amount: pair.bank_amount != null
+      ? round2(pair.bank_amount)
+      : round2(pair.bank?.amount ?? 0),
+    gl_date: formatDateOnly(pair.gl_date || pair.gl?.date) || '',
+    gl_reference: pair.gl_reference || pair.gl?.reference || '',
+    gl_description: pair.gl_description || pair.gl?.description || '',
+    gl_amount: pair.gl_amount != null
+      ? round2(pair.gl_amount)
+      : round2(pair.gl?.amount ?? 0),
+    match_score: pair.match_score ?? undefined,
+  }));
+}
+
 function deriveReconciliationSessionStats(doc) {
   const json = doc.toJSON ? doc.toJSON() : doc;
   const bankLines = json.bank_lines || [];
+  const glLines = json.gl_lines || [];
   const pairs = json.matched_pairs || [];
 
   const bankLineCount = json.bank_line_count != null ? json.bank_line_count : bankLines.length;
+  const glLineCount = json.gl_line_count != null ? json.gl_line_count : glLines.length;
   const matchedFromPairs = pairs.length;
   const matchedFromFlags = bankLines.filter((l) => l.matched).length;
   const matchedCount = json.matched_count != null
@@ -1381,6 +1427,7 @@ function deriveReconciliationSessionStats(doc) {
     account_code: doc.account_id?.code || json.account_code || '1001',
     account_name: doc.account_id?.name || json.account_name || 'Cash & Bank',
     bank_line_count: bankLineCount,
+    gl_line_count: glLineCount,
     matched_count: matchedCount,
     match_rate: matchRate,
     bank_total: bankTotal,
@@ -1396,15 +1443,20 @@ function deriveReconciliationSessionStats(doc) {
 
 function buildReconciliationSessionPayload(body = {}, account) {
   const summary = body.summary || {};
-  const bankLines = body.bank_lines || [];
-  const matchedPairs = body.matched_pairs || [];
+  const bankLines = normalizeStoredBankLines(body.bank_lines);
+  const glLines = normalizeStoredGlLines(body.gl_lines);
+  const matchedPairs = normalizeStoredMatchedPairs(body.matched_pairs);
   const matchedFromFlags = bankLines.filter((l) => l.matched).length;
   const bankLineCount = summary.bank_line_count ?? bankLines.length;
+  const glLineCount = summary.gl_line_count ?? glLines.length;
   const matchedCount = summary.matched_count ?? Math.max(matchedPairs.length, matchedFromFlags);
   const matchRate = summary.match_rate ?? (bankLineCount ? round2((matchedCount / bankLineCount) * 100) : 0);
   const bankTotal = summary.bank_total != null
     ? round2(summary.bank_total)
     : round2(bankLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0));
+  const glPeriodTotal = summary.gl_period_total != null
+    ? round2(summary.gl_period_total)
+    : (glLines.length ? round2(glLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)) : null);
 
   return {
     account_id: account._id,
@@ -1414,12 +1466,14 @@ function buildReconciliationSessionPayload(body = {}, account) {
     opening_balance: parseOptionalBalance(body.opening_balance),
     closing_balance: parseOptionalBalance(body.closing_balance),
     bank_total: bankTotal,
-    gl_period_total: summary.gl_period_total != null ? round2(summary.gl_period_total) : null,
+    gl_period_total: glPeriodTotal,
     bank_line_count: bankLineCount,
+    gl_line_count: glLineCount,
     matched_count: matchedCount,
     match_rate: matchRate,
     period_difference: summary.period_difference != null ? round2(summary.period_difference) : null,
     bank_lines: bankLines,
+    gl_lines: glLines,
     matched_pairs: matchedPairs,
     notes: body.notes || undefined,
   };
@@ -1543,10 +1597,18 @@ async function buildReconciliationSessionDetail(tenantId, sessionId) {
   if (!session) return null;
   const stats = deriveReconciliationSessionStats(session);
   const bankLines = stats.bank_lines || [];
+  const glLines = stats.gl_lines || [];
+  const matchedPairs = stats.matched_pairs || [];
+
   return {
     ...stats,
+    matched_pairs: matchedPairs,
     matched_bank_lines: bankLines.filter((l) => l.matched),
     unmatched_bank_lines: bankLines.filter((l) => !l.matched),
+    matched_gl_lines: glLines.filter((l) => l.matched),
+    unmatched_gl_lines: glLines.filter((l) => !l.matched),
+    all_bank_lines: bankLines,
+    all_gl_lines: glLines,
   };
 }
 
