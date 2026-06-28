@@ -696,6 +696,38 @@ function buildPositionFromGlMap(glMap) {
   };
 }
 
+function formatLocalDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function buildPlStatement(report) {
+  const operating = report.operating_expenses ?? round2((report.total_expenses || 0) - (report.cogs || 0));
+  return [
+    { key: 'revenue', label: 'Total Revenue', amount: report.revenue, level: 0 },
+    { key: 'cogs', label: 'Cost of Goods Sold', amount: -(report.cogs || 0), level: 1, indent: true },
+    { key: 'gross_profit', label: 'Gross Profit', amount: report.gross_profit, level: 0, emphasis: true },
+    { key: 'operating_expenses', label: 'Operating Expenses', amount: -operating, level: 1, indent: true },
+    { key: 'net_profit', label: 'Net Profit', amount: report.net_profit, level: 0, emphasis: true, total: true },
+  ];
+}
+
+function buildPlChecks(report) {
+  const revenueFromAccounts = round2((report.revenue_by_account || []).reduce((s, r) => s + r.total, 0));
+  const expensesFromCategories = round2((report.expenses_by_category || []).reduce((s, e) => s + e.total, 0));
+  const expectedNet = round2((report.revenue || 0) - (report.total_expenses || 0));
+  return {
+    revenue_from_accounts: revenueFromAccounts,
+    revenue_matches_accounts: Math.abs(revenueFromAccounts - (report.revenue || 0)) < 0.02,
+    expenses_from_categories: expensesFromCategories,
+    expenses_match_categories: Math.abs(expensesFromCategories - (report.total_expenses || 0)) < 0.02,
+    net_from_formula: expectedNet,
+    net_matches_formula: Math.abs(expectedNet - (report.net_profit || 0)) < 0.02,
+  };
+}
+
 async function buildGlPl(tenantId, from, to) {
   const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
   if (from || to) {
@@ -732,15 +764,20 @@ async function buildGlPl(tenantId, from, to) {
       cogs += round2(row.debit - row.credit);
     } else {
       const amt = round2(row.debit - row.credit);
-      if (amt > 0) expensesByCategory.push({ category: row._id.name, code: row._id.code, total: amt });
+      if (Math.abs(amt) > 0.001) {
+        expensesByCategory.push({ category: row._id.name, code: row._id.code, total: amt });
+      }
     }
   }
 
   revenue = round2(revenue);
+  cogs = round2(cogs);
   const operatingExpenses = round2(expensesByCategory.reduce((s, e) => s + e.total, 0));
   const totalExpenses = round2(operatingExpenses + cogs);
   const allExpenses = [...expensesByCategory];
-  if (cogs > 0) allExpenses.unshift({ category: 'Cost of Goods Sold', code: '5001', total: round2(cogs) });
+  if (Math.abs(cogs) > 0.001) {
+    allExpenses.unshift({ category: 'Cost of Goods Sold', code: '5001', total: cogs });
+  }
   allExpenses.sort((a, b) => b.total - a.total);
   revenueByAccount.sort((a, b) => b.total - a.total);
 
@@ -750,7 +787,7 @@ async function buildGlPl(tenantId, from, to) {
   return {
     source: 'gl',
     revenue,
-    cogs: round2(cogs),
+    cogs,
     gross_profit: grossProfit,
     operating_expenses: operatingExpenses,
     total_expenses: totalExpenses,
@@ -759,6 +796,21 @@ async function buildGlPl(tenantId, from, to) {
     net_margin_pct: revenue > 0 ? round2((netProfit / revenue) * 100) : 0,
     expenses_by_category: allExpenses,
     revenue_by_account: revenueByAccount,
+    statement: buildPlStatement({
+      revenue,
+      cogs,
+      gross_profit: grossProfit,
+      operating_expenses: operatingExpenses,
+      total_expenses: totalExpenses,
+      net_profit: netProfit,
+    }),
+    checks: buildPlChecks({
+      revenue,
+      total_expenses: totalExpenses,
+      net_profit: netProfit,
+      revenue_by_account: revenueByAccount,
+      expenses_by_category: allExpenses,
+    }),
   };
 }
 
@@ -766,7 +818,17 @@ function resolvePlDateRange(options = {}) {
   const { from, to, period } = options;
   const now = new Date();
 
-  if (from || to) {
+  if (period === 'custom' && !from && !to) {
+    return {
+      from: null,
+      to: null,
+      period_key: 'custom',
+      period_label: 'Custom range',
+      requires_dates: true,
+    };
+  }
+
+  if (from || to || period === 'custom') {
     return {
       from: from || null,
       to: to || null,
@@ -778,8 +840,8 @@ function resolvePlDateRange(options = {}) {
   if (period === 'mtd') {
     const start = new Date(now.getFullYear(), now.getMonth(), 1);
     return {
-      from: start.toISOString().slice(0, 10),
-      to: now.toISOString().slice(0, 10),
+      from: formatLocalDate(start),
+      to: formatLocalDate(now),
       period_key: 'mtd',
       period_label: 'Month to date',
     };
@@ -791,8 +853,8 @@ function resolvePlDateRange(options = {}) {
 
   const yearStart = new Date(now.getFullYear(), 0, 1);
   return {
-    from: yearStart.toISOString().slice(0, 10),
-    to: now.toISOString().slice(0, 10),
+    from: formatLocalDate(yearStart),
+    to: formatLocalDate(now),
     period_key: 'ytd',
     period_label: 'Year to date',
   };
@@ -876,29 +938,49 @@ async function buildOrdersPl(tenantId, from, to) {
     category: e._id,
     total: round2(e.total),
   }));
-  const totalExpenses = round2(expensesByCategory.reduce((s, e) => s + e.total, 0));
+  const operatingExpenses = round2(expensesByCategory.reduce((s, e) => s + e.total, 0));
+  const totalExpenses = round2(operatingExpenses + cogsTotal);
   const grossProfit = round2(revenue - cogsTotal);
   const netProfit = round2(revenue - totalExpenses);
+  const allExpenses = [...expensesByCategory];
+  if (Math.abs(cogsTotal) > 0.001) {
+    allExpenses.unshift({ category: 'Cost of Goods Sold', code: 'COGS', total: cogsTotal });
+  }
+  allExpenses.sort((a, b) => b.total - a.total);
 
-  return {
+  const report = {
     source: 'orders',
     revenue,
     cogs: cogsTotal,
     gross_profit: grossProfit,
-    operating_expenses: totalExpenses,
+    operating_expenses: operatingExpenses,
     total_expenses: totalExpenses,
     net_profit: netProfit,
     gross_margin_pct: revenue > 0 ? round2((grossProfit / revenue) * 100) : 0,
     net_margin_pct: revenue > 0 ? round2((netProfit / revenue) * 100) : 0,
-    expenses_by_category: expensesByCategory,
+    expenses_by_category: allExpenses,
     revenue_by_account: [],
     monthly: monthly.map((m) => ({ ...m, revenue: round2(m.revenue) })),
   };
+  report.statement = buildPlStatement(report);
+  report.checks = buildPlChecks({ ...report, revenue_by_account: [] });
+  return report;
 }
 
 async function buildPlView(tenantId, options = {}) {
   const source = options.source === 'orders' ? 'orders' : 'gl';
   const range = resolvePlDateRange(options);
+
+  if (range.requires_dates) {
+    return {
+      empty: true,
+      message: 'Select a from and/or to date for a custom range.',
+      filters: { from: null, to: null, source, period: 'custom' },
+      period_label: range.period_label,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
   const report = source === 'orders'
     ? await buildOrdersPl(tenantId, range.from, range.to)
     : await buildGlPl(tenantId, range.from, range.to);
@@ -906,6 +988,8 @@ async function buildPlView(tenantId, options = {}) {
   if (source === 'gl') {
     report.monthly = await buildGlMonthlyRevenueInRange(tenantId, range.from, range.to);
   }
+
+  const monthlyRevenueTotal = round2((report.monthly || []).reduce((s, m) => s + (m.revenue || 0), 0));
 
   return {
     ...report,
@@ -917,6 +1001,12 @@ async function buildPlView(tenantId, options = {}) {
     },
     period_label: range.period_label,
     generated_at: new Date().toISOString(),
+    summary: {
+      monthly_revenue_total: monthlyRevenueTotal,
+      monthly_matches_revenue: report.source === 'gl'
+        ? Math.abs(monthlyRevenueTotal - (report.revenue || 0)) < 0.02
+        : Math.abs(monthlyRevenueTotal - (report.revenue || 0)) < 0.02,
+    },
   };
 }
 

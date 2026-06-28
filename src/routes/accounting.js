@@ -629,7 +629,7 @@ router.get('/accounting/pl', async (req, res) => {
       from: req.query.from,
       to: req.query.to,
       source: req.query.source,
-      period: req.query.period,
+      period: req.query.period || (req.query.from || req.query.to ? 'custom' : undefined),
     });
     res.json({ success: true, data });
   } catch (err) {
