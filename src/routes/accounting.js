@@ -700,72 +700,47 @@ router.post('/accounting/reconcile', async (req, res) => {
 
 // AP LEDGER — GL-derived accounts payable
 router.get('/accounting/ap-ledger', async (req, res) => {
-  const tid = req.tenant_id;
-
-  const apAccount = await Account.findOne({ tenant_id: tid, code: '2001' });
-  if (!apAccount) return res.json({ success: true, data: { entries: [], total_outstanding: 0 } });
-
-  // Get every JE line touching 2001, grouped by journal entry
-  const lines = await JournalEntry.aggregate([
-    { $match: { tenant_id: tid, status: { $ne: 'voided' } } },
-    { $unwind: '$lines' },
-    { $match: { 'lines.account_id': apAccount._id } },
-    { $group: {
-      _id: '$_id',
-      reference:   { $first: '$reference' },
-      description: { $first: '$description' },
-      entry_date:  { $first: '$entry_date' },
-      source:      { $first: '$source' },
-      source_id:   { $first: '$source_id' },
-      debit:  { $sum: '$lines.debit' },
-      credit: { $sum: '$lines.credit' },
-    }},
-    { $sort: { entry_date: -1 } },
-  ]);
-
-  // Running balance per source_id — net credit = still owed, net debit = already paid
-  // Group by source_id so PO creation + PO payment cancel each other out
-  const sourceMap = {};
-  for (const l of lines) {
-    const key = l.source_id ? String(l.source_id) : String(l._id);
-    if (!sourceMap[key]) sourceMap[key] = { reference: l.reference, description: l.description, entry_date: l.entry_date, source: l.source, debit: 0, credit: 0 };
-    sourceMap[key].debit  += l.debit;
-    sourceMap[key].credit += l.credit;
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildPayablesView(req.tenant_id, {
+        search: req.query.search,
+        source: req.query.source,
+        aging_bucket: req.query.aging_bucket,
+      });
+      return res.json({ success: true, data });
+    }
+    const data = await accounting.buildPayablesView(req.tenant_id, {});
+    res.json({ success: true, data: { entries: data.entries, total_outstanding: data.summary.total_outstanding } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
+});
 
-  // Only show entries where credit > debit (still owed)
-  const entries = Object.values(sourceMap)
-    .map((e) => ({ ...e, outstanding: parseFloat((e.credit - e.debit).toFixed(2)) }))
-    .filter((e) => e.outstanding > 0.01)
-    .sort((a, b) => new Date(b.entry_date) - new Date(a.entry_date));
+router.get('/accounting/receivables', async (req, res) => {
+  try {
+    const data = await accounting.buildReceivablesView(req.tenant_id, {
+      search: req.query.search,
+      status: req.query.status,
+      aging_bucket: req.query.aging_bucket,
+      customer_id: req.query.customer_id,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
-  // Also pull matching PO details for context
-  const poRefs = entries.map(e => e.reference).filter(r => r.startsWith('PO-RCV-'));
-  const poNumbers = poRefs.map(r => r.replace('PO-RCV-', ''));
-  const pos = poNumbers.length
-    ? await (require('../models').PurchaseOrder).find({ tenant_id: tid, po_number: { $in: poNumbers } }).populate('supplier_id', 'name')
-    : [];
-  const poMap = Object.fromEntries(pos.map(p => [p.po_number, p]));
-
-  const enriched = entries.map(e => {
-    const poNum = e.reference.replace('PO-RCV-', '');
-    const po = poMap[poNum];
-    return {
-      reference:   e.reference,
-      description: e.description,
-      entry_date:  e.entry_date,
-      source:      e.source,
-      outstanding: e.outstanding,
-      supplier:    po?.supplier_id?.name || null,
-      po_number:   po?.po_number || null,
-      po_status:   po?.po_status || po?.status || null,
-      po_id:       po?._id || null,
-      payments:    po?.payments || [],
-    };
-  });
-
-  const total_outstanding = parseFloat(enriched.reduce((s, e) => s + e.outstanding, 0).toFixed(2));
-  res.json({ success: true, data: { entries: enriched, total_outstanding } });
+router.get('/accounting/payables', async (req, res) => {
+  try {
+    const data = await accounting.buildPayablesView(req.tenant_id, {
+      search: req.query.search,
+      source: req.query.source,
+      aging_bucket: req.query.aging_bucket,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // BUDGETS

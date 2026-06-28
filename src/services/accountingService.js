@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -818,6 +818,256 @@ function buildArAging(invoices) {
   return { ...buckets, total };
 }
 
+function agingBucketFromDaysPastDue(daysPastDue) {
+  if (daysPastDue > 90) return 'over_90';
+  if (daysPastDue > 60) return 'days_61_90';
+  if (daysPastDue > 30) return 'days_31_60';
+  return 'current';
+}
+
+function enrichAgingFields(row, dueDateValue) {
+  const now = Date.now();
+  const dueDate = new Date(dueDateValue || row.entry_date || row.issue_date).getTime();
+  const daysPastDue = Math.max(0, Math.floor((now - dueDate) / 86400000));
+  return {
+    ...row,
+    due_date: dueDateValue || row.due_date || null,
+    days_past_due: daysPastDue,
+    aging_bucket: agingBucketFromDaysPastDue(daysPastDue),
+    is_overdue: daysPastDue > 0,
+  };
+}
+
+async function buildReceivablesView(tenantId, options = {}) {
+  const { search, status, aging_bucket: agingFilter, customer_id } = options;
+
+  await Invoice.updateMany(
+    { tenant_id: tenantId, status: { $in: ['sent', 'partially_paid'] }, due_date: { $lt: new Date() } },
+    { status: 'overdue' },
+  );
+
+  const filter = {
+    tenant_id: tenantId,
+    status: { $in: ['sent', 'partially_paid', 'overdue'] },
+    amount_due: { $gt: 0.01 },
+  };
+  if (status) {
+    const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
+    filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  }
+  if (customer_id) filter.customer_id = customer_id;
+
+  const invoices = await Invoice.find(filter)
+    .populate('customer_id', 'name email phone')
+    .sort({ due_date: 1 });
+
+  let rows = invoices.map((inv) => {
+    const json = inv.toJSON();
+    return enrichAgingFields(
+      {
+        ...json,
+        customer_email: json.customer_email || json.customer_id?.email || null,
+      },
+      json.due_date,
+    );
+  });
+
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((r) =>
+      (r.invoice_number || '').toLowerCase().includes(q)
+      || (r.customer_name || '').toLowerCase().includes(q)
+      || (r.customer_email || '').toLowerCase().includes(q)
+    );
+  }
+  if (agingFilter) {
+    rows = rows.filter((r) => r.aging_bucket === agingFilter);
+  }
+
+  const glMap = await getGlBalanceMap(tenantId);
+  const glAr = round2(glNet(glMap, '1110'));
+  const invoiceTotal = round2(rows.reduce((s, r) => s + parseFloat(r.amount_due || 0), 0));
+  const aging = buildArAging(rows);
+
+  return {
+    invoices: rows,
+    summary: {
+      count: rows.length,
+      total_outstanding: invoiceTotal,
+      overdue_count: rows.filter((r) => r.is_overdue || r.status === 'overdue').length,
+      gl_accounts_receivable: glAr,
+      gl_vs_invoice_diff: round2(invoiceTotal - glAr),
+      aging,
+    },
+  };
+}
+
+async function buildPayablesView(tenantId, options = {}) {
+  const { search, source, aging_bucket: agingFilter } = options;
+
+  const apAccount = await Account.findOne({ tenant_id: tenantId, code: '2001' });
+  if (!apAccount) {
+    return {
+      entries: [],
+      sources: [
+        { value: 'purchase', label: 'Purchase order' },
+        { value: 'vendor_bill', label: 'Vendor bill' },
+      ],
+      summary: {
+        count: 0,
+        total_outstanding: 0,
+        gl_accounts_payable: 0,
+        overdue_count: 0,
+        aging: buildArAging([]),
+      },
+    };
+  }
+
+  const lines = await JournalEntry.aggregate([
+    { $match: { tenant_id: tenantId, status: { $ne: 'voided' } } },
+    { $unwind: '$lines' },
+    { $match: { 'lines.account_id': apAccount._id } },
+    { $group: {
+      _id: '$_id',
+      reference: { $first: '$reference' },
+      description: { $first: '$description' },
+      entry_date: { $first: '$entry_date' },
+      source: { $first: '$source' },
+      source_id: { $first: '$source_id' },
+      debit: { $sum: '$lines.debit' },
+      credit: { $sum: '$lines.credit' },
+    }},
+    { $sort: { entry_date: -1 } },
+  ]);
+
+  const sourceMap = {};
+  for (const l of lines) {
+    const key = l.source_id ? String(l.source_id) : String(l._id);
+    if (!sourceMap[key]) {
+      sourceMap[key] = {
+        source_id: l.source_id,
+        reference: l.reference,
+        description: l.description,
+        entry_date: l.entry_date,
+        source: l.source,
+        debit: 0,
+        credit: 0,
+      };
+    }
+    sourceMap[key].debit += l.debit;
+    sourceMap[key].credit += l.credit;
+  }
+
+  const rawEntries = Object.values(sourceMap)
+    .map((e) => ({ ...e, outstanding: round2(e.credit - e.debit) }))
+    .filter((e) => e.outstanding > 0.01);
+
+  const poRefs = rawEntries.filter((e) => e.reference?.startsWith('PO-RCV-')).map((e) => e.reference.replace('PO-RCV-', ''));
+  const billNumbers = rawEntries.filter((e) => e.reference?.startsWith('BILL-')).map((e) => e.reference.replace('BILL-', ''));
+  const billIds = rawEntries.filter((e) => e.source_id).map((e) => e.source_id);
+
+  const [pos, billsById, billsByNumber] = await Promise.all([
+    poRefs.length
+      ? PurchaseOrder.find({ tenant_id: tenantId, po_number: { $in: poRefs } }).populate('supplier_id', 'name')
+      : [],
+    billIds.length
+      ? VendorBill.find({ tenant_id: tenantId, _id: { $in: billIds } })
+      : [],
+    billNumbers.length
+      ? VendorBill.find({ tenant_id: tenantId, bill_number: { $in: billNumbers } })
+      : [],
+  ]);
+
+  const poMap = Object.fromEntries(pos.map((p) => [p.po_number, p]));
+  const billMap = Object.fromEntries([
+    ...billsById.map((b) => [String(b._id), b]),
+    ...billsByNumber.map((b) => [String(b._id), b]),
+  ]);
+  const billByNumber = Object.fromEntries(billsByNumber.map((b) => [b.bill_number, b]));
+
+  let rows = rawEntries.map((e) => {
+    let supplier = null;
+    let documentNumber = null;
+    let documentId = null;
+    let documentType = null;
+    let dueDate = null;
+    let payments = [];
+
+    if (e.reference?.startsWith('PO-RCV-')) {
+      const poNum = e.reference.replace('PO-RCV-', '');
+      const po = poMap[poNum];
+      documentType = 'po';
+      documentNumber = po?.po_number || poNum;
+      documentId = po?._id || null;
+      supplier = po?.supplier_id?.name || null;
+      dueDate = po?.expected_date || e.entry_date;
+      payments = po?.payments || [];
+    } else if (e.reference?.startsWith('BILL-')) {
+      const billNum = e.reference.replace('BILL-', '');
+      const bill = billByNumber[billNum] || (e.source_id ? billMap[String(e.source_id)] : null);
+      documentType = 'vendor_bill';
+      documentNumber = bill?.bill_number || billNum;
+      documentId = bill?._id || e.source_id || null;
+      supplier = bill?.vendor_name || null;
+      dueDate = bill?.due_date || e.entry_date;
+      payments = bill?.payments || [];
+    }
+
+    return enrichAgingFields({
+      id: String(e.source_id || e.reference),
+      reference: e.reference,
+      description: e.description,
+      entry_date: e.entry_date,
+      source: documentType === 'vendor_bill' ? 'vendor_bill' : 'purchase',
+      outstanding: e.outstanding,
+      supplier,
+      document_number: documentNumber,
+      document_id: documentId,
+      document_type: documentType,
+      payments,
+      po_id: documentType === 'po' ? documentId : null,
+      po_number: documentType === 'po' ? documentNumber : null,
+      bill_id: documentType === 'vendor_bill' ? documentId : null,
+      bill_number: documentType === 'vendor_bill' ? documentNumber : null,
+    }, dueDate);
+  });
+
+  if (source) rows = rows.filter((r) => r.source === source);
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((r) =>
+      (r.reference || '').toLowerCase().includes(q)
+      || (r.description || '').toLowerCase().includes(q)
+      || (r.supplier || '').toLowerCase().includes(q)
+      || (r.document_number || '').toLowerCase().includes(q)
+    );
+  }
+  if (agingFilter) rows = rows.filter((r) => r.aging_bucket === agingFilter);
+
+  rows.sort((a, b) => new Date(b.entry_date) - new Date(a.entry_date));
+
+  const glMap = await getGlBalanceMap(tenantId);
+  const glAp = round2(-glNet(glMap, '2001'));
+  const totalOutstanding = round2(rows.reduce((s, r) => s + r.outstanding, 0));
+  const agingRows = rows.map((r) => ({ amount_due: r.outstanding, due_date: r.due_date }));
+
+  return {
+    entries: rows,
+    sources: [
+      { value: 'purchase', label: 'Purchase order' },
+      { value: 'vendor_bill', label: 'Vendor bill' },
+    ],
+    summary: {
+      count: rows.length,
+      total_outstanding: totalOutstanding,
+      gl_accounts_payable: glAp,
+      gl_vs_entries_diff: round2(totalOutstanding - glAp),
+      overdue_count: rows.filter((r) => r.is_overdue).length,
+      aging: buildArAging(agingRows),
+    },
+  };
+}
+
 async function buildAccountingOverview(tenantId, options = {}) {
   const period = options.period || 'ytd';
   const now = new Date();
@@ -1229,5 +1479,7 @@ module.exports = {
   JOURNAL_SOURCES,
   buildJournalView,
   buildJournalEntryDetail,
+  buildReceivablesView,
+  buildPayablesView,
   round2,
 };
