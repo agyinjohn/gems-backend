@@ -492,91 +492,14 @@ router.get('/accounting/cashflow', async (req, res) => {
 });
 
 router.get('/accounting/balance-sheet', async (req, res) => {
-  const tid = req.tenant_id;
-  // Derive everything from the GL — no raw collection queries
-  const jeBalances = await JournalEntry.aggregate([
-    { $match: { tenant_id: tid, status: { $ne: 'voided' } } },
-    { $unwind: '$lines' },
-    { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
-    { $unwind: '$acc' },
-    { $group: {
-      _id: { id: '$acc._id', type: '$acc.type', code: '$acc.code', name: '$acc.name' },
-      debit:  { $sum: '$lines.debit' },
-      credit: { $sum: '$lines.credit' },
-    }},
-  ]);
-
-  const glMap = {};
-  for (const b of jeBalances) {
-    const net = b.debit - b.credit;
-    glMap[b._id.code] = { type: b._id.type, name: b._id.name, net };
+  try {
+    const data = await accounting.buildBalanceSheetView(req.tenant_id, {
+      as_of: req.query.as_of,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-
-  const gl = (code) => glMap[code]?.net || 0;
-
-  // Assets
-  const cash               = gl('1001');
-  const accountsReceivable = gl('1110');
-  const inventory          = gl('1120');
-  const prepaid            = gl('1130');
-  const vatInput           = gl('1135');
-  const ppe                = gl('1210');
-  const accumDepr          = gl('1220'); // normally negative (credit balance)
-  const totalCurrentAssets    = cash + accountsReceivable + inventory + prepaid + vatInput;
-  const totalNonCurrentAssets = ppe + accumDepr;
-  const totalAssets           = totalCurrentAssets + totalNonCurrentAssets;
-
-  // Liabilities
-  const accountsPayable  = -(gl('2001')); // credit-normal: negate net
-  const vatPayable       = -(gl('2110'));
-  const accruedLiab      = -(gl('2120'));
-  const salariesPayable  = -(gl('2130'));
-  const longTermLoans    = -(gl('2210'));
-  const totalCurrentLiab    = accountsPayable + vatPayable + accruedLiab + salariesPayable;
-  const totalNonCurrentLiab = longTermLoans;
-  const totalLiabilities    = totalCurrentLiab + totalNonCurrentLiab;
-
-  // Equity
-  const ownerEquity      = -(gl('3001'));
-  const retainedEarnings = -(gl('3900'));
-  // Compute current-period net income from revenue & expense accounts
-  const revenueAccounts = jeBalances.filter(b => b._id.type === 'revenue');
-  const expenseAccounts = jeBalances.filter(b => b._id.type === 'expense');
-  const totalRevenue    = revenueAccounts.reduce((s, b) => s + (b.credit - b.debit), 0);
-  const totalExpenses   = expenseAccounts.reduce((s, b) => s + (b.debit - b.credit), 0);
-  const currentNetIncome = totalRevenue - totalExpenses;
-  const totalEquity = ownerEquity + retainedEarnings + currentNetIncome;
-
-  res.json({ success: true, data: {
-    assets: {
-      cash,
-      accounts_receivable: accountsReceivable,
-      inventory,
-      prepaid,
-      ppe,
-      accum_depreciation: accumDepr,
-      total_current:     totalCurrentAssets,
-      total_non_current: totalNonCurrentAssets,
-      total:             totalAssets,
-    },
-    liabilities: {
-      accounts_payable:  accountsPayable,
-      vat_payable:       vatPayable,
-      accrued:           accruedLiab,
-      salaries_payable:  salariesPayable,
-      long_term_loans:   longTermLoans,
-      total_current:     totalCurrentLiab,
-      total_non_current: totalNonCurrentLiab,
-      total:             totalLiabilities,
-    },
-    equity: {
-      owner_equity:       ownerEquity,
-      retained_earnings:  retainedEarnings,
-      current_net_income: currentNetIncome,
-      total:              totalEquity,
-    },
-    is_balanced: Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.01,
-  }});
 });
 
 router.get('/accounting/vat-return', async (req, res) => {

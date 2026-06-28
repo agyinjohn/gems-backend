@@ -696,6 +696,145 @@ function buildPositionFromGlMap(glMap) {
   };
 }
 
+function classifyBsSection(type, code) {
+  const n = parseInt(code, 10);
+  if (Number.isNaN(n)) return 'current';
+  if (type === 'asset') return n >= 1200 ? 'non_current' : 'current';
+  if (type === 'liability') return n >= 2200 ? 'non_current' : 'current';
+  return 'equity';
+}
+
+function buildBsLinesFromGlMap(glMap) {
+  const assets = { current: [], non_current: [] };
+  const liabilities = { current: [], non_current: [] };
+  const equity = [];
+
+  for (const acc of Object.values(glMap)) {
+    if (acc.is_group) continue;
+    if (acc.type === 'revenue' || acc.type === 'expense') continue;
+    const amount = acc.type === 'asset' ? round2(acc.net) : round2(-acc.net);
+    if (Math.abs(amount) < 0.001) continue;
+    const line = { code: acc.code, name: acc.name, amount };
+    if (acc.type === 'asset') {
+      assets[classifyBsSection('asset', acc.code)].push(line);
+    } else if (acc.type === 'liability') {
+      liabilities[classifyBsSection('liability', acc.code)].push(line);
+    } else if (acc.type === 'equity') {
+      equity.push(line);
+    }
+  }
+
+  const byCode = (a, b) => a.code.localeCompare(b.code);
+  assets.current.sort(byCode);
+  assets.non_current.sort(byCode);
+  liabilities.current.sort(byCode);
+  liabilities.non_current.sort(byCode);
+  equity.sort(byCode);
+
+  return { assets, liabilities, equity };
+}
+
+function sumLineAmounts(lines) {
+  return round2((lines || []).reduce((s, l) => s + l.amount, 0));
+}
+
+async function buildBalanceSheetView(tenantId, options = {}) {
+  const asOfDate = options.as_of ? parseOptionalDate(options.as_of) : new Date();
+  const asOfFilter = asOfDate ? new Date(asOfDate) : new Date();
+  asOfFilter.setHours(23, 59, 59, 999);
+
+  const [glMap, openInvoices] = await Promise.all([
+    getGlBalanceMap(tenantId, asOfFilter),
+    Invoice.find({
+      tenant_id: tenantId,
+      status: { $in: ['sent', 'partially_paid', 'overdue'] },
+      amount_due: { $gt: 0.01 },
+    }).select('amount_due'),
+  ]);
+
+  const position = buildPositionFromGlMap(glMap);
+  const gl = (code) => glNet(glMap, code);
+  const sections = buildBsLinesFromGlMap(glMap);
+
+  const vatInput = gl('1135');
+  const accruedLiab = round2(-gl('2120'));
+  const longTermLoans = round2(-gl('2210'));
+  const ownerEquity = round2(-gl('3001'));
+  const retainedEarnings = round2(-gl('3900'));
+
+  const totalCurrentAssets = sumLineAmounts(sections.assets.current);
+  const totalNonCurrentAssets = sumLineAmounts(sections.assets.non_current);
+  const totalCurrentLiab = sumLineAmounts(sections.liabilities.current);
+  const totalNonCurrentLiab = sumLineAmounts(sections.liabilities.non_current);
+  const equityAccountTotal = sumLineAmounts(sections.equity);
+
+  const invoiceArTotal = round2(openInvoices.reduce((s, i) => s + parseFloat(i.amount_due || 0), 0));
+  const arGlVsInvoiceDiff = round2(invoiceArTotal - position.accounts_receivable);
+
+  const equityWithIncome = [
+    ...sections.equity,
+    ...(Math.abs(position.current_net_income) > 0.001
+      ? [{ code: 'NI', name: 'Current Period Net Income', amount: position.current_net_income }]
+      : []),
+  ];
+
+  return {
+    source: 'gl',
+    as_of: formatLocalDate(asOfFilter),
+    as_of_label: formatLocalDate(asOfFilter),
+    generated_at: new Date().toISOString(),
+    assets: {
+      cash: position.cash,
+      accounts_receivable: position.accounts_receivable,
+      inventory: position.inventory,
+      prepaid: position.prepaid,
+      vat_input: vatInput,
+      ppe: position.ppe,
+      accum_depreciation: position.accumulated_depreciation,
+      total_current: totalCurrentAssets,
+      total_non_current: totalNonCurrentAssets,
+      total: position.total_assets,
+      lines: sections.assets,
+    },
+    liabilities: {
+      accounts_payable: position.accounts_payable,
+      vat_payable: position.vat_payable,
+      accrued: accruedLiab,
+      salaries_payable: position.salaries_payable,
+      ssnit_payable: position.ssnit_payable,
+      paye_payable: position.paye_payable,
+      long_term_loans: longTermLoans,
+      total_current: totalCurrentLiab,
+      total_non_current: totalNonCurrentLiab,
+      total: position.total_liabilities,
+      lines: sections.liabilities,
+    },
+    equity: {
+      owner_equity: ownerEquity,
+      retained_earnings: retainedEarnings,
+      current_net_income: position.current_net_income,
+      account_total: equityAccountTotal,
+      total: position.total_equity,
+      lines: equityWithIncome,
+    },
+    is_balanced: position.is_balanced,
+    checks: {
+      assets_total: position.total_assets,
+      liabilities_total: position.total_liabilities,
+      equity_total: position.total_equity,
+      liabilities_plus_equity: round2(position.total_liabilities + position.total_equity),
+      difference: round2(position.total_assets - (position.total_liabilities + position.total_equity)),
+    },
+    invoice_ar_total: invoiceArTotal,
+    ar_gl_vs_invoice_diff: arGlVsInvoiceDiff,
+    summary: {
+      total_assets: position.total_assets,
+      total_liabilities: position.total_liabilities,
+      total_equity: position.total_equity,
+    },
+  };
+}
+
 function formatLocalDate(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -2277,6 +2416,7 @@ module.exports = {
   buildPlView,
   buildOrdersPl,
   buildAccountingOverview,
+  buildBalanceSheetView,
   buildPositionFromGlMap,
   buildAccountsCoaView,
   buildAccountLedger,
