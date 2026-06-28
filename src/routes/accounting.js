@@ -113,26 +113,14 @@ async function buildGlPl(tid, from, to) {
 // ACCOUNTING
 // Trial Balance — GL-derived source of truth
 router.get('/accounting/trial-balance', async (req, res) => {
-  const tid = req.tenant_id;
-  const asOf = req.query.asOf ? new Date(req.query.asOf) : new Date();
-  const [accounts, jeBalances] = await Promise.all([
-    Account.find({ tenant_id: tid, is_active: true }).sort('code'),
-    JournalEntry.aggregate([
-      { $match: { tenant_id: tid, status: { $ne: 'voided' }, entry_date: { $lte: asOf } } },
-      { $unwind: '$lines' },
-      { $group: { _id: '$lines.account_id', debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
-    ]),
-  ]);
-  const balMap = Object.fromEntries(jeBalances.map(b => [String(b._id), b]));
-  const rows = accounts.map(a => {
-    const b = balMap[String(a._id)] || { debit: 0, credit: 0 };
-    const net = b.debit - b.credit;
-    const debitBalance  = ['asset','expense'].includes(a.type) ? Math.max(net, 0)  : Math.max(-net, 0);
-    const creditBalance = ['asset','expense'].includes(a.type) ? Math.max(-net, 0) : Math.max(net, 0);
-    return { code: a.code, name: a.name, type: a.type, debit_balance: debitBalance, credit_balance: creditBalance };
-  });
-  const totals = rows.reduce((s, r) => ({ debit: s.debit + r.debit_balance, credit: s.credit + r.credit_balance }), { debit: 0, credit: 0 });
-  res.json({ success: true, data: { as_of: asOf, accounts: rows, totals } });
+  try {
+    const data = await accounting.buildTrialBalanceView(req.tenant_id, {
+      as_of: req.query.as_of || req.query.asOf,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
 });
 
 router.get('/accounts', async (req, res) => {
@@ -654,25 +642,38 @@ const invoiceNumber = (n) => `INV-${String(n).padStart(5, '0')}`;
 const creditNoteNumber = (n) => `CN-${String(n).padStart(5, '0')}`;
 
 router.get('/invoices', async (req, res) => {
-  const { status, customer_id, from, to } = req.query;
-  const filter = { tenant_id: req.tenant_id };
-  if (status) {
-    const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-    filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildInvoicesView(req.tenant_id, {
+        status: req.query.status,
+        customer_id: req.query.customer_id,
+        from: req.query.from,
+        to: req.query.to,
+        search: req.query.search,
+      });
+      return res.json({ success: true, data });
+    }
+    const { status, customer_id, from, to } = req.query;
+    const filter = { tenant_id: req.tenant_id };
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+    }
+    if (customer_id) filter.customer_id = customer_id;
+    if (from || to) {
+      filter.issue_date = {};
+      if (from) filter.issue_date.$gte = new Date(from);
+      if (to)   filter.issue_date.$lte = new Date(to);
+    }
+    await Invoice.updateMany(
+      { tenant_id: req.tenant_id, status: { $in: ['sent','partially_paid'] }, due_date: { $lt: new Date() } },
+      { status: 'overdue' }
+    );
+    const data = await Invoice.find(filter).sort({ issue_date: -1 });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  if (customer_id) filter.customer_id = customer_id;
-  if (from || to) {
-    filter.issue_date = {};
-    if (from) filter.issue_date.$gte = new Date(from);
-    if (to)   filter.issue_date.$lte = new Date(to);
-  }
-  // Auto-mark overdue
-  await Invoice.updateMany(
-    { tenant_id: req.tenant_id, status: { $in: ['sent','partially_paid'] }, due_date: { $lt: new Date() } },
-    { status: 'overdue' }
-  );
-  const data = await Invoice.find(filter).sort({ issue_date: -1 });
-  res.json({ success: true, data });
 });
 
 router.get('/invoices/:id', async (req, res) => {
@@ -827,8 +828,12 @@ router.post('/credit-notes', authorize('business_owner', 'accountant'), async (r
 
 // ACCOUNTING PERIODS
 router.get('/accounting/periods', async (req, res) => {
-  const data = await AccountingPeriod.find({ tenant_id: req.tenant_id }).sort({ start_date: -1 });
-  res.json({ success: true, data });
+  try {
+    const data = await accounting.buildPeriodsView(req.tenant_id);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.post('/accounting/periods', authorize('business_owner', 'accountant'), async (req, res) => {

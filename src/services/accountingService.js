@@ -990,6 +990,164 @@ async function buildTaxView(tenantId, options = {}) {
   return { ...rates, vat };
 }
 
+async function buildTrialBalanceView(tenantId, options = {}) {
+  const asOfRaw = options.as_of || options.asOf || null;
+  const asOfDate = asOfRaw ? parseOptionalDate(asOfRaw) : new Date();
+  const asOfFilter = asOfDate ? new Date(asOfDate) : new Date();
+  asOfFilter.setHours(23, 59, 59, 999);
+
+  const [accounts, jeBalances] = await Promise.all([
+    Account.find({ tenant_id: tenantId, is_active: true, is_group: { $ne: true } }).sort('code'),
+    JournalEntry.aggregate([
+      { $match: { tenant_id: tenantId, status: { $ne: 'voided' }, entry_date: { $lte: asOfFilter } } },
+      { $unwind: '$lines' },
+      { $group: { _id: '$lines.account_id', debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+    ]),
+  ]);
+
+  const balMap = Object.fromEntries(jeBalances.map((b) => [String(b._id), b]));
+  const accountsRows = accounts.map((a) => {
+    const b = balMap[String(a._id)] || { debit: 0, credit: 0 };
+    const net = round2(b.debit - b.credit);
+    const debit_balance = net > 0 ? net : 0;
+    const credit_balance = net < 0 ? round2(-net) : 0;
+    return {
+      code: a.code,
+      name: a.name,
+      type: a.type,
+      debit_balance,
+      credit_balance,
+      net,
+    };
+  });
+
+  const withBalance = accountsRows.filter((r) => r.debit_balance > 0.001 || r.credit_balance > 0.001);
+  const totals = accountsRows.reduce(
+    (s, r) => ({
+      debit: round2(s.debit + r.debit_balance),
+      credit: round2(s.credit + r.credit_balance),
+    }),
+    { debit: 0, credit: 0 },
+  );
+
+  const byType = accountsRows.reduce((map, r) => {
+    if (!map[r.type]) map[r.type] = { count: 0, debit: 0, credit: 0 };
+    map[r.type].count += 1;
+    map[r.type].debit = round2(map[r.type].debit + r.debit_balance);
+    map[r.type].credit = round2(map[r.type].credit + r.credit_balance);
+    return map;
+  }, {});
+
+  return {
+    as_of: formatLocalDate(asOfFilter),
+    generated_at: new Date().toISOString(),
+    accounts: accountsRows,
+    totals,
+    checks: {
+      is_balanced: Math.abs(totals.debit - totals.credit) < 0.02,
+      difference: round2(totals.debit - totals.credit),
+    },
+    summary: {
+      account_count: accountsRows.length,
+      with_balance: withBalance.length,
+      by_type: byType,
+    },
+  };
+}
+
+async function buildInvoicesView(tenantId, options = {}) {
+  const { status, customer_id, from, to, search } = options;
+  const filter = { tenant_id: tenantId };
+
+  if (status) {
+    const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
+    filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  }
+  if (customer_id) filter.customer_id = customer_id;
+  if (from || to) {
+    filter.issue_date = {};
+    if (from) filter.issue_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      filter.issue_date.$lte = end;
+    }
+  }
+  if (search) {
+    const re = { $regex: String(search).trim(), $options: 'i' };
+    filter.$or = [{ invoice_number: re }, { customer_name: re }, { customer_email: re }];
+  }
+
+  await Invoice.updateMany(
+    { tenant_id: tenantId, status: { $in: ['sent', 'partially_paid'] }, due_date: { $lt: new Date() } },
+    { status: 'overdue' },
+  );
+
+  const invoices = await Invoice.find(filter).sort({ issue_date: -1 });
+  const rows = invoices.map((inv) => {
+    const json = inv.toJSON?.() || inv;
+    return { ...json, id: json.id || String(json._id) };
+  });
+
+  const outstanding = rows.filter((i) => !['paid', 'void', 'draft'].includes(i.status));
+
+  return {
+    generated_at: new Date().toISOString(),
+    filters: { status: status || null, customer_id: customer_id || null, from: from || null, to: to || null, search: search || null },
+    rows,
+    invoices: rows,
+    summary: {
+      count: rows.length,
+      draft: rows.filter((i) => i.status === 'draft').length,
+      sent: rows.filter((i) => i.status === 'sent').length,
+      partially_paid: rows.filter((i) => i.status === 'partially_paid').length,
+      paid: rows.filter((i) => i.status === 'paid').length,
+      overdue: rows.filter((i) => i.status === 'overdue').length,
+      void: rows.filter((i) => i.status === 'void').length,
+      total_outstanding: round2(outstanding.reduce((s, i) => s + parseFloat(i.amount_due || 0), 0)),
+      total_billed: round2(rows.filter((i) => i.status !== 'void').reduce((s, i) => s + parseFloat(i.total || 0), 0)),
+    },
+  };
+}
+
+async function buildPeriodsView(tenantId) {
+  const periods = await AccountingPeriod.find({ tenant_id: tenantId }).sort({ start_date: -1 });
+  const rows = periods.map((p) => {
+    const json = p.toJSON?.() || p;
+    return {
+      id: json.id || String(json._id),
+      name: json.name,
+      type: json.type,
+      start_date: json.start_date,
+      end_date: json.end_date,
+      status: json.status,
+      closed_at: json.closed_at || null,
+      closed_by: json.closed_by || null,
+    };
+  });
+
+  const now = new Date();
+  const openRows = rows.filter((p) => p.status === 'open');
+  const currentOpen = openRows.find((p) => {
+    const start = new Date(p.start_date);
+    const end = new Date(p.end_date);
+    end.setHours(23, 59, 59, 999);
+    return start <= now && end >= now;
+  }) || openRows[0] || null;
+
+  return {
+    generated_at: new Date().toISOString(),
+    rows,
+    periods: rows,
+    summary: {
+      total: rows.length,
+      open: openRows.length,
+      closed: rows.filter((p) => p.status === 'closed').length,
+      current_open: currentOpen,
+    },
+  };
+}
+
 async function getGlBalanceMap(tenantId, asOf = null) {
   const match = { tenant_id: tenantId, status: { $ne: 'voided' } };
   if (asOf) match.entry_date = { $lte: asOf };
@@ -2785,6 +2943,9 @@ module.exports = {
   buildTaxRatesView,
   buildVatReturnView,
   buildTaxView,
+  buildTrialBalanceView,
+  buildInvoicesView,
+  buildPeriodsView,
   resolveReportDateRange,
   buildGlPl,
   buildPlView,
