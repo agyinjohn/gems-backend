@@ -1325,28 +1325,118 @@ function runBankReconciliationMatch(bankLines, glLines) {
   return { matched, unmatchedBank, unmatchedGl };
 }
 
+function formatDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function parseOptionalBalance(value) {
+  if (value == null || value === '') return null;
+  const n = parseFloat(value);
+  return Number.isNaN(n) ? null : round2(n);
+}
+
+function parseOptionalDate(value) {
+  if (!value) return null;
+  const iso = formatDateOnly(value);
+  if (!iso) return null;
+  return new Date(`${iso}T12:00:00.000Z`);
+}
+
+function deriveReconciliationSessionStats(doc) {
+  const json = doc.toJSON ? doc.toJSON() : doc;
+  const bankLines = json.bank_lines || [];
+  const pairs = json.matched_pairs || [];
+
+  const bankLineCount = json.bank_line_count != null ? json.bank_line_count : bankLines.length;
+  const matchedFromPairs = pairs.length;
+  const matchedFromFlags = bankLines.filter((l) => l.matched).length;
+  const matchedCount = json.matched_count != null
+    ? json.matched_count
+    : Math.max(matchedFromPairs, matchedFromFlags);
+
+  const matchRate = json.match_rate != null
+    ? json.match_rate
+    : (bankLineCount ? round2((matchedCount / bankLineCount) * 100) : 0);
+
+  const bankTotal = json.bank_total != null
+    ? json.bank_total
+    : round2(bankLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0));
+
+  const opening = json.opening_balance;
+  const closing = json.closing_balance;
+  const hasPersistedSummary = json.bank_line_count != null || json.match_rate != null;
+
+  return {
+    ...json,
+    statement_date: formatDateOnly(json.statement_date),
+    period_from: formatDateOnly(json.period_from),
+    period_to: formatDateOnly(json.period_to),
+    account_code: doc.account_id?.code || json.account_code || '1001',
+    account_name: doc.account_id?.name || json.account_name || 'Cash & Bank',
+    bank_line_count: bankLineCount,
+    matched_count: matchedCount,
+    match_rate: matchRate,
+    bank_total: bankTotal,
+    gl_period_total: json.gl_period_total,
+    period_difference: json.period_difference,
+    opening_balance: opening,
+    closing_balance: closing,
+    has_opening_balance: opening != null && (hasPersistedSummary || opening !== 0),
+    has_closing_balance: closing != null && (hasPersistedSummary || closing !== 0),
+    completed_by_name: doc.completed_by?.name || json.completed_by_name || null,
+  };
+}
+
+function buildReconciliationSessionPayload(body = {}, account) {
+  const summary = body.summary || {};
+  const bankLines = body.bank_lines || [];
+  const matchedPairs = body.matched_pairs || [];
+  const matchedFromFlags = bankLines.filter((l) => l.matched).length;
+  const bankLineCount = summary.bank_line_count ?? bankLines.length;
+  const matchedCount = summary.matched_count ?? Math.max(matchedPairs.length, matchedFromFlags);
+  const matchRate = summary.match_rate ?? (bankLineCount ? round2((matchedCount / bankLineCount) * 100) : 0);
+  const bankTotal = summary.bank_total != null
+    ? round2(summary.bank_total)
+    : round2(bankLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0));
+
+  return {
+    account_id: account._id,
+    statement_date: parseOptionalDate(body.statement_date) || new Date(),
+    period_from: parseOptionalDate(body.period_from || body.from),
+    period_to: parseOptionalDate(body.period_to || body.to),
+    opening_balance: parseOptionalBalance(body.opening_balance),
+    closing_balance: parseOptionalBalance(body.closing_balance),
+    bank_total: bankTotal,
+    gl_period_total: summary.gl_period_total != null ? round2(summary.gl_period_total) : null,
+    bank_line_count: bankLineCount,
+    matched_count: matchedCount,
+    match_rate: matchRate,
+    period_difference: summary.period_difference != null ? round2(summary.period_difference) : null,
+    bank_lines: bankLines,
+    matched_pairs: matchedPairs,
+    notes: body.notes || undefined,
+  };
+}
+
 async function buildReconciliationView(tenantId) {
   const cashAccount = await getCashAccount(tenantId);
   const glMap = cashAccount ? await getGlBalanceMap(tenantId) : {};
   const glBalance = cashAccount ? round2(glNet(glMap, cashAccount.code)) : 0;
 
   const sessions = await BankReconciliation.find({ tenant_id: tenantId })
-    .sort({ statement_date: -1 })
+    .sort({ statement_date: -1, createdAt: -1 })
     .limit(25)
     .populate('account_id', 'code name')
     .populate('completed_by', 'name');
 
-  const sessionRows = sessions.map((s) => {
-    const json = s.toJSON();
-    return {
-      ...json,
-      account_code: s.account_id?.code || '1001',
-      account_name: s.account_id?.name || 'Cash & Bank',
-      matched_count: (json.matched_pairs || []).length,
-      bank_line_count: (json.bank_lines || []).length,
-      completed_by_name: s.completed_by?.name || null,
-    };
-  });
+  const sessionRows = sessions.map((s) => deriveReconciliationSessionStats(s));
 
   const completed = sessionRows.filter((s) => s.status === 'completed');
   const lastCompleted = completed[0] || null;
@@ -1451,12 +1541,12 @@ async function buildReconciliationSessionDetail(tenantId, sessionId) {
     .populate('account_id', 'code name')
     .populate('completed_by', 'name');
   if (!session) return null;
-  const json = session.toJSON();
+  const stats = deriveReconciliationSessionStats(session);
+  const bankLines = stats.bank_lines || [];
   return {
-    ...json,
-    account_code: session.account_id?.code,
-    account_name: session.account_id?.name,
-    completed_by_name: session.completed_by?.name || null,
+    ...stats,
+    matched_bank_lines: bankLines.filter((l) => l.matched),
+    unmatched_bank_lines: bankLines.filter((l) => !l.matched),
   };
 }
 
@@ -1877,7 +1967,11 @@ module.exports = {
   buildCreditNotesView,
   buildReconciliationView,
   buildReconciliationSessionDetail,
+  buildReconciliationSessionPayload,
+  deriveReconciliationSessionStats,
   executeBankReconciliation,
+  formatDateOnly,
+  parseOptionalBalance,
   normalizeBankLines,
   round2,
 };

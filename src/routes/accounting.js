@@ -1481,38 +1481,75 @@ router.get('/accounting/reconciliations/:id', async (req, res) => {
 });
 
 router.post('/accounting/reconciliations', authorize('business_owner', 'accountant'), async (req, res) => {
-  const { account_id, statement_date, opening_balance, closing_balance, bank_lines, matched_pairs, notes, period_from, period_to, summary } = req.body;
-  let account;
-  if (account_id) {
-    account = await Account.findOne({ _id: account_id, tenant_id: req.tenant_id });
-  } else {
-    account = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
+  try {
+    const { account_id } = req.body;
+    let account;
+    if (account_id) {
+      account = await Account.findOne({ _id: account_id, tenant_id: req.tenant_id });
+    } else {
+      account = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
+    }
+    if (!account) return res.status(404).json({ success: false, message: 'Bank account not found.' });
+
+    const payload = accounting.buildReconciliationSessionPayload(req.body, account);
+    const data = await BankReconciliation.create({
+      tenant_id: req.tenant_id,
+      ...payload,
+      status: 'draft',
+    });
+    res.status(201).json({ success: true, data: accounting.deriveReconciliationSessionStats(data) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  if (!account) return res.status(404).json({ success: false, message: 'Bank account not found.' });
-  const data = await BankReconciliation.create({
-    tenant_id: req.tenant_id,
-    account_id: account._id,
-    statement_date: statement_date ? new Date(statement_date) : new Date(),
-    opening_balance: parseFloat(opening_balance) || 0,
-    closing_balance: parseFloat(closing_balance) || 0,
-    bank_lines: bank_lines || [],
-    matched_pairs: matched_pairs || [],
-    status: 'draft',
-    notes: notes || (summary ? JSON.stringify({ period_from, period_to, summary }) : undefined),
-  });
-  res.status(201).json({ success: true, data });
+});
+
+router.put('/accounting/reconciliations/:id', authorize('business_owner', 'accountant'), async (req, res) => {
+  try {
+    const recon = await BankReconciliation.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+    if (!recon) return res.status(404).json({ success: false, message: 'Reconciliation not found.' });
+    if (recon.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Completed sessions cannot be edited.' });
+    }
+
+    let account = recon.account_id;
+    if (req.body.account_id) {
+      account = await Account.findOne({ _id: req.body.account_id, tenant_id: req.tenant_id });
+      if (!account) return res.status(404).json({ success: false, message: 'Bank account not found.' });
+    } else {
+      account = await Account.findById(recon.account_id);
+    }
+
+    const payload = accounting.buildReconciliationSessionPayload(req.body, account);
+    Object.assign(recon, payload);
+    await recon.save();
+    await recon.populate('account_id', 'code name');
+    res.json({ success: true, data: accounting.deriveReconciliationSessionStats(recon) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.patch('/accounting/reconciliations/:id/complete', authorize('business_owner', 'accountant'), async (req, res) => {
-  const recon = await BankReconciliation.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
-  if (!recon) return res.status(404).json({ success: false, message: 'Reconciliation not found.' });
-  recon.status = 'completed';
-  recon.completed_by = req.user._id;
-  recon.completed_at = new Date();
-  if (req.body.matched_pairs) recon.matched_pairs = req.body.matched_pairs;
-  if (req.body.bank_lines) recon.bank_lines = req.body.bank_lines;
-  await recon.save();
-  res.json({ success: true, data: recon });
+  try {
+    const recon = await BankReconciliation.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+    if (!recon) return res.status(404).json({ success: false, message: 'Reconciliation not found.' });
+
+    if (req.body.bank_lines || req.body.matched_pairs || req.body.summary) {
+      let account = await Account.findById(recon.account_id);
+      if (!account) account = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
+      const payload = accounting.buildReconciliationSessionPayload({ ...recon.toObject(), ...req.body }, account);
+      Object.assign(recon, payload);
+    }
+
+    recon.status = 'completed';
+    recon.completed_by = req.user._id;
+    recon.completed_at = new Date();
+    await recon.save();
+    await recon.populate([{ path: 'account_id', select: 'code name' }, { path: 'completed_by', select: 'name' }]);
+    res.json({ success: true, data: accounting.deriveReconciliationSessionStats(recon) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // DEPRECIATION RUN

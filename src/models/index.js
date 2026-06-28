@@ -720,25 +720,33 @@ const vendorBillSchema = new Schema({
 vendorBillSchema.index({ tenant_id: 1, bill_number: 1 }, { unique: true });
 
 const bankReconLineSchema = new Schema({
-  date:        Date,
-  description: String,
-  amount:      Number,
+  date:          String,
+  description:   String,
+  amount:        Number,
   matched_gl_id: String,
-  matched:     { type: Boolean, default: false },
+  matched:       { type: Boolean, default: false },
 }, { _id: true });
 
 const bankReconciliationSchema = new Schema({
-  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
-  account_id:      { type: Schema.Types.ObjectId, ref: 'Account', required: true },
-  statement_date:  { type: Date, required: true },
-  opening_balance: { type: Number, default: 0 },
-  closing_balance: { type: Number, default: 0 },
-  bank_lines:      [bankReconLineSchema],
-  matched_pairs:   [{ bank_line_id: String, gl_line_id: String }],
-  status:          { type: String, enum: ['draft','completed'], default: 'draft' },
-  completed_by:    { type: Schema.Types.ObjectId, ref: 'User' },
-  completed_at:    Date,
-  notes:           String,
+  tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  account_id:        { type: Schema.Types.ObjectId, ref: 'Account', required: true },
+  statement_date:    { type: Date, required: true },
+  period_from:       Date,
+  period_to:         Date,
+  opening_balance:   { type: Number, default: null },
+  closing_balance:   { type: Number, default: null },
+  bank_total:        { type: Number, default: null },
+  gl_period_total:   { type: Number, default: null },
+  bank_line_count:   { type: Number, default: null },
+  matched_count:     { type: Number, default: null },
+  match_rate:        { type: Number, default: null },
+  period_difference: { type: Number, default: null },
+  bank_lines:        [bankReconLineSchema],
+  matched_pairs:     [{ bank_line_id: String, gl_line_id: String }],
+  status:            { type: String, enum: ['draft','completed'], default: 'draft' },
+  completed_by:      { type: Schema.Types.ObjectId, ref: 'User' },
+  completed_at:      Date,
+  notes:             String,
 }, { timestamps: true });
 
 // BUDGET
