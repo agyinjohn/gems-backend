@@ -438,57 +438,16 @@ router.post('/journal-entries/:id/void', authorize('business_owner', 'accountant
   res.json({ success: true, data: reversal });
 });
 router.get('/accounting/cashflow', async (req, res) => {
-  const { from, to, source } = req.query;
-  if (source !== 'hybrid') {
-    const data = await accounting.buildGlCashFlow(req.tenant_id, from, to);
-    return res.json({ success: true, data });
+  try {
+    const data = await accounting.buildCashFlowView(req.tenant_id, {
+      from: req.query.from,
+      to: req.query.to,
+      period: req.query.period || (req.query.from || req.query.to ? 'custom' : undefined),
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  const tid = req.tenant_id;
-  const match = { tenant_id: tid };
-  const expMatch = { tenant_id: tid };
-  const poMatch = { tenant_id: tid, payment_status: 'paid' };
-  const payrollMatch = { tenant_id: tid, status: 'approved' };
-  if (from || to) {
-    match.createdAt = {}; expMatch.expense_date = {}; poMatch.paid_at = {}; payrollMatch.createdAt = {};
-    if (from) {
-      const f = new Date(from);
-      match.createdAt.$gte = f; expMatch.expense_date.$gte = f; poMatch.paid_at.$gte = f; payrollMatch.createdAt.$gte = f;
-    }
-    if (to) {
-      const t = new Date(to);
-      match.createdAt.$lte = t; expMatch.expense_date.$lte = t; poMatch.paid_at.$lte = t; payrollMatch.createdAt.$lte = t;
-    }
-  }
-  const [salesAgg, expAgg, poAgg, payrollAgg, openingBalance, closingBalance, investing, financing] = await Promise.all([
-    Order.aggregate([{ $match: { ...match, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-    Expense.aggregate([{ $match: expMatch }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-    PurchaseOrder.aggregate([{ $match: poMatch }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
-    PayrollRun.aggregate([{ $match: payrollMatch }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
-    cashAccountBalance(tid, from || null, true),
-    cashAccountBalance(tid, to || new Date(), false),
-    glAccountActivity(tid, ['1210'], from, to, 'debit'),
-    glAccountActivity(tid, ['3001', '2210'], from, to, 'credit'),
-  ]);
-  const cashFromSales     =  salesAgg[0]?.total   || 0;
-  const cashPaidExpenses  = -(expAgg[0]?.total     || 0);
-  const cashPaidSuppliers = -(poAgg[0]?.total      || 0);
-  const cashPaidPayroll   = -(payrollAgg[0]?.total || 0);
-  const operatingNet = cashFromSales + cashPaidExpenses + cashPaidSuppliers + cashPaidPayroll;
-  const netChange = closingBalance - openingBalance;
-  res.json({ success: true, data: {
-    operating: {
-      cash_from_sales:     cashFromSales,
-      cash_paid_expenses:  cashPaidExpenses,
-      cash_paid_suppliers: cashPaidSuppliers,
-      cash_paid_payroll:   cashPaidPayroll,
-      net: operatingNet,
-    },
-    investing,
-    financing,
-    opening_balance: openingBalance,
-    net_change:      netChange,
-    closing_balance: closingBalance,
-  }});
 });
 
 router.get('/accounting/balance-sheet', async (req, res) => {
@@ -673,51 +632,15 @@ router.delete('/budgets/:id', authorize('business_owner','accountant'), async (r
   res.json({ success: true, message: 'Deleted.' });
 });
 router.get('/budgets/vs-actual', async (req, res) => {
-  const tid = req.tenant_id;
-  const { period, period_type = 'monthly' } = req.query;
-  // Default period = current month (YYYY-MM) or year (YYYY)
-  const now = new Date();
-  const defaultPeriod = period_type === 'annual'
-    ? String(now.getFullYear())
-    : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const activePeriod = period || defaultPeriod;
-
-  // Date range from period
-  let fromDate, toDate;
-  if (period_type === 'annual') {
-    fromDate = new Date(`${activePeriod}-01-01`);
-    toDate   = new Date(`${activePeriod}-12-31T23:59:59`);
-  } else {
-    const [y, m] = activePeriod.split('-').map(Number);
-    fromDate = new Date(y, m - 1, 1);
-    toDate   = new Date(y, m, 0, 23, 59, 59);
+  try {
+    const data = await accounting.buildBudgetView(req.tenant_id, {
+      period: req.query.period,
+      period_type: req.query.period_type,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-
-  const [budgets, actuals] = await Promise.all([
-    Budget.find({ tenant_id: tid, period: activePeriod, period_type }),
-    Expense.aggregate([
-      { $match: { tenant_id: tid, expense_date: { $gte: fromDate, $lte: toDate } } },
-      { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, actual: { $sum: '$amount' } } },
-    ]),
-  ]);
-
-  const actualMap = Object.fromEntries(actuals.map(a => [a._id, a.actual]));
-  // Merge: all budgeted categories + any actual-only categories
-  const allCategories = new Set([
-    ...budgets.map(b => b.category),
-    ...actuals.map(a => a._id),
-  ]);
-  const rows = Array.from(allCategories).map(cat => {
-    const budget = budgets.find(b => b.category === cat);
-    const actual = actualMap[cat] || 0;
-    const budgeted = budget?.amount || 0;
-    const variance = budgeted - actual;
-    const pct = budgeted > 0 ? (actual / budgeted) * 100 : null;
-    return { category: cat, budgeted, actual, variance, pct, budget_id: budget?.id || null };
-  }).sort((a, b) => a.category.localeCompare(b.category));
-
-  const totals = rows.reduce((s, r) => ({ budgeted: s.budgeted + r.budgeted, actual: s.actual + r.actual, variance: s.variance + r.variance }), { budgeted: 0, actual: 0, variance: 0 });
-  res.json({ success: true, data: { period: activePeriod, period_type, rows, totals } });
 });
 
 // TAX RATES

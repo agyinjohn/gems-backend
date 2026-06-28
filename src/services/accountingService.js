@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation, Budget } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -555,24 +555,48 @@ async function postDepreciationEntry({ tenantId, amount, reference, date, source
 async function buildGlCashFlow(tenantId, from, to) {
   const cashAcc = await Account.findOne({ tenant_id: tenantId, code: '1001' });
   if (!cashAcc) {
-    return { operating: { items: [], net: 0 }, investing: { items: [], net: 0 }, financing: { items: [], net: 0 }, opening_balance: 0, closing_balance: 0, net_change: 0, source: 'gl' };
+    return {
+      operating: { items: [], net: 0 },
+      investing: { items: [], net: 0 },
+      financing: { items: [], net: 0 },
+      opening_balance: 0,
+      closing_balance: 0,
+      net_change: 0,
+      source: 'gl',
+    };
   }
 
-  const matchBefore = { tenant_id: tenantId, status: { $ne: 'voided' }, 'lines.account_id': cashAcc._id };
-  const matchRange = { ...matchBefore };
-  if (from) matchRange.entry_date = { ...(matchRange.entry_date || {}), $gte: new Date(from) };
-  if (to) matchRange.entry_date = { ...(matchRange.entry_date || {}), $lte: new Date(to) };
+  const matchRange = { tenant_id: tenantId, status: { $ne: 'voided' }, 'lines.account_id': cashAcc._id };
+  const periodEntryMatch = { tenant_id: tenantId, status: { $ne: 'voided' } };
+  if (from || to) {
+    matchRange.entry_date = {};
+    periodEntryMatch.entry_date = {};
+    if (from) {
+      matchRange.entry_date.$gte = new Date(from);
+      periodEntryMatch.entry_date.$gte = new Date(from);
+    }
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      matchRange.entry_date.$lte = end;
+      periodEntryMatch.entry_date.$lte = end;
+    }
+  }
 
-  const openingMatch = { ...matchBefore };
-  if (from) openingMatch.entry_date = { $lt: new Date(from) };
+  const openingMatch = { tenant_id: tenantId, status: { $ne: 'voided' }, 'lines.account_id': cashAcc._id };
+  if (from) {
+    openingMatch.entry_date = { $lt: new Date(from) };
+  }
 
   const [openingAgg, periodRows, ppeActivity, equityActivity] = await Promise.all([
-    JournalEntry.aggregate([
-      { $match: openingMatch },
-      { $unwind: '$lines' },
-      { $match: { 'lines.account_id': cashAcc._id } },
-      { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
-    ]),
+    from
+      ? JournalEntry.aggregate([
+        { $match: openingMatch },
+        { $unwind: '$lines' },
+        { $match: { 'lines.account_id': cashAcc._id } },
+        { $group: { _id: null, balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
+      ])
+      : Promise.resolve([{ balance: 0 }]),
     JournalEntry.aggregate([
       { $match: matchRange },
       { $unwind: '$lines' },
@@ -580,7 +604,7 @@ async function buildGlCashFlow(tenantId, from, to) {
       { $group: { _id: '$source', net: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
     ]),
     JournalEntry.aggregate([
-      { $match: { tenant_id: tenantId, status: { $ne: 'voided' }, ...(from || to ? { entry_date: matchRange.entry_date } : {}) } },
+      { $match: periodEntryMatch },
       { $unwind: '$lines' },
       { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
       { $unwind: '$acc' },
@@ -588,7 +612,7 @@ async function buildGlCashFlow(tenantId, from, to) {
       { $group: { _id: null, net: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } } } },
     ]),
     JournalEntry.aggregate([
-      { $match: { tenant_id: tenantId, status: { $ne: 'voided' }, ...(from || to ? { entry_date: matchRange.entry_date } : {}) } },
+      { $match: periodEntryMatch },
       { $unwind: '$lines' },
       { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
       { $unwind: '$acc' },
@@ -597,28 +621,216 @@ async function buildGlCashFlow(tenantId, from, to) {
     ]),
   ]);
 
-  const sourceLabels = { sale: 'Sales & collections', purchase: 'Supplier payments', payroll: 'Payroll', expense: 'Operating expenses', manual: 'Other' };
+  const sourceLabels = {
+    sale: 'Sales & collections',
+    purchase: 'Supplier payments',
+    payroll: 'Payroll',
+    expense: 'Operating expenses',
+    manual: 'Other manual entries',
+    opening: 'Opening balances',
+    depreciation: 'Depreciation',
+    adjustment: 'Adjustments',
+  };
+  const operatingSources = ['sale', 'purchase', 'payroll', 'expense', 'manual', 'opening', 'depreciation', 'adjustment'];
   const operatingItems = periodRows
-    .filter((r) => ['sale', 'purchase', 'payroll', 'expense', 'manual'].includes(r._id))
-    .map((r) => ({ label: sourceLabels[r._id] || r._id, amount: round2(r.net) }));
+    .filter((r) => r._id && operatingSources.includes(r._id))
+    .map((r) => ({ label: sourceLabels[r._id] || String(r._id), source: r._id, amount: round2(r.net) }))
+    .filter((r) => Math.abs(r.amount) > 0.001);
 
   const operatingNet = round2(operatingItems.reduce((s, i) => s + i.amount, 0));
   const investingNet = round2(-(ppeActivity[0]?.net || 0));
   const financingItems = equityActivity.map((r) => ({ label: r.name, code: r._id, amount: round2(r.net) }));
   const financingNet = round2(financingItems.reduce((s, i) => s + i.amount, 0));
 
-  const opening_balance = round2(openingAgg[0]?.balance || 0);
+  const opening_balance = from ? round2(openingAgg[0]?.balance || 0) : 0;
   const net_change = round2(operatingNet + investingNet + financingNet);
   const closing_balance = round2(opening_balance + net_change);
 
   return {
     source: 'gl',
     operating: { items: operatingItems, net: operatingNet },
-    investing: { items: investingNet !== 0 ? [{ label: 'Property & equipment', amount: -investingNet }] : [], net: investingNet },
+    investing: {
+      items: Math.abs(investingNet) > 0.001 ? [{ label: 'Property & equipment', amount: investingNet }] : [],
+      net: investingNet,
+    },
     financing: { items: financingItems, net: financingNet },
     opening_balance,
     net_change,
     closing_balance,
+  };
+}
+
+function resolveReportDateRange(options = {}) {
+  const { from, to, period } = options;
+  const now = new Date();
+
+  if (period === 'custom' && !from && !to) {
+    return {
+      from: null,
+      to: null,
+      period_key: 'custom',
+      period_label: 'Custom range',
+      requires_dates: true,
+    };
+  }
+
+  if (from || to || period === 'custom') {
+    return {
+      from: from || null,
+      to: to || null,
+      period_key: 'custom',
+      period_label: from && to ? `${from} to ${to}` : from ? `From ${from}` : to ? `Until ${to}` : 'Custom range',
+    };
+  }
+
+  if (period === 'mtd') {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return {
+      from: formatLocalDate(start),
+      to: formatLocalDate(now),
+      period_key: 'mtd',
+      period_label: 'Month to date',
+    };
+  }
+
+  if (period === 'all') {
+    return { from: null, to: null, period_key: 'all', period_label: 'All time' };
+  }
+
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  return {
+    from: formatLocalDate(yearStart),
+    to: formatLocalDate(now),
+    period_key: 'ytd',
+    period_label: 'Year to date',
+  };
+}
+
+async function buildCashFlowView(tenantId, options = {}) {
+  const range = resolveReportDateRange(options);
+  if (range.requires_dates) {
+    return {
+      empty: true,
+      message: 'Select a from and/or to date for a custom range.',
+      filters: { from: null, to: null, period: 'custom' },
+      period_label: range.period_label,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
+  const report = await buildGlCashFlow(tenantId, range.from, range.to);
+  const asOf = range.to ? parseOptionalDate(range.to) : new Date();
+  const asOfFilter = asOf ? new Date(asOf) : new Date();
+  asOfFilter.setHours(23, 59, 59, 999);
+  const glMap = await getGlBalanceMap(tenantId, asOfFilter);
+  const glCashBalance = round2(glNet(glMap, '1001'));
+  const computedClosing = round2(report.opening_balance + report.net_change);
+
+  return {
+    ...report,
+    filters: {
+      from: range.from,
+      to: range.to,
+      period: range.period_key,
+    },
+    period_label: range.period_label,
+    generated_at: new Date().toISOString(),
+    gl_cash_balance: glCashBalance,
+    checks: {
+      opening_plus_net: computedClosing,
+      closing_reported: report.closing_balance,
+      gl_cash_balance: glCashBalance,
+      formula_balanced: Math.abs(computedClosing - report.closing_balance) < 0.02,
+      matches_gl_cash: Math.abs(computedClosing - glCashBalance) < 0.02,
+    },
+  };
+}
+
+function resolveBudgetPeriod(period, periodType) {
+  const now = new Date();
+  const defaultPeriod = periodType === 'annual'
+    ? String(now.getFullYear())
+    : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const activePeriod = period || defaultPeriod;
+
+  let fromDate;
+  let toDate;
+  if (periodType === 'annual') {
+    fromDate = new Date(`${activePeriod}-01-01T00:00:00`);
+    toDate = new Date(`${activePeriod}-12-31T23:59:59.999`);
+  } else {
+    const [y, m] = activePeriod.split('-').map(Number);
+    fromDate = new Date(y, m - 1, 1);
+    toDate = new Date(y, m, 0, 23, 59, 59, 999);
+  }
+
+  return { activePeriod, fromDate, toDate, periodType: periodType || 'monthly' };
+}
+
+async function buildBudgetView(tenantId, options = {}) {
+  const periodType = options.period_type === 'annual' ? 'annual' : 'monthly';
+  const { activePeriod, fromDate, toDate } = resolveBudgetPeriod(options.period, periodType);
+
+  const [budgets, actuals] = await Promise.all([
+    Budget.find({ tenant_id: tenantId, period: activePeriod, period_type: periodType }),
+    Expense.aggregate([
+      { $match: { tenant_id: tenantId, expense_date: { $gte: fromDate, $lte: toDate } } },
+      { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, actual: { $sum: '$amount' } } },
+    ]),
+  ]);
+
+  const actualMap = Object.fromEntries(actuals.map((a) => [a._id, round2(a.actual)]));
+  const allCategories = new Set([
+    ...budgets.map((b) => b.category),
+    ...actuals.map((a) => a._id),
+  ]);
+
+  const rows = Array.from(allCategories).map((cat) => {
+    const budget = budgets.find((b) => b.category === cat);
+    const actual = actualMap[cat] || 0;
+    const budgeted = round2(budget?.amount || 0);
+    const variance = round2(budgeted - actual);
+    const pct = budgeted > 0 ? round2((actual / budgeted) * 100) : null;
+    const json = budget?.toJSON?.() || budget;
+    return {
+      category: cat,
+      budgeted,
+      actual,
+      variance,
+      pct,
+      budget_id: json?.id || json?._id || null,
+      status: budgeted <= 0 ? 'unbudgeted' : actual > budgeted ? 'over' : pct != null && pct >= 80 ? 'warning' : 'ok',
+    };
+  }).sort((a, b) => b.actual - a.actual || a.category.localeCompare(b.category));
+
+  const totals = rows.reduce(
+    (s, r) => ({
+      budgeted: round2(s.budgeted + r.budgeted),
+      actual: round2(s.actual + r.actual),
+      variance: round2(s.variance + r.variance),
+    }),
+    { budgeted: 0, actual: 0, variance: 0 },
+  );
+
+  return {
+    period: activePeriod,
+    period_type: periodType,
+    period_label: periodType === 'annual' ? `Year ${activePeriod}` : activePeriod,
+    from: formatLocalDate(fromDate),
+    to: formatLocalDate(toDate),
+    generated_at: new Date().toISOString(),
+    rows,
+    totals: {
+      ...totals,
+      pct: totals.budgeted > 0 ? round2((totals.actual / totals.budgeted) * 100) : null,
+    },
+    summary: {
+      category_count: rows.length,
+      budgeted_categories: rows.filter((r) => r.budgeted > 0).length,
+      over_budget_count: rows.filter((r) => r.budgeted > 0 && r.actual > r.budgeted).length,
+      unbudgeted_spend: round2(rows.filter((r) => r.budgeted <= 0).reduce((s, r) => s + r.actual, 0)),
+    },
+    categories: EXPENSE_CATEGORIES,
   };
 }
 
@@ -2412,6 +2624,9 @@ module.exports = {
   postAssetAcquisitionEntry,
   postDepreciationEntry,
   buildGlCashFlow,
+  buildCashFlowView,
+  buildBudgetView,
+  resolveReportDateRange,
   buildGlPl,
   buildPlView,
   buildOrdersPl,
