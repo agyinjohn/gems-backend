@@ -672,30 +672,29 @@ router.get('/accounting/gl/:accountId', async (req, res) => {
 });
 
 router.post('/accounting/reconcile', async (req, res) => {
-  const { lines } = req.body;
-  if (!Array.isArray(lines) || !lines.length) return res.status(400).json({ success: false, message: 'lines array required.' });
-  const cashAccount = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
-  if (!cashAccount) return res.status(404).json({ success: false, message: 'Cash & Bank account (1001) not found.' });
-  const glEntries = await JournalEntry.find({ tenant_id: req.tenant_id, 'lines.account_id': cashAccount._id }).sort({ entry_date: 1 });
-  const glLines = [];
-  for (const entry of glEntries) {
-    for (const line of entry.lines) {
-      if (String(line.account_id) === String(cashAccount._id)) {
-        glLines.push({ id: String(line._id), date: entry.entry_date, description: line.description || entry.description, reference: entry.reference, amount: (line.debit || 0) - (line.credit || 0) });
-      }
-    }
+  try {
+    const data = await accounting.executeBankReconciliation(req.tenant_id, {
+      lines: req.body.lines,
+      account_id: req.body.account_id,
+      from: req.body.from,
+      to: req.body.to,
+      opening_balance: req.body.opening_balance,
+      closing_balance: req.body.closing_balance,
+      statement_date: req.body.statement_date,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
   }
-  const matched = [], unmatchedBank = [], usedGlIds = new Set();
-  for (const bankLine of lines) {
-    const bankAmt = parseFloat(bankLine.amount);
-    const match = glLines.find(g => !usedGlIds.has(g.id) && Math.abs(g.amount - bankAmt) < 0.01);
-    if (match) { usedGlIds.add(match.id); matched.push({ bank: bankLine, gl: match }); }
-    else unmatchedBank.push(bankLine);
+});
+
+router.get('/accounting/reconciliation', async (req, res) => {
+  try {
+    const data = await accounting.buildReconciliationView(req.tenant_id);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
-  const unmatchedGl = glLines.filter(g => !usedGlIds.has(g.id));
-  const bankTotal = lines.reduce((s, l) => s + parseFloat(l.amount), 0);
-  const glTotal   = glLines.reduce((s, l) => s + l.amount, 0);
-  res.json({ success: true, data: { matched, unmatchedBank, unmatchedGl, bankTotal, glTotal, difference: bankTotal - glTotal, isBalanced: Math.abs(bankTotal - glTotal) < 0.01 } });
 });
 
 // AP LEDGER — GL-derived accounts payable
@@ -1323,60 +1322,22 @@ router.get('/accounting/export/xero', authorize('business_owner', 'accountant'),
 });
 
 router.post('/accounting/reconcile/import', authorize('business_owner', 'accountant'), async (req, res) => {
-  const { rows } = req.body;
-  if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ success: false, message: 'rows[] required.' });
-
-  const lines = rows.map((row, i) => {
-    const amount = parseFloat(row.amount);
-    if (Number.isNaN(amount)) return null;
-    return {
-      id: i,
-      date: row.date || row.transaction_date || '',
-      description: row.description || row.memo || row.narration || '',
-      amount,
-    };
-  }).filter(Boolean);
-
-  if (!lines.length) return res.status(400).json({ success: false, message: 'No valid rows with amount.' });
-
-  const cashAccount = await Account.findOne({ tenant_id: req.tenant_id, code: '1001' });
-  if (!cashAccount) return res.status(404).json({ success: false, message: 'Cash & Bank account (1001) not found.' });
-
-  const glEntries = await JournalEntry.find({ tenant_id: req.tenant_id, 'lines.account_id': cashAccount._id }).sort({ entry_date: 1 });
-  const glLines = [];
-  for (const entry of glEntries) {
-    for (const line of entry.lines) {
-      if (String(line.account_id) === String(cashAccount._id)) {
-        glLines.push({ id: String(line._id), date: entry.entry_date, description: line.description || entry.description, reference: entry.reference, amount: (line.debit || 0) - (line.credit || 0) });
-      }
-    }
+  try {
+    const lines = accounting.normalizeBankLines(req.body.rows);
+    if (!lines.length) return res.status(400).json({ success: false, message: 'No valid rows with amount.' });
+    const data = await accounting.executeBankReconciliation(req.tenant_id, {
+      lines,
+      account_id: req.body.account_id,
+      from: req.body.from,
+      to: req.body.to,
+      opening_balance: req.body.opening_balance,
+      closing_balance: req.body.closing_balance,
+      statement_date: req.body.statement_date,
+    });
+    res.json({ success: true, data: { ...data, imported: lines.length } });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
   }
-
-  const matched = [];
-  const unmatchedBank = [];
-  const usedGlIds = new Set();
-  for (const bankLine of lines) {
-    const match = glLines.find((g) => !usedGlIds.has(g.id) && Math.abs(g.amount - bankLine.amount) < 0.01);
-    if (match) { usedGlIds.add(match.id); matched.push({ bank: bankLine, gl: match }); }
-    else unmatchedBank.push(bankLine);
-  }
-  const unmatchedGl = glLines.filter((g) => !usedGlIds.has(g.id));
-  const bankTotal = lines.reduce((s, l) => s + l.amount, 0);
-  const glTotal = glLines.reduce((s, l) => s + l.amount, 0);
-
-  res.json({
-    success: true,
-    data: {
-      imported: lines.length,
-      matched,
-      unmatchedBank,
-      unmatchedGl,
-      bankTotal,
-      glTotal,
-      difference: bankTotal - glTotal,
-      isBalanced: Math.abs(bankTotal - glTotal) < 0.01,
-    },
-  });
 });
 
 
@@ -1497,12 +1458,30 @@ router.patch('/vendor-bills/:id/void', authorize('business_owner', 'accountant')
 
 // BANK RECONCILIATION — persistent sessions
 router.get('/accounting/reconciliations', async (req, res) => {
-  const data = await BankReconciliation.find({ tenant_id: req.tenant_id }).sort({ statement_date: -1 }).limit(50);
-  res.json({ success: true, data });
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildReconciliationView(req.tenant_id);
+      return res.json({ success: true, data });
+    }
+    const data = await BankReconciliation.find({ tenant_id: req.tenant_id }).sort({ statement_date: -1 }).limit(50);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/accounting/reconciliations/:id', async (req, res) => {
+  try {
+    const data = await accounting.buildReconciliationSessionDetail(req.tenant_id, req.params.id);
+    if (!data) return res.status(404).json({ success: false, message: 'Reconciliation session not found.' });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.post('/accounting/reconciliations', authorize('business_owner', 'accountant'), async (req, res) => {
-  const { account_id, statement_date, opening_balance, closing_balance, bank_lines, matched_pairs, notes } = req.body;
+  const { account_id, statement_date, opening_balance, closing_balance, bank_lines, matched_pairs, notes, period_from, period_to, summary } = req.body;
   let account;
   if (account_id) {
     account = await Account.findOne({ _id: account_id, tenant_id: req.tenant_id });
@@ -1519,7 +1498,7 @@ router.post('/accounting/reconciliations', authorize('business_owner', 'accounta
     bank_lines: bank_lines || [],
     matched_pairs: matched_pairs || [],
     status: 'draft',
-    notes,
+    notes: notes || (summary ? JSON.stringify({ period_from, period_to, summary }) : undefined),
   });
   res.status(201).json({ success: true, data });
 });

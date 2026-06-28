@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill, CreditNote } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill, CreditNote, BankReconciliation } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1208,6 +1208,258 @@ async function buildCreditNotesView(tenantId, options = {}) {
   };
 }
 
+function parseFlexibleDate(value) {
+  if (!value) return null;
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) return direct;
+  const slash = String(value).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (slash) return new Date(`${slash[3]}-${slash[2]}-${slash[1]}`);
+  return null;
+}
+
+function daysBetween(a, b) {
+  return Math.abs((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
+}
+
+function descriptionScore(a, b) {
+  const wa = String(a || '').toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+  const wb = String(b || '').toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+  if (!wa.length || !wb.length) return 0;
+  const setB = new Set(wb);
+  return wa.filter((w) => setB.has(w)).length;
+}
+
+async function getCashAccount(tenantId, accountId) {
+  if (accountId) {
+    return Account.findOne({ _id: accountId, tenant_id: tenantId, is_active: true, is_group: { $ne: true } });
+  }
+  return Account.findOne({ tenant_id: tenantId, code: '1001', is_active: true, is_group: { $ne: true } });
+}
+
+async function getCashGlLines(tenantId, cashAccountId, options = {}) {
+  const { from, to } = options;
+  const match = { tenant_id: tenantId, status: { $ne: 'voided' }, 'lines.account_id': cashAccountId };
+  if (from || to) {
+    match.entry_date = {};
+    if (from) match.entry_date.$gte = new Date(from);
+    if (to) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      match.entry_date.$lte = end;
+    }
+  }
+  const glEntries = await JournalEntry.find(match).sort({ entry_date: 1 });
+  const glLines = [];
+  for (const entry of glEntries) {
+    for (const line of entry.lines) {
+      if (String(line.account_id) === String(cashAccountId)) {
+        glLines.push({
+          id: String(line._id),
+          entry_id: String(entry._id),
+          date: entry.entry_date,
+          description: line.description || entry.description,
+          reference: entry.reference,
+          source: entry.source,
+          amount: round2((line.debit || 0) - (line.credit || 0)),
+        });
+      }
+    }
+  }
+  return glLines;
+}
+
+function normalizeBankLines(lines) {
+  return (lines || []).map((line, i) => {
+    const amount = round2(parseFloat(line.amount));
+    if (Number.isNaN(amount)) return null;
+    return {
+      id: line.id ?? i,
+      date: line.date || line.transaction_date || '',
+      description: line.description || line.memo || line.narration || '',
+      amount,
+    };
+  }).filter(Boolean);
+}
+
+function inferDateRange(bankLines) {
+  const dates = bankLines.map((l) => parseFlexibleDate(l.date)).filter(Boolean);
+  if (!dates.length) return { from: null, to: null };
+  dates.sort((a, b) => a - b);
+  return {
+    from: dates[0].toISOString().slice(0, 10),
+    to: dates[dates.length - 1].toISOString().slice(0, 10),
+  };
+}
+
+function runBankReconciliationMatch(bankLines, glLines) {
+  const matched = [];
+  const unmatchedBank = [];
+  const usedGlIds = new Set();
+
+  for (const bankLine of bankLines) {
+    const bankAmt = round2(bankLine.amount);
+    const bankDate = parseFlexibleDate(bankLine.date);
+
+    const candidates = glLines
+      .filter((g) => !usedGlIds.has(g.id) && Math.abs(g.amount - bankAmt) < 0.01)
+      .map((g) => {
+        let score = 100;
+        if (bankDate) {
+          score -= Math.min(daysBetween(bankDate, g.date) * 2, 50);
+        }
+        score += descriptionScore(bankLine.description, g.description) * 8;
+        return { g, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    if (candidates.length) {
+      const pick = candidates[0];
+      usedGlIds.add(pick.g.id);
+      matched.push({ bank: bankLine, gl: pick.g, match_score: pick.score });
+    } else {
+      unmatchedBank.push(bankLine);
+    }
+  }
+
+  const unmatchedGl = glLines.filter((g) => !usedGlIds.has(g.id));
+  return { matched, unmatchedBank, unmatchedGl };
+}
+
+async function buildReconciliationView(tenantId) {
+  const cashAccount = await getCashAccount(tenantId);
+  const glMap = cashAccount ? await getGlBalanceMap(tenantId) : {};
+  const glBalance = cashAccount ? round2(glNet(glMap, cashAccount.code)) : 0;
+
+  const sessions = await BankReconciliation.find({ tenant_id: tenantId })
+    .sort({ statement_date: -1 })
+    .limit(25)
+    .populate('account_id', 'code name')
+    .populate('completed_by', 'name');
+
+  const sessionRows = sessions.map((s) => {
+    const json = s.toJSON();
+    return {
+      ...json,
+      account_code: s.account_id?.code || '1001',
+      account_name: s.account_id?.name || 'Cash & Bank',
+      matched_count: (json.matched_pairs || []).length,
+      bank_line_count: (json.bank_lines || []).length,
+      completed_by_name: s.completed_by?.name || null,
+    };
+  });
+
+  const completed = sessionRows.filter((s) => s.status === 'completed');
+  const lastCompleted = completed[0] || null;
+
+  return {
+    cash_account: cashAccount
+      ? { id: cashAccount._id, code: cashAccount.code, name: cashAccount.name }
+      : null,
+    gl_book_balance: glBalance,
+    sessions: sessionRows,
+    summary: {
+      draft_sessions: sessionRows.filter((s) => s.status === 'draft').length,
+      completed_sessions: completed.length,
+      total_sessions: sessionRows.length,
+      last_statement_date: lastCompleted?.statement_date || null,
+      gl_book_balance: glBalance,
+    },
+  };
+}
+
+async function executeBankReconciliation(tenantId, options = {}) {
+  const {
+    lines,
+    account_id: accountId,
+    from,
+    to,
+    opening_balance: openingBalance,
+    closing_balance: closingBalance,
+    statement_date: statementDate,
+  } = options;
+
+  const bankLines = normalizeBankLines(lines);
+  if (!bankLines.length) {
+    const err = new Error('At least one valid bank line with amount is required.');
+    err.status = 400;
+    throw err;
+  }
+
+  const cashAccount = await getCashAccount(tenantId, accountId);
+  if (!cashAccount) {
+    const err = new Error('Cash & Bank account (1001) not found.');
+    err.status = 404;
+    throw err;
+  }
+
+  const inferred = inferDateRange(bankLines);
+  const periodFrom = from || inferred.from;
+  const periodTo = to || inferred.to;
+
+  const glLines = await getCashGlLines(tenantId, cashAccount._id, { from: periodFrom, to: periodTo });
+  const glMap = await getGlBalanceMap(tenantId);
+  const glBookBalance = round2(glNet(glMap, cashAccount.code));
+
+  const { matched, unmatchedBank, unmatchedGl } = runBankReconciliationMatch(bankLines, glLines);
+
+  const bankTotal = round2(bankLines.reduce((s, l) => s + l.amount, 0));
+  const glPeriodTotal = round2(glLines.reduce((s, l) => s + l.amount, 0));
+  const matchedBankTotal = round2(matched.reduce((s, m) => s + m.bank.amount, 0));
+  const matchedGlTotal = round2(matched.reduce((s, m) => s + m.gl.amount, 0));
+  const unmatchedBankTotal = round2(unmatchedBank.reduce((s, l) => s + l.amount, 0));
+  const unmatchedGlTotal = round2(unmatchedGl.reduce((s, l) => s + l.amount, 0));
+
+  const opening = openingBalance != null && openingBalance !== '' ? round2(parseFloat(openingBalance)) : null;
+  const closing = closingBalance != null && closingBalance !== '' ? round2(parseFloat(closingBalance)) : null;
+  const computedClosing = opening != null ? round2(opening + bankTotal) : null;
+  const closingVariance = closing != null && computedClosing != null ? round2(closing - computedClosing) : null;
+
+  const matchRate = bankLines.length ? round2((matched.length / bankLines.length) * 100) : 0;
+
+  return {
+    cash_account: { id: cashAccount._id, code: cashAccount.code, name: cashAccount.name },
+    statement_date: statementDate || periodTo || new Date().toISOString().slice(0, 10),
+    period: { from: periodFrom, to: periodTo },
+    matched,
+    unmatchedBank,
+    unmatchedGl,
+    summary: {
+      bank_line_count: bankLines.length,
+      gl_line_count: glLines.length,
+      matched_count: matched.length,
+      match_rate: matchRate,
+      bank_total: bankTotal,
+      gl_period_total: glPeriodTotal,
+      gl_book_balance: glBookBalance,
+      matched_bank_total: matchedBankTotal,
+      matched_gl_total: matchedGlTotal,
+      unmatched_bank_total: unmatchedBankTotal,
+      unmatched_gl_total: unmatchedGlTotal,
+      opening_balance: opening,
+      closing_balance: closing,
+      computed_closing: computedClosing,
+      closing_variance: closingVariance,
+      period_difference: round2(bankTotal - glPeriodTotal),
+      is_period_balanced: Math.abs(bankTotal - glPeriodTotal) < 0.02,
+      adjusted_gl_balance: round2(glBookBalance - unmatchedGlTotal + unmatchedBankTotal),
+    },
+  };
+}
+
+async function buildReconciliationSessionDetail(tenantId, sessionId) {
+  const session = await BankReconciliation.findOne({ _id: sessionId, tenant_id: tenantId })
+    .populate('account_id', 'code name')
+    .populate('completed_by', 'name');
+  if (!session) return null;
+  const json = session.toJSON();
+  return {
+    ...json,
+    account_code: session.account_id?.code,
+    account_name: session.account_id?.name,
+    completed_by_name: session.completed_by?.name || null,
+  };
+}
+
 async function buildAccountingOverview(tenantId, options = {}) {
   const period = options.period || 'ytd';
   const now = new Date();
@@ -1623,5 +1875,9 @@ module.exports = {
   buildPayablesView,
   buildVendorBillsView,
   buildCreditNotesView,
+  buildReconciliationView,
+  buildReconciliationSessionDetail,
+  executeBankReconciliation,
+  normalizeBankLines,
   round2,
 };
