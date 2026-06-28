@@ -960,8 +960,19 @@ router.patch('/invoices/:id/void', authorize('business_owner', 'accountant'), as
 
 // CREDIT NOTES
 router.get('/credit-notes', async (req, res) => {
-  const data = await CreditNote.find({ tenant_id: req.tenant_id }).populate('invoice_id', 'invoice_number').sort({ createdAt: -1 });
-  res.json({ success: true, data });
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildCreditNotesView(req.tenant_id, {
+        search: req.query.search,
+        status: req.query.status,
+      });
+      return res.json({ success: true, data });
+    }
+    const data = await CreditNote.find({ tenant_id: req.tenant_id }).populate('invoice_id', 'invoice_number').sort({ createdAt: -1 });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.post('/credit-notes', authorize('business_owner', 'accountant'), async (req, res) => {
@@ -1373,8 +1384,20 @@ router.post('/accounting/reconcile/import', authorize('business_owner', 'account
 const billNumber = (n) => `BILL-${String(n).padStart(5, '0')}`;
 
 router.get('/vendor-bills', async (req, res) => {
-  const data = await VendorBill.find({ tenant_id: req.tenant_id }).sort({ issue_date: -1 });
-  res.json({ success: true, data });
+  try {
+    if (req.query.view === 'full') {
+      const data = await accounting.buildVendorBillsView(req.tenant_id, {
+        search: req.query.search,
+        status: req.query.status,
+        aging_bucket: req.query.aging_bucket,
+      });
+      return res.json({ success: true, data });
+    }
+    const data = await VendorBill.find({ tenant_id: req.tenant_id }).sort({ issue_date: -1 });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.post('/vendor-bills', authorize('business_owner', 'accountant'), async (req, res) => {

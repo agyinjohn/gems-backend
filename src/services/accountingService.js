@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, PurchaseOrder, VendorBill, CreditNote } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1068,6 +1068,146 @@ async function buildPayablesView(tenantId, options = {}) {
   };
 }
 
+const VENDOR_BILL_STATUSES = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'posted', label: 'Posted' },
+  { value: 'partially_paid', label: 'Partially paid' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'void', label: 'Void' },
+];
+
+async function buildVendorBillsView(tenantId, options = {}) {
+  const { search, status, aging_bucket: agingFilter } = options;
+  const filter = { tenant_id: tenantId };
+  if (status) {
+    const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
+    filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  }
+
+  const bills = await VendorBill.find(filter)
+    .populate('expense_account_id', 'code name')
+    .populate('created_by', 'name')
+    .sort({ issue_date: -1 });
+
+  const jeIds = bills.filter((b) => b.journal_entry_id).map((b) => b.journal_entry_id);
+  const journalEntries = jeIds.length
+    ? await JournalEntry.find({ _id: { $in: jeIds } }).select('reference status')
+    : [];
+  const jeMap = Object.fromEntries(journalEntries.map((j) => [String(j._id), j]));
+
+  let rows = bills.map((b) => {
+    const json = b.toJSON();
+    const acct = json.expense_account_id && typeof json.expense_account_id === 'object' ? json.expense_account_id : null;
+    const je = json.journal_entry_id ? jeMap[String(json.journal_entry_id)] : null;
+    return enrichAgingFields({
+      ...json,
+      expense_account_id: acct?._id || json.expense_account_id || null,
+      expense_account_code: acct?.code || '5900',
+      expense_account_name: acct?.name || 'Other expenses',
+      gl_reference: je?.reference || null,
+      gl_status: je?.status || null,
+      is_posted: !!je || ['posted', 'partially_paid', 'paid'].includes(json.status),
+    }, json.due_date);
+  });
+
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((r) =>
+      (r.bill_number || '').toLowerCase().includes(q)
+      || (r.vendor_name || '').toLowerCase().includes(q)
+      || (r.gl_reference || '').toLowerCase().includes(q)
+      || (r.notes || '').toLowerCase().includes(q)
+    );
+  }
+  if (agingFilter) {
+    rows = rows.filter((r) => r.aging_bucket === agingFilter && parseFloat(r.amount_due || 0) > 0.01);
+  }
+
+  const openRows = rows.filter((r) => ['posted', 'partially_paid'].includes(r.status) && parseFloat(r.amount_due || 0) > 0.01);
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mtdPosted = rows.filter((r) => r.status !== 'draft' && r.status !== 'void' && new Date(r.issue_date) >= monthStart);
+
+  return {
+    bills: rows,
+    statuses: VENDOR_BILL_STATUSES,
+    summary: {
+      count: rows.length,
+      draft: rows.filter((r) => r.status === 'draft').length,
+      open: openRows.length,
+      total_outstanding: round2(openRows.reduce((s, r) => s + parseFloat(r.amount_due || 0), 0)),
+      paid: rows.filter((r) => r.status === 'paid').length,
+      voided: rows.filter((r) => r.status === 'void').length,
+      overdue: openRows.filter((r) => r.is_overdue).length,
+      mtd_posted: mtdPosted.length,
+      aging: buildArAging(openRows.map((r) => ({ amount_due: r.amount_due, due_date: r.due_date }))),
+    },
+  };
+}
+
+async function buildCreditNotesView(tenantId, options = {}) {
+  const { search, status } = options;
+  const filter = { tenant_id: tenantId };
+  if (status) filter.status = status;
+
+  const notes = await CreditNote.find(filter)
+    .populate('invoice_id', 'invoice_number customer_name total amount_paid status')
+    .populate('created_by', 'name')
+    .sort({ createdAt: -1 });
+
+  const cnRefs = notes.map((n) => `CN-${n.credit_note_number}`);
+  const journalEntries = cnRefs.length
+    ? await JournalEntry.find({ tenant_id: tenantId, reference: { $in: cnRefs }, status: { $ne: 'voided' } }).select('reference status entry_date')
+    : [];
+  const jeMap = Object.fromEntries(journalEntries.map((j) => [j.reference, j]));
+
+  let rows = notes.map((n) => {
+    const json = n.toJSON();
+    const inv = json.invoice_id && typeof json.invoice_id === 'object' ? json.invoice_id : null;
+    const je = jeMap[`CN-${json.credit_note_number}`];
+    return {
+      ...json,
+      invoice_id: inv?._id || json.invoice_id || null,
+      invoice_number: inv?.invoice_number || null,
+      invoice_status: inv?.status || null,
+      gl_reference: je?.reference || `CN-${json.credit_note_number}`,
+      gl_status: je?.status || (json.status === 'applied' ? 'posted' : null),
+    };
+  });
+
+  if (search) {
+    const q = String(search).trim().toLowerCase();
+    rows = rows.filter((r) =>
+      (r.credit_note_number || '').toLowerCase().includes(q)
+      || (r.invoice_number || '').toLowerCase().includes(q)
+      || (r.customer_name || '').toLowerCase().includes(q)
+      || (r.reason || '').toLowerCase().includes(q)
+    );
+  }
+
+  const eligibleInvoices = await Invoice.find({
+    tenant_id: tenantId,
+    status: { $in: ['sent', 'partially_paid', 'paid', 'overdue'] },
+    amount_paid: { $gt: 0.01 },
+  }).select('invoice_number customer_name amount_paid total status issue_date').sort({ issue_date: -1 });
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mtd = rows.filter((r) => new Date(r.createdAt) >= monthStart);
+
+  return {
+    credit_notes: rows,
+    eligible_invoices: eligibleInvoices.map((i) => i.toJSON()),
+    summary: {
+      count: rows.length,
+      total_credited: round2(rows.reduce((s, r) => s + parseFloat(r.amount || 0), 0)),
+      mtd_count: mtd.length,
+      mtd_amount: round2(mtd.reduce((s, r) => s + parseFloat(r.amount || 0), 0)),
+      applied: rows.filter((r) => r.status === 'applied').length,
+    },
+  };
+}
+
 async function buildAccountingOverview(tenantId, options = {}) {
   const period = options.period || 'ytd';
   const now = new Date();
@@ -1481,5 +1621,7 @@ module.exports = {
   buildJournalEntryDetail,
   buildReceivablesView,
   buildPayablesView,
+  buildVendorBillsView,
+  buildCreditNotesView,
   round2,
 };
