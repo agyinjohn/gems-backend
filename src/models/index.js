@@ -29,6 +29,8 @@ const tenantSchema = new Schema({
     announcement:              { type: String, default: '' },
     min_order_amount:          { type: Number, default: 0 },
     custom_domain:             { type: String, default: '', lowercase: true, trim: true },
+    tax_rate:                  { type: Number, default: 0 },
+    tax_name:                  { type: String, default: 'Tax' },
   },
 }, { timestamps: true });
 
@@ -856,6 +858,21 @@ const storeCustomerSchema = new Schema({
 }, { timestamps: true });
 storeCustomerSchema.index({ tenant_id: 1, email: 1 }, { unique: true });
 
+// PAYOUT METHOD
+const payoutMethodSchema = new Schema({
+  tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  type:             { type: String, enum: ['mobile_money', 'bank'], required: true },
+  label:            { type: String, required: true },          // e.g. "MTN MoMo - 024..."
+  recipient_code:   { type: String, required: true },          // Paystack transfer recipient code
+  account_number:   { type: String, required: true },
+  account_name:     { type: String, required: true },
+  bank_code:        { type: String, required: true },          // network code for momo, bank code for bank
+  currency:         { type: String, default: 'GHS' },
+  is_default:       { type: Boolean, default: false },
+  is_active:        { type: Boolean, default: true },
+}, { timestamps: true });
+payoutMethodSchema.index({ tenant_id: 1 });
+
 // COUPON
 const couponSchema = new Schema({
   tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -882,6 +899,7 @@ const allSchemas = [
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema,
+  payoutMethodSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -940,4 +958,5 @@ module.exports = {
   PosCustomerDisplay:    mongoose.model('PosCustomerDisplay', posCustomerDisplaySchema),
   StoreCustomer:         mongoose.model('StoreCustomer', storeCustomerSchema),
   Coupon:                mongoose.model('Coupon', couponSchema),
+  PayoutMethod:          mongoose.model('PayoutMethod', payoutMethodSchema),
 };

@@ -1,6 +1,6 @@
 const https = require('node:https');
 const crypto = require('crypto');
-const { Order, Product, StockMovement } = require('../models');
+const { Order, Product, StockMovement, PayoutMethod } = require('../models');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
@@ -248,6 +248,9 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       channel: 'storefront',
     }).catch(() => {});
 
+    // Trigger immediate payout to tenant's default payout method
+    await triggerStorefrontPayout(order.tenant_id, order.total, order.order_number);
+
     if (order.coupon_code) {
       const { Coupon } = require('../models');
       const { applyCouponUsage } = require('./couponService');
@@ -257,6 +260,29 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
   }
 
   return { order_numbers: orderNumbers, fulfilled: orderNumbers.length };
+}
+
+async function triggerStorefrontPayout(tenantId, amount, reference) {
+  try {
+    const method = await PayoutMethod.findOne({ tenant_id: tenantId, is_default: true, is_active: true }).lean();
+    if (!method) return; // no payout method configured — skip silently
+
+    const { secretKey } = await getPaystackCredentials();
+    await paystackRequest({
+      method: 'POST',
+      path: '/transfer',
+      body: {
+        source: 'balance',
+        amount: Math.round(amount * 100), // kobo/pesewas
+        recipient: method.recipient_code,
+        reason: `Storefront payout — ${reference}`,
+        currency: 'GHS',
+      },
+      secretKey,
+    });
+  } catch (err) {
+    console.error('[Payout] Transfer failed for', reference, err.message);
+  }
 }
 
 async function failStorefrontOrders(orderIds) {
@@ -281,4 +307,5 @@ module.exports = {
   isPaystackTransactionPaid,
   fulfillStorefrontOrders,
   failStorefrontOrders,
+  triggerStorefrontPayout,
 };

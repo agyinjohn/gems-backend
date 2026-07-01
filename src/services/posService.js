@@ -52,6 +52,11 @@ async function completePosSale({
   let cogsTotal = 0;
   const enrichedItems = [];
 
+  // Fetch tenant tax rate
+  const { Tenant } = require('../models');
+  const tenantDoc = await Tenant.findById(tenantId).select('storefront_settings').lean();
+  const taxRate = Number(tenantDoc?.storefront_settings?.tax_rate || 0);
+
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, tenant_id: tenantId, is_active: true });
     if (!p) throw Object.assign(new Error(`Product not found.`), { status: 400 });
@@ -69,6 +74,8 @@ async function completePosSale({
   }
 
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
+  const computedTax = taxRate > 0 ? Math.round(subtotal * taxRate / 100 * 100) / 100 : 0;
+  const grandTotal = subtotal + computedTax;
   const order = await Order.create({
     tenant_id: tenantId,
     branch_id: branchId || null,
@@ -77,7 +84,8 @@ async function completePosSale({
     customer_name: customer_name || 'Walk-in Customer',
     customer_phone: customer_phone || '',
     subtotal,
-    total: subtotal,
+    tax_amount: computedTax,
+    total: grandTotal,
     payment_status: 'paid',
     payment_method: payment_method || 'cash',
     payment_ref: payment_ref || null,
@@ -113,7 +121,7 @@ async function completePosSale({
     tenant_id: tenantId,
     source: 'pos',
     reference: orderNumber,
-    amount: subtotal,
+    amount: grandTotal,
     method: payment_method || 'cash',
     status: 'success',
     payer_name: customer_name || 'Walk-in Customer',
@@ -124,8 +132,9 @@ async function completePosSale({
 
   await accounting.postSaleEntry({
     tenantId,
-    amount: subtotal,
+    amount: grandTotal,
     cogsAmount: cogsTotal,
+    taxAmount: computedTax,
     reference: orderNumber,
     date: new Date(),
     sourceId: order._id,
@@ -140,12 +149,12 @@ async function completePosSale({
     channel: 'pos',
   }).catch(() => {});
 
-  await recordShiftSale(shift_id, { amount: subtotal, payment_method });
+  await recordShiftSale(shift_id, { amount: grandTotal, payment_method });
 
-  const tendered = parseFloat(amount_tendered) || subtotal;
+  const tendered = parseFloat(amount_tendered) || grandTotal;
   return {
     order,
-    change: payment_method === 'cash' ? tendered - subtotal : 0,
+    change: payment_method === 'cash' ? Math.max(0, tendered - grandTotal) : 0,
     amount_tendered: tendered,
   };
 }

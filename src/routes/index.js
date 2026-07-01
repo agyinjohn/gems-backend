@@ -16,6 +16,7 @@ const { imageUpload, hrDocUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
+const payout = require('../controllers/payoutController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -470,6 +471,12 @@ router.get('/storefront/:tenantSlug/branches', async (req, res) => {
 router.get('/storefront/products', orders.getStorefrontProducts);
 router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
 router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
+
+// Payout methods
+router.get('/payout-methods', authenticate, requireTenant, businessOwnerOnly, payout.list);
+router.post('/payout-methods', authenticate, requireTenant, businessOwnerOnly, payout.create);
+router.patch('/payout-methods/:id/default', authenticate, requireTenant, businessOwnerOnly, payout.setDefault);
+router.delete('/payout-methods/:id', authenticate, requireTenant, businessOwnerOnly, payout.remove);
 router.get('/storefront/resolve-domain', storefront.resolveDomain);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
