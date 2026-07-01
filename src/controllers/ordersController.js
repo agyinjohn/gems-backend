@@ -219,7 +219,6 @@ const verifyPayment = async (req, res) => {
     const result = await fulfillStorefrontOrders({ reference, orderIds: order_ids });
     res.json({ success: true, message: 'Payment verified. Orders confirmed!', data: result });
   } catch (err) {
-    await failStorefrontOrders(order_ids);
     const status = err.message?.includes('not configured') ? 500 : 400;
     res.status(status).json({ success: false, message: err.message || 'Payment verification failed.' });
   }

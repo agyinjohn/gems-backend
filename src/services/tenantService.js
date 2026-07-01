@@ -28,7 +28,15 @@ async function getFeatureFlagsForPlan(plan = 'starter') {
   return flags[plan] || flags.starter || DEFAULT_FEATURE_FLAGS.starter;
 }
 
-async function isFeatureEnabled(plan, feature) {
+async function isFeatureEnabled(plan, feature, tenant = null) {
+  if (plan === 'custom') {
+    if (!tenant) {
+      const { Tenant } = require('../models');
+      // fallback: deny if no tenant context
+      return false;
+    }
+    return (tenant.modules || []).includes(feature);
+  }
   const planFlags = await getFeatureFlagsForPlan(plan);
   return planFlags[feature] !== false;
 }

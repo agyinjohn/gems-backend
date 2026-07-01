@@ -188,14 +188,14 @@ async function fetchPaystackTransaction(reference) {
 async function fulfillStorefrontOrders({ reference, orderIds }) {
   let ids = orderIds;
   if (!ids?.length && reference) {
-    const pending = await Order.find({ payment_ref: reference, payment_status: 'pending', source: 'storefront' });
+    const pending = await Order.find({ payment_ref: reference, payment_status: { $in: ['pending', 'failed'] }, source: 'storefront' });
     ids = pending.map((o) => o._id);
   }
   if (!ids?.length) return { order_numbers: [], fulfilled: 0 };
 
   const orderNumbers = [];
   for (const order_id of ids) {
-    const order = await Order.findOne({ _id: order_id, payment_status: 'pending', source: 'storefront' });
+    const order = await Order.findOne({ _id: order_id, payment_status: { $in: ['pending', 'failed'] }, source: 'storefront' });
     if (!order) continue;
 
     order.payment_status = 'paid';

@@ -9,9 +9,12 @@ const tenantSchema = new Schema({
   phone:                   String,
   address:                 String,
   logo:                    String,
-  plan:                    { type: String, enum: ['starter','pro','enterprise'], default: 'starter' },
+  plan:                    { type: String, enum: ['starter','pro','enterprise','custom'], default: 'starter' },
   subscription_status:     { type: String, enum: ['trial','active','expired','suspended'], default: 'trial' },
   subscription_expires_at: { type: Date, default: () => new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) },
+  subscription_type:       { type: String, enum: ['plan','custom'], default: 'plan' },
+  modules:                 { type: [String], default: [] },
+  addons:                  { type: [String], default: [] },
   max_branches:            { type: Number, default: 1 },
   max_users:               { type: Number, default: 5 },
   is_active:               { type: Boolean, default: true },
@@ -410,8 +413,11 @@ const cardAuthorizationSchema = new Schema({
 
 // BILLING TRANSACTION
 const billingTransactionSchema = new Schema({
-  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
-  plan:            { type: String, enum: ['starter','pro','enterprise'], required: true },
+  tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  plan:              { type: String, enum: ['starter','pro','enterprise','custom'], required: true },
+  subscription_type: { type: String, enum: ['plan','custom'], default: 'plan' },
+  modules:           { type: [String], default: [] },
+  addons:            { type: [String], default: [] },
   amount:          { type: Number, required: true },
   currency:        { type: String, default: 'USD' },
   status:          { type: String, enum: ['pending','success','failed'], default: 'pending' },
@@ -842,8 +848,11 @@ const storeCustomerSchema = new Schema({
   tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   name:          { type: String, required: true },
   email:         { type: String, required: true, lowercase: true, trim: true },
-  password_hash: { type: String, required: true },
+  password_hash: { type: String, default: '' },
   phone:         String,
+  google_id:     { type: String, sparse: true },
+  avatar:        String,
+  auth_provider: { type: String, enum: ['local', 'google'], default: 'local' },
 }, { timestamps: true });
 storeCustomerSchema.index({ tenant_id: 1, email: 1 }, { unique: true });
 

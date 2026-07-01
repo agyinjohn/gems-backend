@@ -1,39 +1,62 @@
 const { Tenant, BillingTransaction, PlatformSettings, CardAuthorization } = require('../models');
 const audit = require('../utils/audit');
-const logPayment = require('../utils/paymentLog');
+const { verifyPaystackTransaction } = require('../services/paymentService');
 
-const PLAN_PRICES_USD = { starter: 29, pro: 79, enterprise: 199 };
+const PLAN_PRICES = { starter: 350, pro: 850, enterprise: 2000 };
+
+const MODULE_PRICES = {
+  pos:         { label: 'POS Terminal',  price: 80 },
+  storefront:  { label: 'Online Store',  price: 60 },
+  inventory:   { label: 'Inventory',     price: 50 },
+  crm:         { label: 'CRM',           price: 50 },
+  accounting:  { label: 'Accounting',    price: 80 },
+  hr:          { label: 'HR & Payroll',  price: 80 },
+  procurement: { label: 'Procurement',   price: 60 },
+  reports:     { label: 'Reports',       price: 40 },
+};
+
+const ADDON_PRICES = {
+  extra_branch:     { label: 'Extra Branch',     price: 40 },
+  extra_users:      { label: '+10 Users',         price: 30 },
+  api_access:       { label: 'API Access',        price: 50 },
+  priority_support: { label: 'Priority Support',  price: 60 },
+};
+
+// GET /billing/module-prices  (public)
+const getModulePrices = async (req, res) => {
+  res.json({ success: true, data: { modules: MODULE_PRICES, addons: ADDON_PRICES } });
+};
 
 // GET /billing/status
 const getStatus = async (req, res) => {
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
-  const settings = await PlatformSettings.findOne() || { trial_days: 14, grace_days: 7, plans: {} };
-  const planPrices = settings.plans || {};
-  const planPrice = planPrices[tenant.plan]?.price ?? PLAN_PRICES_USD[tenant.plan] ?? 0;
+  const settings = await PlatformSettings.findOne() || {};
+  const planPrices = settings.plans || PLAN_PRICES;
+  const planPrice = planPrices[tenant.plan]?.price ?? PLAN_PRICES[tenant.plan] ?? 0;
   const days = tenant.subscription_expires_at
     ? Math.ceil((new Date(tenant.subscription_expires_at).getTime() - Date.now()) / 86400000)
     : null;
 
-  // Calculate total subscription duration from last successful transaction
-  const { BillingTransaction } = require('../models');
   const lastTx = await BillingTransaction.findOne({ tenant_id: req.tenant_id, status: 'success' }).sort({ createdAt: -1 });
-  const total_days = lastTx?.duration_days || 30;
 
   res.json({ success: true, data: {
-    plan:                   tenant.plan,
-    subscription_status:    tenant.subscription_status,
-    subscription_expires_at:tenant.subscription_expires_at,
-    trial_ends_at:          tenant.trial_ends_at,
-    days_remaining:         days,
-    total_days:             total_days,
-    grace_days:             settings.grace_days,
-    max_branches:           tenant.max_branches,
-    max_users:              tenant.max_users,
-    plan_price:             planPrice,
-    card_saved:             tenant.card_saved || false,
-    auto_renew:             tenant.auto_renew !== false,
+    plan:                    tenant.plan,
+    subscription_type:       tenant.subscription_type || 'plan',
+    modules:                 tenant.modules || [],
+    addons:                  tenant.addons  || [],
+    subscription_status:     tenant.subscription_status,
+    subscription_expires_at: tenant.subscription_expires_at,
+    trial_ends_at:           tenant.trial_ends_at,
+    days_remaining:          days,
+    total_days:              lastTx?.duration_days || 30,
+    grace_days:              settings.grace_days || 7,
+    max_branches:            tenant.max_branches,
+    max_users:               tenant.max_users,
+    plan_price:              planPrice,
+    card_saved:              tenant.card_saved || false,
+    auto_renew:              tenant.auto_renew !== false,
   }});
 };
 
@@ -43,41 +66,62 @@ const getTransactions = async (req, res) => {
   res.json({ success: true, data });
 };
 
-// POST /billing/subscribe — initiate Paystack payment
+// POST /billing/subscribe
 const subscribe = async (req, res) => {
-  const { plan, duration_days = 30 } = req.body;
-  if (!plan || !PLAN_PRICES_USD[plan]) return res.status(400).json({ success: false, message: 'Valid plan required: starter, pro, enterprise.' });
-
-  const settings = await PlatformSettings.findOne();
-  const planPrices = settings?.plans || PLAN_PRICES_USD;
-  const amount = (planPrices[plan]?.price || PLAN_PRICES_USD[plan]) * (duration_days / 30);
+  const { plan, duration_days = 30, subscription_type = 'plan', modules = [], addons = [] } = req.body;
 
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
-  // Create pending transaction
+  const settings = await PlatformSettings.findOne();
+  const planPrices = settings?.plans || PLAN_PRICES;
+
+  let amount, resolvedPlan;
+
+  if (subscription_type === 'custom') {
+    if (!modules.length) return res.status(400).json({ success: false, message: 'Select at least one module for a custom plan.' });
+    const moduleTotal = modules.reduce((s, m) => s + (MODULE_PRICES[m]?.price || 0), 0);
+    const addonTotal  = addons.reduce((s, a)  => s + (ADDON_PRICES[a]?.price  || 0), 0);
+    amount = (moduleTotal + addonTotal) * (duration_days / 30);
+    resolvedPlan = 'custom';
+  } else {
+    if (!plan || !['starter','pro','enterprise'].includes(plan)) {
+      return res.status(400).json({ success: false, message: 'Valid plan required: starter, pro, enterprise.' });
+    }
+    const base = planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 0;
+    const addonTotal = addons.reduce((s, a) => s + (ADDON_PRICES[a]?.price || 0), 0);
+    amount = (base + addonTotal) * (duration_days / 30);
+    resolvedPlan = plan;
+  }
+
   const tx = await BillingTransaction.create({
-    tenant_id:    req.tenant_id,
-    plan,
+    tenant_id: req.tenant_id,
+    plan: resolvedPlan,
+    subscription_type,
+    modules,
+    addons,
     amount,
-    currency:     'USD',
-    status:       'pending',
+    currency: 'GHS',
+    status: 'pending',
     duration_days,
     initiated_by: req.user._id,
   });
 
   res.json({ success: true, data: {
-    transaction_id:    tx._id,
+    transaction_id:      tx._id,
     amount,
-    plan,
+    plan:                resolvedPlan,
+    subscription_type,
+    modules,
+    addons,
     duration_days,
-    email:             tenant.email,
+    email:               tenant.email,
     paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
-    reference:         `BILLING-${tx._id}-${Date.now()}`,
+    reference:           `BILLING-${tx._id}-${Date.now()}`,
   }});
 };
 
-// POST /billing/verify — verify Paystack payment and activate subscription
+// POST /billing/verify
 const verify = async (req, res) => {
   const { reference, transaction_id } = req.body;
   if (!reference || !transaction_id) return res.status(400).json({ success: false, message: 'reference and transaction_id required.' });
@@ -86,90 +130,74 @@ const verify = async (req, res) => {
   if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found.' });
   if (tx.status === 'success') return res.status(400).json({ success: false, message: 'Transaction already processed.' });
 
-  // Verify with Paystack
-  const https = require('node:https');
-  const options = {
-    hostname: 'api.paystack.co',
-    path:     `/transaction/verify/${reference}`,
-    method:   'GET',
-    headers:  { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
-  };
+  try {
+    const txData = await verifyPaystackTransaction(reference);
 
-  let body = '';
-  const paystackReq = https.request(options, paystackRes => {
-    paystackRes.on('data', d => body += d);
-    paystackRes.on('end', async () => {
-      try {
-        const data = JSON.parse(body);
-        if (data.data?.status === 'success') {
-          // Calculate new expiry
-          const tenant = await Tenant.findById(req.tenant_id);
-          const base = tenant.subscription_expires_at && new Date(tenant.subscription_expires_at) > new Date()
-            ? new Date(tenant.subscription_expires_at)
-            : new Date();
-          const newExpiry = new Date(base.getTime() + tx.duration_days * 86400000);
+    const tenant = await Tenant.findById(req.tenant_id);
+    const base = tenant.subscription_expires_at && new Date(tenant.subscription_expires_at) > new Date()
+      ? new Date(tenant.subscription_expires_at) : new Date();
+    const newExpiry = new Date(base.getTime() + tx.duration_days * 86400000);
 
-          // Update tenant
-          await Tenant.findByIdAndUpdate(req.tenant_id, {
-            plan:                    tx.plan,
-            subscription_status:     'active',
-            subscription_expires_at: newExpiry,
-            max_branches: tx.plan === 'starter' ? 1 : tx.plan === 'pro' ? 5 : 999,
-            max_users:    tx.plan === 'starter' ? 5 : tx.plan === 'pro' ? 20 : 999,
-          });
+    // Determine branch/user limits
+    let max_branches = tenant.max_branches;
+    let max_users    = tenant.max_users;
+    if (tx.subscription_type === 'plan') {
+      max_branches = tx.plan === 'starter' ? 1 : tx.plan === 'pro' ? 5 : 999;
+      max_users    = tx.plan === 'starter' ? 5 : tx.plan === 'pro' ? 20 : 999;
+    }
+    const extraBranches = (tx.addons || []).filter(a => a === 'extra_branch').length;
+    const extraUsers    = (tx.addons || []).filter(a => a === 'extra_users').length;
+    max_branches = Math.min(999, max_branches + extraBranches);
+    max_users    = Math.min(999, max_users + extraUsers * 10);
 
-          // Update transaction
-          tx.status         = 'success';
-          tx.payment_ref    = reference;
-          tx.payment_method = data.data?.channel || 'paystack';
-          tx.expires_at     = newExpiry;
-          await tx.save();
-
-          await audit(req, 'BILLING_PAYMENT', 'billing', `${req.user.name} renewed ${tx.plan} plan for ${tx.duration_days} days`, { plan: tx.plan, amount: tx.amount, reference });
-
-          res.json({ success: true, message: 'Payment verified. Subscription activated!', data: { plan: tx.plan, expires_at: newExpiry } });
-        } else {
-          tx.status = 'failed';
-          await tx.save();
-          res.status(400).json({ success: false, message: 'Payment verification failed.' });
-        }
-      } catch { res.status(500).json({ success: false, message: 'Verification error.' }); }
+    await Tenant.findByIdAndUpdate(req.tenant_id, {
+      plan:                    tx.plan,
+      subscription_type:       tx.subscription_type,
+      modules:                 tx.modules || [],
+      addons:                  tx.addons  || [],
+      subscription_status:     'active',
+      subscription_expires_at: newExpiry,
+      max_branches,
+      max_users,
     });
-  });
-  paystackReq.on('error', () => res.status(500).json({ success: false, message: 'Could not reach Paystack.' }));
-  paystackReq.end();
+
+    tx.status         = 'success';
+    tx.payment_ref    = reference;
+    tx.payment_method = txData?.channel || 'paystack';
+    tx.expires_at     = newExpiry;
+    await tx.save();
+
+    await audit(req, 'BILLING_PAYMENT', 'billing',
+      `${req.user.name} subscribed to ${tx.plan} plan for ${tx.duration_days} days`,
+      { plan: tx.plan, amount: tx.amount, reference });
+
+    res.json({ success: true, message: 'Payment verified. Subscription activated!', data: { plan: tx.plan, expires_at: newExpiry } });
+  } catch (err) {
+    tx.status = 'failed';
+    await tx.save();
+    res.status(400).json({ success: false, message: err.message || 'Payment verification failed.' });
+  }
 };
 
-// POST /billing/authorize-card — initialize Paystack to save card (GHS 0.50 charge)
+// POST /billing/authorize-card
 const authorizeCard = async (req, res) => {
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
-  // Use Paystack initialize to collect card
   const https = require('node:https');
   const payload = JSON.stringify({
-    email:    tenant.email,
-    amount:   50, // GHS 0.50 in pesewas — will be refunded
-    currency: 'GHS',
-    metadata: {
-      tenant_id:   String(req.tenant_id),
-      user_id:     String(req.user._id),
-      purpose:     'card_authorization',
-    },
+    email: tenant.email, amount: 50, currency: 'GHS',
+    metadata: { tenant_id: String(req.tenant_id), user_id: String(req.user._id), purpose: 'card_authorization' },
     callback_url: `${process.env.FRONTEND_URL}/billing?card_saved=true`,
   });
-
   const options = {
-    hostname: 'api.paystack.co',
-    path:     '/transaction/initialize',
-    method:   'POST',
-    headers:  { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    hostname: 'api.paystack.co', path: '/transaction/initialize', method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
   };
-
   let body = '';
-  const paystackReq = https.request(options, paystackRes => {
-    paystackRes.on('data', d => body += d);
-    paystackRes.on('end', () => {
+  const paystackReq = https.request(options, r => {
+    r.on('data', d => body += d);
+    r.on('end', () => {
       try {
         const data = JSON.parse(body);
         res.json({ success: true, data: { authorization_url: data.data?.authorization_url, reference: data.data?.reference } });
@@ -181,69 +209,37 @@ const authorizeCard = async (req, res) => {
   paystackReq.end();
 };
 
-// POST /billing/save-card — verify and save card after authorization
+// POST /billing/save-card
 const saveCard = async (req, res) => {
   const { reference } = req.body;
   if (!reference) return res.status(400).json({ success: false, message: 'reference required.' });
-
-  const https = require('node:https');
-  const options = {
-    hostname: 'api.paystack.co',
-    path:     `/transaction/verify/${reference}`,
-    method:   'GET',
-    headers:  { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
-  };
-
-  let body = '';
-  const paystackReq = https.request(options, paystackRes => {
-    paystackRes.on('data', d => body += d);
-    paystackRes.on('end', async () => {
-      try {
-        const data = JSON.parse(body);
-        if (data.data?.status === 'success') {
-          const auth = data.data.authorization;
-
-          // Save card authorization
-          await CardAuthorization.findOneAndUpdate(
-            { tenant_id: req.tenant_id },
-            {
-              tenant_id:          req.tenant_id,
-              user_id:            req.user._id,
-              authorization_code: auth.authorization_code,
-              card_type:          auth.card_type,
-              last4:              auth.last4,
-              exp_month:          auth.exp_month,
-              exp_year:           auth.exp_year,
-              bank:               auth.bank,
-              email:              data.data.customer?.email,
-              is_active:          true,
-            },
-            { upsert: true, new: true }
-          );
-
-          // Mark tenant card as saved
-          await Tenant.findByIdAndUpdate(req.tenant_id, { card_saved: true });
-
-          await audit(req, 'CARD_SAVED', 'billing', `${req.user.name} saved a card for auto-renewal`, { last4: auth.last4, card_type: auth.card_type });
-
-          res.json({ success: true, message: 'Card saved successfully.', data: { last4: auth.last4, card_type: auth.card_type, bank: auth.bank } });
-        } else {
-          res.status(400).json({ success: false, message: 'Card authorization failed.' });
-        }
-      } catch { res.status(500).json({ success: false, message: 'Verification error.' }); }
-    });
-  });
-  paystackReq.on('error', () => res.status(500).json({ success: false, message: 'Could not reach Paystack.' }));
-  paystackReq.end();
+  try {
+    const txData = await verifyPaystackTransaction(reference);
+    const auth = txData.authorization;
+    await CardAuthorization.findOneAndUpdate(
+      { tenant_id: req.tenant_id },
+      { tenant_id: req.tenant_id, user_id: req.user._id, authorization_code: auth.authorization_code,
+        card_type: auth.card_type, last4: auth.last4, exp_month: auth.exp_month, exp_year: auth.exp_year,
+        bank: auth.bank, email: txData.customer?.email, is_active: true },
+      { upsert: true, new: true }
+    );
+    await Tenant.findByIdAndUpdate(req.tenant_id, { card_saved: true });
+    await audit(req, 'CARD_SAVED', 'billing', `${req.user.name} saved a card`, { last4: auth.last4 });
+    res.json({ success: true, message: 'Card saved.', data: { last4: auth.last4, card_type: auth.card_type, bank: auth.bank } });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message || 'Card authorization failed.' });
+  }
 };
 
-// GET /billing/card — get saved card info
+// GET /billing/card
 const getCard = async (req, res) => {
   const card = await CardAuthorization.findOne({ tenant_id: req.tenant_id, is_active: true });
-  res.json({ success: true, data: card ? { last4: card.last4, card_type: card.card_type, bank: card.bank, exp_month: card.exp_month, exp_year: card.exp_year } : null });
+  res.json({ success: true, data: card
+    ? { last4: card.last4, card_type: card.card_type, bank: card.bank, exp_month: card.exp_month, exp_year: card.exp_year }
+    : null });
 };
 
-// POST /billing/cancel — cancel auto-renewal
+// POST /billing/cancel
 const cancelSubscription = async (req, res) => {
   await Tenant.findByIdAndUpdate(req.tenant_id, { auto_renew: false });
   await CardAuthorization.findOneAndUpdate({ tenant_id: req.tenant_id }, { is_active: false });
@@ -251,22 +247,20 @@ const cancelSubscription = async (req, res) => {
   res.json({ success: true, message: 'Auto-renewal cancelled. Your subscription will remain active until it expires.' });
 };
 
-// POST /billing/charge-card — internal: charge saved card (called by cron)
+// Internal: charge saved card (called by cron)
 const chargeCard = async (tenant_id, plan, duration_days = 30) => {
   const card = await CardAuthorization.findOne({ tenant_id, is_active: true });
   if (!card) return { success: false, message: 'No saved card.' };
 
   const settings = await PlatformSettings.findOne();
-  const planPrices = settings?.plans || PLAN_PRICES_USD;
-  const amount = Math.round((planPrices[plan]?.price || PLAN_PRICES_USD[plan] || 29) * (duration_days / 30) * 100); // in pesewas
+  const planPrices = settings?.plans || PLAN_PRICES;
+  const amount = Math.round((planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 350) * (duration_days / 30) * 100);
 
   const https = require('node:https');
   const payload = JSON.stringify({ authorization_code: card.authorization_code, email: card.email, amount, currency: 'GHS' });
   const options = {
-    hostname: 'api.paystack.co',
-    path:     '/transaction/charge_authorization',
-    method:   'POST',
-    headers:  { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    hostname: 'api.paystack.co', path: '/transaction/charge_authorization', method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
   };
 
   return new Promise((resolve) => {
@@ -288,7 +282,7 @@ const chargeCard = async (tenant_id, plan, duration_days = 30) => {
             await BillingTransaction.create({ tenant_id, plan, amount: amount / 100, currency: 'GHS', status: 'failed', duration_days });
             resolve({ success: false, message: data.message });
           }
-        } catch(e) { resolve({ success: false, message: e.message }); }
+        } catch (e) { resolve({ success: false, message: e.message }); }
       });
     });
     req.on('error', () => resolve({ success: false, message: 'Network error' }));
@@ -297,4 +291,4 @@ const chargeCard = async (tenant_id, plan, duration_days = 30) => {
   });
 };
 
-module.exports = { getStatus, getTransactions, subscribe, verify, authorizeCard, saveCard, getCard, cancelSubscription, chargeCard };
+module.exports = { getModulePrices, getStatus, getTransactions, subscribe, verify, authorizeCard, saveCard, getCard, cancelSubscription, chargeCard };

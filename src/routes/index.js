@@ -196,6 +196,8 @@ router.get('/plan-prices', async (req, res) => {
   res.json({ success: true, data: { plans } });
 });
 
+router.get('/billing/module-prices', billing.getModulePrices);
+
 // AUDIT LOGS
 router.get('/audit-logs', authenticate, async (req, res) => {
   const { AuditLog } = require('../models');
@@ -471,6 +473,7 @@ router.put('/storefront/settings', authenticate, requireTenant, requireFeature('
 router.get('/storefront/resolve-domain', storefront.resolveDomain);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
+router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);
 router.get('/storefront/customer/me', authenticateStoreCustomer, storeCustomer.getMe);
 router.get('/storefront/customer/orders', authenticateStoreCustomer, storeCustomer.getMyOrders);
 router.post('/storefront/coupons/validate', async (req, res) => {
