@@ -708,8 +708,19 @@ router.post('/ess/leave-requests', authenticate, async (req, res) => {
   res.status(201).json({ success: true, data });
 });
 router.get('/ess/payslips', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const { User } = require('../models');
+  let employee = await Employee.findOne({ user_id: req.user._id });
+  // Fallback: match by email if no user_id link exists
+  if (!employee && req.user.email) {
+    const user = await User.findById(req.user._id).select('email');
+    if (user?.email) employee = await Employee.findOne({ email: user.email });
+  }
   if (!employee) return res.json({ success: true, data: [] });
+  // Auto-link for future requests
+  if (!employee.user_id) {
+    employee.user_id = req.user._id;
+    await employee.save().catch(() => {});
+  }
   const filter = { employee_id: employee._id };
   if (req.query.month) filter.month = parseInt(req.query.month);
   if (req.query.year)  filter.year  = parseInt(req.query.year);
