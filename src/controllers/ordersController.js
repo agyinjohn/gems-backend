@@ -94,6 +94,39 @@ const getStorefrontProducts = async (req, res) => {
     if (!obj.compare_price || obj.compare_price <= obj.price) delete obj.compare_price;
     return obj;
   });
+
+  // Apply active promotions — set compare_price to original and discount price
+  if (filter.tenant_id) {
+    const { Promotion } = require('../models');
+    const now = new Date();
+    const promos = await Promotion.find({
+      tenant_id: filter.tenant_id,
+      is_active: true,
+      starts_at: { $lte: now },
+      $or: [{ ends_at: null }, { ends_at: { $gt: now } }],
+    });
+    if (promos.length) {
+      for (const item of data) {
+        const promo = promos.find(pr => {
+          if (pr.applies_to === 'all') return true;
+          if (pr.applies_to === 'category') return pr.category_ids.some(id => String(id) === String(item.category_id));
+          if (pr.applies_to === 'products') return pr.product_ids.some(id => String(id) === String(item._id || item.id));
+          return false;
+        });
+        if (!promo) continue;
+        const original = item.price;
+        const discounted = promo.discount_type === 'percent'
+          ? Math.max(0, original - Math.round(original * promo.discount_value / 100))
+          : Math.max(0, original - promo.discount_value);
+        if (discounted < original) {
+          item.compare_price = original;
+          item.price = discounted;
+          item.promotion_name = promo.name;
+        }
+      }
+    }
+  }
+
   res.json({ success: true, data, total, page: parseInt(page), hasMore: skip + data.length < total });
 };
 

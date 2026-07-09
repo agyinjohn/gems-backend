@@ -887,6 +887,20 @@ const couponSchema = new Schema({
 }, { timestamps: true });
 couponSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
 
+const promotionSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:           { type: String, required: true, trim: true },
+  discount_type:  { type: String, enum: ['percent', 'fixed'], default: 'percent' },
+  discount_value: { type: Number, required: true },
+  applies_to:     { type: String, enum: ['all', 'category', 'products'], default: 'all' },
+  category_ids:   [{ type: Schema.Types.ObjectId, ref: 'Category' }],
+  product_ids:    [{ type: Schema.Types.ObjectId, ref: 'Product' }],
+  starts_at:      { type: Date, default: Date.now },
+  ends_at:        Date,
+  is_active:      { type: Boolean, default: true },
+}, { timestamps: true });
+promotionSchema.index({ tenant_id: 1, is_active: 1 });
+
 // toJSON aliases for all schemas
 const allSchemas = [
   tenantSchema, branchSchema, userSchema, categorySchema, productSchema,
@@ -898,7 +912,7 @@ const allSchemas = [
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
-  posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema,
+  posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
   payoutMethodSchema,
 ];
 allSchemas.forEach(schema => {
@@ -958,5 +972,6 @@ module.exports = {
   PosCustomerDisplay:    mongoose.model('PosCustomerDisplay', posCustomerDisplaySchema),
   StoreCustomer:         mongoose.model('StoreCustomer', storeCustomerSchema),
   Coupon:                mongoose.model('Coupon', couponSchema),
+  Promotion:             mongoose.model('Promotion', promotionSchema),
   PayoutMethod:          mongoose.model('PayoutMethod', payoutMethodSchema),
 };

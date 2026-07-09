@@ -522,6 +522,46 @@ router.delete('/coupons/:id', authenticate, requireTenant, requireFeature('store
   res.json({ success: true, message: 'Coupon deleted.' });
 });
 
+// PROMOTIONS
+const { Promotion } = require('../models');
+
+router.get('/promotions', authenticate, requireTenant, requireFeature('storefront'), async (req, res) => {
+  const data = await Promotion.find({ tenant_id: req.tenant_id }).sort({ createdAt: -1 });
+  res.json({ success: true, data });
+});
+
+router.post('/promotions', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  const { name, discount_type, discount_value, applies_to, category_ids, product_ids, starts_at, ends_at } = req.body;
+  if (!name || discount_value === undefined) return res.status(400).json({ success: false, message: 'name and discount_value required.' });
+  const data = await Promotion.create({
+    tenant_id: req.tenant_id, name,
+    discount_type: discount_type || 'percent',
+    discount_value: parseFloat(discount_value),
+    applies_to: applies_to || 'all',
+    category_ids: category_ids || [],
+    product_ids: product_ids || [],
+    starts_at: starts_at ? new Date(starts_at) : new Date(),
+    ends_at: ends_at ? new Date(ends_at) : null,
+  });
+  res.status(201).json({ success: true, data });
+});
+
+router.patch('/promotions/:id', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  const { is_active, ends_at, name } = req.body;
+  const update = {};
+  if (is_active !== undefined) update.is_active = is_active;
+  if (ends_at !== undefined) update.ends_at = ends_at ? new Date(ends_at) : null;
+  if (name !== undefined) update.name = name;
+  const data = await Promotion.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
+  if (!data) return res.status(404).json({ success: false, message: 'Promotion not found.' });
+  res.json({ success: true, data });
+});
+
+router.delete('/promotions/:id', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  await Promotion.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
+  res.json({ success: true });
+});
+
 router.get('/storefront/:tenantSlug/settings', storefront.getPublicSettings);
 router.get('/storefront/:tenantSlug/orders/:reference', storefront.trackOrder);
 router.get('/storefront/categories', async (req, res) => {
