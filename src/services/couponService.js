@@ -15,7 +15,7 @@ async function validateCoupon({ tenantId, code, subtotal }) {
 
   let discount = 0;
   if (coupon.discount_type === 'percent') {
-    discount = Math.round(subtotal * coupon.discount_value) / 100;
+    discount = Math.round((subtotal * coupon.discount_value) / 100);
   } else {
     discount = Math.min(coupon.discount_value, subtotal);
   }

@@ -89,7 +89,11 @@ const getStorefrontProducts = async (req, res) => {
     Product.find(filter).populate('category_id', 'name').sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
     Product.countDocuments(filter),
   ]);
-  const data = products.map(p => ({ ...p.toObject(), id: p._id, category: p.category_id?.name, category_name: p.category_id?.name }));
+  const data = products.map(p => {
+    const obj = { ...p.toObject(), id: p._id, category: p.category_id?.name, category_name: p.category_id?.name };
+    if (!obj.compare_price || obj.compare_price <= obj.price) delete obj.compare_price;
+    return obj;
+  });
   res.json({ success: true, data, total, page: parseInt(page), hasMore: skip + data.length < total });
 };
 
