@@ -25,9 +25,7 @@ const login = async (req, res) => {
   if (user.tenant_id) {
     const tenant = await Tenant.findById(user.tenant_id);
     if (!tenant || !tenant.is_active) return res.status(403).json({ success: false, message: 'Your business account is inactive.' });
-    tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at };
-  }
-  if (user.branch_id) {
+    tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at, removed_features: tenant.removed_features || [] };
     const branch = await Branch.findById(user.branch_id);
     if (branch) branchData = { id: branch._id, name: branch.name, slug: branch.slug };
   }
@@ -46,7 +44,7 @@ const getMe = async (req, res) => {
   let branchData = null;
   if (req.user.tenant_id) {
     const tenant = await Tenant.findById(req.user.tenant_id);
-    if (tenant) tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at };
+    if (tenant) tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at, removed_features: tenant.removed_features || [] };
   }
   if (req.user.branch_id) {
     const branch = await Branch.findById(req.user.branch_id);

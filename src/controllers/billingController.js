@@ -2,29 +2,20 @@ const { Tenant, BillingTransaction, PlatformSettings, CardAuthorization } = requ
 const audit = require('../utils/audit');
 const { verifyPaystackTransaction } = require('../services/paymentService');
 
-const PLAN_PRICES = { starter: 350, pro: 850, enterprise: 2000 };
+const PLAN_PRICES = { starter: 350, pro: 1000, enterprise: 2500 };
 
-const MODULE_PRICES = {
-  pos:         { label: 'POS Terminal',  price: 80 },
-  storefront:  { label: 'Online Store',  price: 60 },
-  inventory:   { label: 'Inventory',     price: 50 },
-  crm:         { label: 'CRM',           price: 50 },
-  accounting:  { label: 'Accounting',    price: 80 },
-  hr:          { label: 'HR & Payroll',  price: 80 },
-  procurement: { label: 'Procurement',   price: 60 },
-  reports:     { label: 'Reports',       price: 40 },
-};
-
-const ADDON_PRICES = {
-  extra_branch:     { label: 'Extra Branch',     price: 40 },
-  extra_users:      { label: '+10 Users',         price: 30 },
-  api_access:       { label: 'API Access',        price: 50 },
-  priority_support: { label: 'Priority Support',  price: 60 },
+const REMOVABLE_FEATURES = {
+  online_storefront:   { deduction: { pro: 150, enterprise: 150 } },
+  procurement:         { deduction: { pro: 100, enterprise: 100 } },
+  hr:                  { deduction: { pro: 150, enterprise: 150 } },
+  crm:                 { deduction: { pro: 100, enterprise: 100 } },
+  advanced_accounting: { deduction: { enterprise: 500 } },
+  priority_support:    { deduction: { pro: 80,  enterprise: 80  } },
 };
 
 // GET /billing/module-prices  (public)
 const getModulePrices = async (req, res) => {
-  res.json({ success: true, data: { modules: MODULE_PRICES, addons: ADDON_PRICES } });
+  res.json({ success: true, data: { removable_features: REMOVABLE_FEATURES } });
 };
 
 // GET /billing/status
@@ -68,38 +59,26 @@ const getTransactions = async (req, res) => {
 
 // POST /billing/subscribe
 const subscribe = async (req, res) => {
-  const { plan, duration_days = 30, subscription_type = 'plan', modules = [], addons = [] } = req.body;
+  const { plan, duration_days = 30, removed_features = [] } = req.body;
 
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
+  if (!plan || !['starter','pro','enterprise'].includes(plan)) {
+    return res.status(400).json({ success: false, message: 'Valid plan required: starter, pro, enterprise.' });
+  }
+
   const settings = await PlatformSettings.findOne();
   const planPrices = settings?.plans || PLAN_PRICES;
-
-  let amount, resolvedPlan;
-
-  if (subscription_type === 'custom') {
-    if (!modules.length) return res.status(400).json({ success: false, message: 'Select at least one module for a custom plan.' });
-    const moduleTotal = modules.reduce((s, m) => s + (MODULE_PRICES[m]?.price || 0), 0);
-    const addonTotal  = addons.reduce((s, a)  => s + (ADDON_PRICES[a]?.price  || 0), 0);
-    amount = (moduleTotal + addonTotal) * (duration_days / 30);
-    resolvedPlan = 'custom';
-  } else {
-    if (!plan || !['starter','pro','enterprise'].includes(plan)) {
-      return res.status(400).json({ success: false, message: 'Valid plan required: starter, pro, enterprise.' });
-    }
-    const base = planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 0;
-    const addonTotal = addons.reduce((s, a) => s + (ADDON_PRICES[a]?.price || 0), 0);
-    amount = (base + addonTotal) * (duration_days / 30);
-    resolvedPlan = plan;
-  }
+  const base = planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 0;
+  const deduction = removed_features.reduce((s, f) => s + (REMOVABLE_FEATURES[f]?.deduction[plan] || 0), 0);
+  const amount = (base - deduction) * (duration_days / 30);
 
   const tx = await BillingTransaction.create({
     tenant_id: req.tenant_id,
-    plan: resolvedPlan,
-    subscription_type,
-    modules,
-    addons,
+    plan,
+    subscription_type: 'plan',
+    removed_features,
     amount,
     currency: 'GHS',
     status: 'pending',
@@ -110,10 +89,8 @@ const subscribe = async (req, res) => {
   res.json({ success: true, data: {
     transaction_id:      tx._id,
     amount,
-    plan:                resolvedPlan,
-    subscription_type,
-    modules,
-    addons,
+    plan,
+    removed_features,
     duration_days,
     email:               tenant.email,
     paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
@@ -153,8 +130,7 @@ const verify = async (req, res) => {
     await Tenant.findByIdAndUpdate(req.tenant_id, {
       plan:                    tx.plan,
       subscription_type:       tx.subscription_type,
-      modules:                 tx.modules || [],
-      addons:                  tx.addons  || [],
+      removed_features:        tx.removed_features || [],
       subscription_status:     'active',
       subscription_expires_at: newExpiry,
       max_branches,
@@ -187,6 +163,7 @@ const authorizeCard = async (req, res) => {
   const https = require('node:https');
   const payload = JSON.stringify({
     email: tenant.email, amount: 50, currency: 'GHS',
+    channels: ['card'],
     metadata: { tenant_id: String(req.tenant_id), user_id: String(req.user._id), purpose: 'card_authorization' },
     callback_url: `${process.env.FRONTEND_URL}/billing?card_saved=true`,
   });
@@ -200,7 +177,11 @@ const authorizeCard = async (req, res) => {
     r.on('end', () => {
       try {
         const data = JSON.parse(body);
-        res.json({ success: true, data: { authorization_url: data.data?.authorization_url, reference: data.data?.reference } });
+        res.json({ success: true, data: {
+          authorization_url: data.data?.authorization_url,
+          reference: data.data?.reference,
+          paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
+        } });
       } catch { res.status(500).json({ success: false, message: 'Failed to initialize card authorization.' }); }
     });
   });

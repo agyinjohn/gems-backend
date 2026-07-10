@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwnerOnly, requireTenant, authenticateStoreCustomer } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/featureFlags');
 const { productModeGate } = require('../middleware/productMode');
+const { requireModule } = require('../middleware/moduleAccess');
 const { getModeMeta } = require('../config/productMode');
 const storefrontDocsRouter = require('./storefrontDocs');
 const auditMiddleware = require('../middleware/auditMiddleware');
@@ -676,21 +677,21 @@ const procurementApproveRoles = ['business_owner', 'accountant'];
 const procurementReceiveRoles = ['business_owner', 'warehouse_staff', 'procurement_officer'];
 const procurementPayRoles = ['business_owner', 'accountant', 'procurement_officer'];
 
-router.get('/suppliers', authenticate, requireTenant, requireFeature('procurement'), procurement.listSuppliers);
-router.post('/suppliers', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.createSupplier);
-router.put('/suppliers/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.updateSupplier);
-router.delete('/suppliers/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.deactivateSupplier);
+router.get('/suppliers', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), procurement.listSuppliers);
+router.post('/suppliers', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.createSupplier);
+router.put('/suppliers/:id', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.updateSupplier);
+router.delete('/suppliers/:id', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.deactivateSupplier);
 
-router.get('/purchase-orders', authenticate, requireTenant, requireFeature('procurement'), procurement.listPurchaseOrders);
-router.get('/purchase-orders/:id', authenticate, requireTenant, requireFeature('procurement'), procurement.getPurchaseOrder);
-router.post('/purchase-orders', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.createPurchaseOrder);
-router.put('/purchase-orders/:id', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.updatePurchaseOrder);
-router.patch('/purchase-orders/:id/submit', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.submitPurchaseOrder);
-router.patch('/purchase-orders/:id/approve', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementApproveRoles), procurement.approvePurchaseOrder);
-router.patch('/purchase-orders/:id/send', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles), procurement.sendPurchaseOrder);
-router.patch('/purchase-orders/:id/cancel', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementRoles, 'accountant'), procurement.cancelPurchaseOrder);
-router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementPayRoles), procurement.payPurchaseOrder);
-router.post('/purchase-orders/:id/receive', authenticate, requireTenant, requireFeature('procurement'), authorize(...procurementReceiveRoles), procurement.receiveGoods);
+router.get('/purchase-orders', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), procurement.listPurchaseOrders);
+router.get('/purchase-orders/:id', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), procurement.getPurchaseOrder);
+router.post('/purchase-orders', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.createPurchaseOrder);
+router.put('/purchase-orders/:id', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.updatePurchaseOrder);
+router.patch('/purchase-orders/:id/submit', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.submitPurchaseOrder);
+router.patch('/purchase-orders/:id/approve', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementApproveRoles), procurement.approvePurchaseOrder);
+router.patch('/purchase-orders/:id/send', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles), procurement.sendPurchaseOrder);
+router.patch('/purchase-orders/:id/cancel', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementRoles, 'accountant'), procurement.cancelPurchaseOrder);
+router.patch('/purchase-orders/:id/pay', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementPayRoles), procurement.payPurchaseOrder);
+router.post('/purchase-orders/:id/receive', authenticate, requireTenant, requireModule('procurement'), requireFeature('procurement'), authorize(...procurementReceiveRoles), procurement.receiveGoods);
 
 
 router.get('/notifications', authenticate, async (req, res) => {
@@ -806,32 +807,33 @@ router.put('/departments/:id', authenticate, requireTenant, authorize('business_
 
 // EMPLOYEES & HR
 const hrRoles = ['business_owner', 'hr_manager'];
-router.get('/hr/summary', authenticate, requireTenant, authorize(...hrRoles), hr.hrSummary);
-router.get('/employees/linkable-users', authenticate, requireTenant, authorize(...hrRoles), hr.listLinkableUsers);
-router.get('/employees', authenticate, requireTenant, hr.listEmployees);
-router.get('/employees/:id', authenticate, requireTenant, hr.getEmployee);
-router.post('/employees', authenticate, requireTenant, authorize(...hrRoles), hr.createEmployee);
-router.put('/employees/:id', authenticate, requireTenant, authorize(...hrRoles), hr.updateEmployee);
-router.patch('/employees/:id/terminate', authenticate, requireTenant, authorize(...hrRoles), hr.terminateEmployee);
+router.get('/hr/summary', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.hrSummary);
+router.get('/employees/linkable-users', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.listLinkableUsers);
+router.get('/employees', authenticate, requireTenant, requireModule('hr'), hr.listEmployees);
+router.get('/employees/:id', authenticate, requireTenant, requireModule('hr'), hr.getEmployee);
+router.post('/employees', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.createEmployee);
+router.put('/employees/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.updateEmployee);
+router.patch('/employees/:id/terminate', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.terminateEmployee);
 router.post(
   '/employees/:id/documents',
   authenticate,
   requireTenant,
+  requireModule('hr'),
   authorize(...hrRoles),
   hrDocUpload.single('file'),
   hr.uploadDocument,
 );
-router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, authorize(...hrRoles), hr.deleteDocument);
+router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.deleteDocument);
 
 // ATTENDANCE
-router.get('/attendance', authenticate, requireTenant, async (req, res) => {
+router.get('/attendance', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const filter = { tenant_id: req.tenant_id };
   if (req.query.date) filter.date = new Date(req.query.date);
   const data = await Attendance.find(filter).populate('employee_id', 'name').sort('employee_id');
   const mapped = data.map(a => ({ ...a.toJSON(), employee_name: a.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
-router.post('/attendance', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
+router.post('/attendance', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
   const { employee_id, date, status, notes } = req.body;
   if (!employee_id || !date) return res.status(400).json({ success: false, message: 'employee_id and date required.' });
   const data = await Attendance.findOneAndUpdate(
@@ -843,21 +845,21 @@ router.post('/attendance', authenticate, requireTenant, authorize('business_owne
 });
 
 // LEAVE REQUESTS
-router.get('/leave-requests', authenticate, requireTenant, async (req, res) => {
+router.get('/leave-requests', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const data = await LeaveRequest.find({ tenant_id: req.tenant_id }).populate('employee_id', 'name').sort({ createdAt: -1 });
   const mapped = data.map(l => ({ ...l.toJSON(), employee_name: l.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
-router.post('/leave-requests', authenticate, requireTenant, authorize('business_owner', 'hr_manager'), async (req, res) => {
+router.post('/leave-requests', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
   const { employee_id, leave_type, start_date, end_date, reason } = req.body;
   if (!employee_id || !start_date || !end_date) return res.status(400).json({ success: false, message: 'employee_id, start_date and end_date required.' });
   const data = await LeaveRequest.create({ tenant_id: req.tenant_id, employee_id, leave_type: leave_type || 'annual', start_date, end_date, reason });
   res.status(201).json({ success: true, data });
 });
-router.patch('/leave-requests/:id', authenticate, requireTenant, authorize('business_owner', 'hr_manager', 'branch_manager'), hr.approveLeave);
+router.patch('/leave-requests/:id', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager', 'branch_manager'), hr.approveLeave);
 
 // PAYROLL
-router.get('/payroll', authenticate, requireTenant, async (req, res) => {
+router.get('/payroll', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const data = await PayrollRun.find({ tenant_id: req.tenant_id }).populate('employee_id', 'name').sort({ year: -1, month: -1 });
   const mapped = data.map(p => ({ ...p.toJSON(), employee_name: p.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
@@ -889,11 +891,11 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
 });
 
 // CRM - CUSTOMERS
-router.get('/customers', authenticate, requireTenant, async (req, res) => {
+router.get('/customers', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const data = await Customer.find({ tenant_id: req.tenant_id }).sort({ createdAt: -1 });
   res.json({ success: true, data });
 });
-router.post('/customers', authenticate, requireTenant, authorize('business_owner', 'sales_staff'), async (req, res) => {
+router.post('/customers', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { name, email, phone, company, address, segment, notes } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'name required.' });
   const data = await Customer.create({ tenant_id: req.tenant_id, name, email, phone, company, address, segment: segment || 'general', notes, created_by: req.user._id });
@@ -901,18 +903,18 @@ router.post('/customers', authenticate, requireTenant, authorize('business_owner
 });
 
 // CRM - LEADS
-router.get('/leads', authenticate, requireTenant, async (req, res) => {
+router.get('/leads', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const data = await Lead.find({ tenant_id: req.tenant_id }).populate('customer_id', 'name').populate('assigned_to', 'name').sort({ createdAt: -1 });
   const mapped = data.map(l => ({ ...l.toJSON(), customer_name: l.customer_id?.name || null, assigned_to_name: l.assigned_to?.name || null }));
   res.json({ success: true, data: mapped });
 });
-router.post('/leads', authenticate, requireTenant, authorize('business_owner', 'sales_staff'), async (req, res) => {
+router.post('/leads', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { customer_id, title, stage, value, assigned_to, notes, next_followup } = req.body;
   if (!title) return res.status(400).json({ success: false, message: 'title required.' });
   const data = await Lead.create({ tenant_id: req.tenant_id, customer_id: customer_id || null, title, stage: stage || 'new', value: value || 0, assigned_to: assigned_to || null, notes, next_followup: next_followup || null });
   res.status(201).json({ success: true, data });
 });
-router.patch('/leads/:id', authenticate, requireTenant, async (req, res) => {
+router.patch('/leads/:id', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const { stage, value, notes, next_followup } = req.body;
   const update = {};
   if (stage !== undefined) update.stage = stage;
@@ -924,12 +926,12 @@ router.patch('/leads/:id', authenticate, requireTenant, async (req, res) => {
 });
 
 // CRM - CONTACT HISTORY
-router.get('/contact-history', authenticate, requireTenant, async (req, res) => {
+router.get('/contact-history', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const data = await ContactHistory.find({ tenant_id: req.tenant_id }).populate('customer_id', 'name').sort({ contact_date: -1, createdAt: -1 });
   const mapped = data.map(c => ({ ...c.toJSON(), customer_name: c.customer_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
-router.post('/contact-history', authenticate, requireTenant, authorize('business_owner', 'sales_staff'), async (req, res) => {
+router.post('/contact-history', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { customer_id, type, notes, contact_date } = req.body;
   const data = await ContactHistory.create({ tenant_id: req.tenant_id, customer_id: customer_id || null, type: type || 'call', notes, contact_date: contact_date || Date.now(), created_by: req.user._id });
   res.status(201).json({ success: true, data });
