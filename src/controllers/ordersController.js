@@ -11,7 +11,7 @@ const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() 
 
 const getOrders = async (req, res) => {
   const { status, payment_status, search } = req.query;
-  const filter = { tenant_id: req.tenant_id };
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
   if (status) filter.status = status;
   if (payment_status) filter.payment_status = payment_status;
   if (search) filter.$or = [{ order_number: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];

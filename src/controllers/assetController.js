@@ -76,7 +76,7 @@ const deleteAssetCategory = async (req, res) => {
 
 const getAssets = async (req, res) => {
   const { search, category_id, status, condition } = req.query;
-  const filter = { tenant_id: req.tenant_id };
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { asset_code: new RegExp(search, 'i') }, { serial_number: new RegExp(search, 'i') }];
   if (category_id) filter.category_id = category_id;
   if (status) filter.status = status;
