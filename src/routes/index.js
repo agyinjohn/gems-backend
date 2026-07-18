@@ -932,13 +932,13 @@ router.patch('/leads/:id', authenticate, requireTenant, requireModule('crm'), as
 
 // CRM - CONTACT HISTORY
 router.get('/contact-history', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
-  const data = await ContactHistory.find({ tenant_id: req.tenant_id }).populate('customer_id', 'name').sort({ contact_date: -1, createdAt: -1 });
+  const data = await ContactHistory.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).populate('customer_id', 'name').sort({ contact_date: -1, createdAt: -1 });
   const mapped = data.map(c => ({ ...c.toJSON(), customer_name: c.customer_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
 router.post('/contact-history', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { customer_id, type, notes, contact_date } = req.body;
-  const data = await ContactHistory.create({ tenant_id: req.tenant_id, customer_id: customer_id || null, type: type || 'call', notes, contact_date: contact_date || Date.now(), created_by: req.user._id });
+  const data = await ContactHistory.create({ tenant_id: req.tenant_id, branch_id: await resolveWriteBranchId(req), customer_id: customer_id || null, type: type || 'call', notes, contact_date: contact_date || Date.now(), created_by: req.user._id });
   res.status(201).json({ success: true, data });
 });
 

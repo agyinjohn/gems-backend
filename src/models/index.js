@@ -158,6 +158,7 @@ const leadSchema = new Schema({
 // CONTACT HISTORY
 const contactHistorySchema = new Schema({
   tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
   customer_id:  { type: Schema.Types.ObjectId, ref: 'Customer' },
   type:         { type: String, enum: ['call','email','meeting','whatsapp','other'], default: 'call' },
   notes:        String,

@@ -18,7 +18,7 @@ const mongoose = require('mongoose');
 const connectDB = require('./db');
 const {
   Tenant, Branch,
-  Product, StockMovement, Order, PurchaseOrder, Expense, Asset, Customer, Lead,
+  Product, StockMovement, Order, PurchaseOrder, Expense, Asset, Customer, Lead, ContactHistory,
 } = require('../models');
 
 // Collections to backfill (all carry branch_id; excludes User/Employee).
@@ -31,6 +31,7 @@ const MODELS = [
   ['Asset', Asset],
   ['Customer', Customer],
   ['Lead', Lead],
+  ['ContactHistory', ContactHistory],
 ];
 
 async function run() {
