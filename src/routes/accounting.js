@@ -295,6 +295,7 @@ router.post('/expenses', authorize('business_owner', 'accountant'), async (req, 
   }
   const data = await Expense.create({
     tenant_id: req.tenant_id,
+    branch_id: await resolveWriteBranchId(req),
     title: String(title).trim(),
     category: category || '',
     amount: parsedAmount,
@@ -495,7 +496,7 @@ router.get('/accounting/pl', async (req, res) => {
 
 router.get('/accounting/summary', async (req, res) => {
   const period = ['mtd', 'ytd', 'all'].includes(req.query.period) ? req.query.period : 'ytd';
-  const data = await accounting.buildAccountingOverview(req.tenant_id, { period });
+  const data = await accounting.buildAccountingOverview(req.tenant_id, { period, branchFilter: req.branchFilter || {} });
   res.json({ success: true, data });
 });
 
@@ -1000,6 +1001,7 @@ router.post('/accounting/import', authorize('business_owner', 'accountant'), asy
   if (type === 'expenses') {
     let imported = 0;
     const errors = [];
+    const importBranchId = await resolveWriteBranchId(req);
     for (const row of rows) {
       try {
         const title = row.title || row.name;
@@ -1007,6 +1009,7 @@ router.post('/accounting/import', authorize('business_owner', 'accountant'), asy
         if (!title || !amount) continue;
         const expense = await Expense.create({
           tenant_id: req.tenant_id,
+          branch_id: importBranchId,
           title: String(title).trim(),
           category: row.category ? String(row.category).trim() : '',
           amount,

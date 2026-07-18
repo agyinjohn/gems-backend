@@ -2545,6 +2545,10 @@ async function buildReconciliationSessionDetail(tenantId, sessionId) {
 
 async function buildAccountingOverview(tenantId, options = {}) {
   const period = options.period || 'ytd';
+  // Sub-ledger reads (invoices, expenses) honor the branch filter so the
+  // overview tiles match the branch-filtered Invoices/Expenses panels.
+  // GL-derived figures (P&L, position, monthly revenue) stay company-level.
+  const bf = options.branchFilter || {};
   const now = new Date();
   const yearStart = new Date(now.getFullYear(), 0, 1);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -2588,6 +2592,7 @@ async function buildAccountingOverview(tenantId, options = {}) {
     buildGlMonthlyRevenue(tenantId, 6),
     Invoice.find({
       tenant_id: tenantId,
+      ...bf,
       status: { $in: ['sent', 'partially_paid', 'overdue'] },
       amount_due: { $gt: 0.01 },
     }).select('invoice_number customer_name amount_due due_date issue_date status'),
@@ -2595,7 +2600,7 @@ async function buildAccountingOverview(tenantId, options = {}) {
       .sort({ entry_date: -1 })
       .limit(8)
       .select('reference description entry_date source status lines'),
-    Expense.find({ tenant_id: tenantId })
+    Expense.find({ tenant_id: tenantId, ...bf })
       .sort({ expense_date: -1 })
       .limit(8)
       .select('title category amount expense_date'),
@@ -2605,6 +2610,7 @@ async function buildAccountingOverview(tenantId, options = {}) {
     AccountingPeriod.find({ tenant_id: tenantId }).sort({ start_date: -1 }).limit(12),
     Invoice.countDocuments({
       tenant_id: tenantId,
+      ...bf,
       status: { $in: ['sent', 'partially_paid', 'overdue'] },
       amount_due: { $gt: 0.01 },
       due_date: { $lt: now },
