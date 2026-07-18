@@ -102,12 +102,22 @@ const suspendTenant = async (req, res) => {
 
 // PATCH /api/platform/tenants/:id/activate
 const activateTenant = async (req, res) => {
-  const { expires_at } = req.body;
-  const tenant = await Tenant.findByIdAndUpdate(req.params.id, {
+  const { expires_at, plan } = req.body;
+  const update = {
     subscription_status: 'active',
     is_active: true,
     subscription_expires_at: expires_at || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-  }, { new: true });
+  };
+  // Allow changing the plan on renewal; sync branch/user limits to the new plan.
+  if (plan !== undefined) {
+    if (!['starter', 'pro', 'enterprise'].includes(plan)) {
+      return res.status(400).json({ success: false, message: 'Valid plan required: starter, pro, enterprise.' });
+    }
+    update.plan = plan;
+    update.max_branches = plan === 'starter' ? 1 : plan === 'pro' ? 5 : 999;
+    update.max_users    = plan === 'starter' ? 5 : plan === 'pro' ? 20 : 999;
+  }
+  const tenant = await Tenant.findByIdAndUpdate(req.params.id, update, { new: true });
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
   res.json({ success: true, message: 'Tenant activated.', data: tenant });
 };
