@@ -363,6 +363,7 @@ employeeSchema.index({ tenant_id: 1, employee_code: 1 }, { unique: true });
 // ATTENDANCE
 const attendanceSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:   { type: Schema.Types.ObjectId, ref: 'Branch' },
   employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   date:        { type: Date, required: true },
   status:      { type: String, enum: ['present','absent','half_day','leave'], default: 'present' },
@@ -373,6 +374,7 @@ attendanceSchema.index({ tenant_id: 1, employee_id: 1, date: 1 }, { unique: true
 // LEAVE REQUEST
 const leaveRequestSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:   { type: Schema.Types.ObjectId, ref: 'Branch' },
   employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   leave_type:  { type: String, default: 'annual' },
   start_date:  { type: Date, required: true },
@@ -385,6 +387,7 @@ const leaveRequestSchema = new Schema({
 // PAYROLL RUN
 const payrollRunSchema = new Schema({
   tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
   employee_id:  { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   month:        { type: Number, required: true },
   year:         { type: Number, required: true },

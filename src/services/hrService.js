@@ -267,6 +267,7 @@ async function runPayroll(tenantId, { employee_id, month, year, allowance_lines 
 
   return PayrollRun.create({
     tenant_id: tenantId,
+    branch_id: emp.branch_id || null,
     employee_id,
     month,
     year,
@@ -330,22 +331,24 @@ async function deleteEmployeeDocument(tenantId, employeeId, docId) {
   await emp.save();
 }
 
-async function getHrSummary(tenantId, query = {}) {
-  const employees = await Employee.find({ tenant_id: tenantId });
+async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
+  const bf = branchFilter || {};
+  const employees = await Employee.find({ tenant_id: tenantId, ...bf });
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const [onLeave, pendingLeave, attendanceToday, payrollAgg] = await Promise.all([
     LeaveRequest.countDocuments({
       tenant_id: tenantId,
+      ...bf,
       status: 'approved',
       start_date: { $lte: today },
       end_date: { $gte: today },
     }),
-    LeaveRequest.countDocuments({ tenant_id: tenantId, status: 'pending' }),
-    Attendance.countDocuments({ tenant_id: tenantId, date: today }),
+    LeaveRequest.countDocuments({ tenant_id: tenantId, ...bf, status: 'pending' }),
+    Attendance.countDocuments({ tenant_id: tenantId, ...bf, date: today }),
     PayrollRun.aggregate([
-      { $match: { tenant_id: tenantId, status: 'approved' } },
+      { $match: { tenant_id: tenantId, ...bf, status: 'approved' } },
       { $group: { _id: null, total: { $sum: '$net_salary' }, runs: { $sum: 1 } } },
     ]),
   ]);

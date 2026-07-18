@@ -136,10 +136,10 @@ const getDashboard = async (req, res) => {
     const [totalEmp, onLeave, todayAttendance, pendingLeave, recentLeave, monthPayroll] = await Promise.all([
       Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
       Employee.countDocuments({ tenant_id: tid, ...bf, status: 'on_leave' }),
-      Attendance.countDocuments({ tenant_id: tid, date: { $gte: today }, status: 'present' }),
-      LeaveRequest.countDocuments({ tenant_id: tid, status: 'pending' }),
-      LeaveRequest.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(8).populate('employee_id', 'name'),
-      PayrollRun.aggregate([{ $match: { tenant_id: tid, month: today.getMonth()+1, year: today.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
+      Attendance.countDocuments({ tenant_id: tid, ...bf, date: { $gte: today }, status: 'present' }),
+      LeaveRequest.countDocuments({ tenant_id: tid, ...bf, status: 'pending' }),
+      LeaveRequest.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).populate('employee_id', 'name'),
+      PayrollRun.aggregate([{ $match: { tenant_id: tid, ...bf, month: today.getMonth()+1, year: today.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
     ]);
     return res.json({ success: true, data: {
       role: 'hr_manager',

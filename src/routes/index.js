@@ -750,7 +750,7 @@ router.post('/ess/leave-requests', authenticate, async (req, res) => {
   if (!tenant_id) return res.status(400).json({ success: false, message: 'Could not determine tenant for this employee.' });
   // Patch missing tenant_id on the employee record so future requests work
   if (!employee.tenant_id) await Employee.findByIdAndUpdate(employee._id, { tenant_id });
-  const data = await LeaveRequest.create({ tenant_id, employee_id: employee._id, leave_type: leave_type || 'annual', start_date, end_date, reason });
+  const data = await LeaveRequest.create({ tenant_id, branch_id: employee.branch_id || null, employee_id: employee._id, leave_type: leave_type || 'annual', start_date, end_date, reason });
   res.status(201).json({ success: true, data });
 });
 router.get('/ess/payslips', authenticate, async (req, res) => {
@@ -832,7 +832,7 @@ router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, re
 
 // ATTENDANCE
 router.get('/attendance', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
-  const filter = { tenant_id: req.tenant_id };
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
   if (req.query.date) filter.date = new Date(req.query.date);
   const data = await Attendance.find(filter).populate('employee_id', 'name').sort('employee_id');
   const mapped = data.map(a => ({ ...a.toJSON(), employee_name: a.employee_id?.name || null }));
@@ -841,9 +841,11 @@ router.get('/attendance', authenticate, requireTenant, requireModule('hr'), asyn
 router.post('/attendance', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
   const { employee_id, date, status, notes } = req.body;
   if (!employee_id || !date) return res.status(400).json({ success: false, message: 'employee_id and date required.' });
+  // Attendance follows the employee's branch.
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: req.tenant_id }).select('branch_id');
   const data = await Attendance.findOneAndUpdate(
     { tenant_id: req.tenant_id, employee_id, date: new Date(date) },
-    { status: status || 'present', notes },
+    { status: status || 'present', notes, branch_id: emp?.branch_id || null },
     { upsert: true, new: true }
   );
   res.status(201).json({ success: true, data });
@@ -851,21 +853,23 @@ router.post('/attendance', authenticate, requireTenant, requireModule('hr'), aut
 
 // LEAVE REQUESTS
 router.get('/leave-requests', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
-  const data = await LeaveRequest.find({ tenant_id: req.tenant_id }).populate('employee_id', 'name').sort({ createdAt: -1 });
+  const data = await LeaveRequest.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).populate('employee_id', 'name').sort({ createdAt: -1 });
   const mapped = data.map(l => ({ ...l.toJSON(), employee_name: l.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
 router.post('/leave-requests', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
   const { employee_id, leave_type, start_date, end_date, reason } = req.body;
   if (!employee_id || !start_date || !end_date) return res.status(400).json({ success: false, message: 'employee_id, start_date and end_date required.' });
-  const data = await LeaveRequest.create({ tenant_id: req.tenant_id, employee_id, leave_type: leave_type || 'annual', start_date, end_date, reason });
+  // Leave follows the employee's branch.
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: req.tenant_id }).select('branch_id');
+  const data = await LeaveRequest.create({ tenant_id: req.tenant_id, branch_id: emp?.branch_id || null, employee_id, leave_type: leave_type || 'annual', start_date, end_date, reason });
   res.status(201).json({ success: true, data });
 });
 router.patch('/leave-requests/:id', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager', 'branch_manager'), hr.approveLeave);
 
 // PAYROLL
 router.get('/payroll', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
-  const data = await PayrollRun.find({ tenant_id: req.tenant_id }).populate('employee_id', 'name').sort({ year: -1, month: -1 });
+  const data = await PayrollRun.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).populate('employee_id', 'name').sort({ year: -1, month: -1 });
   const mapped = data.map(p => ({ ...p.toJSON(), employee_name: p.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
 });
