@@ -1,6 +1,7 @@
 const { Order, Product, StockMovement, Tenant } = require('../models');
 const { pickSettings, calcDeliveryFee } = require('./storefrontController');
 const audit = require('../utils/audit');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
 const { verifyPaystackTransaction, fulfillStorefrontOrders, failStorefrontOrders } = require('../services/paymentService');
@@ -39,11 +40,12 @@ const createOrder = async (req, res) => {
     enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
   }
   const isPaid = payment_status !== 'pending';
-  const order = await Order.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, order_number: generateOrderNumber(), customer_id: customer_id || null, customer_name, customer_email, customer_phone, delivery_address, subtotal, total: subtotal, payment_status: isPaid ? 'paid' : 'pending', payment_method: isPaid ? (payment_method || 'cash') : null, status: isPaid ? 'processing' : 'pending', source: 'internal', items: enrichedItems, created_by: req.user._id });
+  const branchId = await resolveWriteBranchId(req);
+  const order = await Order.create({ tenant_id: req.tenant_id, branch_id: branchId, order_number: generateOrderNumber(), customer_id: customer_id || null, customer_name, customer_email, customer_phone, delivery_address, subtotal, total: subtotal, payment_status: isPaid ? 'paid' : 'pending', payment_method: isPaid ? (payment_method || 'cash') : null, status: isPaid ? 'processing' : 'pending', source: 'internal', items: enrichedItems, created_by: req.user._id });
   if (isPaid) {
     for (const item of enrichedItems) {
       await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-      await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
+      await StockMovement.create({ tenant_id: req.tenant_id, branch_id: branchId, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
     }
     await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: subtotal, method: payment_method || 'cash', status: 'success', payer_name: customer_name, payer_email: customer_email, description: `Internal order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
   }

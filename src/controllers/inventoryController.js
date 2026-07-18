@@ -1,5 +1,6 @@
 const { Category, Product, StockMovement } = require('../models');
 const audit = require('../utils/audit');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 
 const getCategories = async (req, res) => {
   let tenantId = req.tenant_id;
@@ -73,8 +74,9 @@ const createProduct = async (req, res) => {
   const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images, attributes } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
   const finalSku = sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`;
-  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: normalizeCategoryId(category_id), price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: normalizeImages(images), attributes: attributes || {}, created_by: req.user._id });
-  if (stock_qty > 0) await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
+  const branchId = await resolveWriteBranchId(req);
+  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: branchId, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: normalizeCategoryId(category_id), price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: normalizeImages(images), attributes: attributes || {}, created_by: req.user._id });
+  if (stock_qty > 0) await StockMovement.create({ tenant_id: req.tenant_id, branch_id: branchId, product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
   await audit(req, 'CREATE_PRODUCT', 'inventory', `${req.user.name} added product "${product.name}"`, { sku: product.sku, price: product.price });
   res.status(201).json({ success: true, message: 'Product created.', data: product });
 };
@@ -114,7 +116,7 @@ const adjustStock = async (req, res) => {
   if (newQty < 0) return res.status(400).json({ success: false, message: 'Insufficient stock.' });
   product.stock_qty = newQty;
   await product.save();
-  await StockMovement.create({ tenant_id: req.tenant_id, branch_id: req.user.branch_id || null, product_id: product._id, type: 'adjustment', quantity, notes: notes || 'Manual adjustment', created_by: req.user._id });
+  await StockMovement.create({ tenant_id: req.tenant_id, branch_id: product.branch_id || await resolveWriteBranchId(req), product_id: product._id, type: 'adjustment', quantity, notes: notes || 'Manual adjustment', created_by: req.user._id });
   await audit(req, 'ADJUST_STOCK', 'inventory', `${req.user.name} adjusted stock for "${product.name}" by ${quantity > 0 ? '+' : ''}${quantity}`, { product_id: product._id, quantity, new_qty: newQty });
   res.json({ success: true, message: 'Stock adjusted.', data: { stock_qty: product.stock_qty } });
 };

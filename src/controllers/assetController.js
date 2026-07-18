@@ -1,6 +1,7 @@
 const { StorageLocation, Asset, AssetCategory, AssetLog, Product } = require('../models');
 const accounting = require('../services/accountingService');
 const audit = require('../utils/audit');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 
 // ── STORAGE LOCATIONS ─────────────────────────────────────────────────────────
 
@@ -113,7 +114,7 @@ const createAsset = async (req, res) => {
   const asset_code = `AST-${Date.now().toString().slice(-6)}`;
   const asset = await Asset.create({
     tenant_id: req.tenant_id,
-    branch_id: branch_id || null,
+    branch_id: branch_id || await resolveWriteBranchId(req),
     asset_code, name, category_id: category_id || null,
     description, purchase_date: purchase_date || null,
     purchase_value: purchase_value || 0,

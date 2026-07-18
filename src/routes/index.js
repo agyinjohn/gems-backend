@@ -4,7 +4,6 @@ const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwne
 const { requireFeature } = require('../middleware/featureFlags');
 const { productModeGate } = require('../middleware/productMode');
 const { requireModule } = require('../middleware/moduleAccess');
-const { resolveBranchScope } = require('../middleware/branchScope');
 const { getModeMeta } = require('../config/productMode');
 const storefrontDocsRouter = require('./storefrontDocs');
 const auditMiddleware = require('../middleware/auditMiddleware');
@@ -59,13 +58,9 @@ router.use((req, res, next) => {
   next();
 });
 
-// Branch scoping â€” resolves req.branchFilter for authenticated, tenant-bound
-// requests. Branch-level users are pinned to their branch; org-level users may
-// pass ?branch_id to filter or omit it to see all branches.
-router.use((req, res, next) => {
-  if (req.user && req.tenant_id) return resolveBranchScope(req, res, next);
-  next();
-});
+// Branch scoping (req.branchFilter) is resolved inside the `authenticate`
+// middleware — it must run after auth, and per-route authenticate runs after
+// any router.use() here, so a router-level middleware would see no req.user.
 
 // PLATFORM ADMIN â€” tenant management (us only)
 router.get('/platform/tenants', authenticate, platformAdminOnly, tenant.getAllTenants);
