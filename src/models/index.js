@@ -647,6 +647,7 @@ const invoiceLineSchema = new Schema({
 
 const invoiceSchema = new Schema({
   tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:      { type: Schema.Types.ObjectId, ref: 'Branch' },
   invoice_number: { type: String, required: true },
   customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
   customer_name:  { type: String, required: true },
@@ -671,6 +672,7 @@ invoiceSchema.index({ tenant_id: 1, invoice_number: 1 }, { unique: true });
 // CREDIT NOTE
 const creditNoteSchema = new Schema({
   tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:         { type: Schema.Types.ObjectId, ref: 'Branch' },
   credit_note_number:{ type: String, required: true },
   invoice_id:        { type: Schema.Types.ObjectId, ref: 'Invoice', required: true },
   customer_id:       { type: Schema.Types.ObjectId, ref: 'Customer' },
@@ -713,6 +715,7 @@ const vendorBillPaymentSchema = new Schema({
 
 const vendorBillSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:        { type: Schema.Types.ObjectId, ref: 'Branch' },
   bill_number:      { type: String, required: true },
   vendor_name:      { type: String, required: true },
   supplier_id:      { type: Schema.Types.ObjectId, ref: 'Supplier' },

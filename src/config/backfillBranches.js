@@ -20,6 +20,7 @@ const {
   Tenant, Branch, Employee,
   Product, StockMovement, Order, PurchaseOrder, Expense, Asset, Customer, Lead, ContactHistory,
   Attendance, LeaveRequest, PayrollRun,
+  Invoice, CreditNote, VendorBill,
 } = require('../models');
 
 // HR records inherit the branch of their employee (not the HQ fallback).
@@ -40,6 +41,9 @@ const MODELS = [
   ['Customer', Customer],
   ['Lead', Lead],
   ['ContactHistory', ContactHistory],
+  ['Invoice', Invoice],
+  ['CreditNote', CreditNote],
+  ['VendorBill', VendorBill],
 ];
 
 async function run() {

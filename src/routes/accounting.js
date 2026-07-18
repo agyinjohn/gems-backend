@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate, authorize, requireTenant } = require('../middleware/auth');
 const { requireFeature } = require('../middleware/featureFlags');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 const accounting = require('../services/accountingService');
 const {
   Account, Expense, JournalEntry, TaxRate, Budget,
@@ -555,6 +556,7 @@ router.get('/accounting/receivables', async (req, res) => {
       status: req.query.status,
       aging_bucket: req.query.aging_bucket,
       customer_id: req.query.customer_id,
+      branchFilter: req.branchFilter || {},
     });
     res.json({ success: true, data });
   } catch (err) {
@@ -651,11 +653,12 @@ router.get('/invoices', async (req, res) => {
         from: req.query.from,
         to: req.query.to,
         search: req.query.search,
+        branchFilter: req.branchFilter || {},
       });
       return res.json({ success: true, data });
     }
     const { status, customer_id, from, to } = req.query;
-    const filter = { tenant_id: req.tenant_id };
+    const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
     if (status) {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
@@ -698,8 +701,15 @@ router.post('/invoices', authorize('business_owner', 'accountant', 'sales_staff'
   const total = subtotal + tax_amount;
 
   const count = await Invoice.countDocuments({ tenant_id: req.tenant_id });
+  // Branch follows the linked order when present, else the actor's write branch.
+  let branch_id = await resolveWriteBranchId(req);
+  if (order_id) {
+    const ord = await Order.findOne({ _id: order_id, tenant_id: req.tenant_id }).select('branch_id');
+    if (ord?.branch_id) branch_id = ord.branch_id;
+  }
   const inv = await Invoice.create({
     tenant_id: req.tenant_id,
+    branch_id,
     invoice_number: invoiceNumber(count + 1),
     customer_id: customer_id || null,
     customer_name, customer_email,
@@ -774,10 +784,11 @@ router.get('/credit-notes', async (req, res) => {
       const data = await accounting.buildCreditNotesView(req.tenant_id, {
         search: req.query.search,
         status: req.query.status,
+        branchFilter: req.branchFilter || {},
       });
       return res.json({ success: true, data });
     }
-    const data = await CreditNote.find({ tenant_id: req.tenant_id }).populate('invoice_id', 'invoice_number').sort({ createdAt: -1 });
+    const data = await CreditNote.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).populate('invoice_id', 'invoice_number').sort({ createdAt: -1 });
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -796,6 +807,7 @@ router.post('/credit-notes', authorize('business_owner', 'accountant'), async (r
   const count = await CreditNote.countDocuments({ tenant_id: req.tenant_id });
   const cn = await CreditNote.create({
     tenant_id: req.tenant_id,
+    branch_id: inv.branch_id || null,
     credit_note_number: creditNoteNumber(count + 1),
     invoice_id: inv._id,
     customer_id: inv.customer_id,
@@ -1165,10 +1177,11 @@ router.get('/vendor-bills', async (req, res) => {
         search: req.query.search,
         status: req.query.status,
         aging_bucket: req.query.aging_bucket,
+        branchFilter: req.branchFilter || {},
       });
       return res.json({ success: true, data });
     }
-    const data = await VendorBill.find({ tenant_id: req.tenant_id }).sort({ issue_date: -1 });
+    const data = await VendorBill.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).sort({ issue_date: -1 });
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1192,6 +1205,7 @@ router.post('/vendor-bills', authorize('business_owner', 'accountant'), async (r
   const count = await VendorBill.countDocuments({ tenant_id: req.tenant_id });
   const bill = await VendorBill.create({
     tenant_id: req.tenant_id,
+    branch_id: await resolveWriteBranchId(req),
     bill_number: billNumber(count + 1),
     vendor_name,
     supplier_id: supplier_id || null,

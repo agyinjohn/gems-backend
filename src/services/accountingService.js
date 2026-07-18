@@ -1056,8 +1056,8 @@ async function buildTrialBalanceView(tenantId, options = {}) {
 }
 
 async function buildInvoicesView(tenantId, options = {}) {
-  const { status, customer_id, from, to, search } = options;
-  const filter = { tenant_id: tenantId };
+  const { status, customer_id, from, to, search, branchFilter = {} } = options;
+  const filter = { tenant_id: tenantId, ...branchFilter };
 
   if (status) {
     const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
@@ -1769,7 +1769,7 @@ function enrichAgingFields(row, dueDateValue) {
 }
 
 async function buildReceivablesView(tenantId, options = {}) {
-  const { search, status, aging_bucket: agingFilter, customer_id } = options;
+  const { search, status, aging_bucket: agingFilter, customer_id, branchFilter = {} } = options;
 
   await Invoice.updateMany(
     { tenant_id: tenantId, status: { $in: ['sent', 'partially_paid'] }, due_date: { $lt: new Date() } },
@@ -1778,6 +1778,7 @@ async function buildReceivablesView(tenantId, options = {}) {
 
   const filter = {
     tenant_id: tenantId,
+    ...branchFilter,
     status: { $in: ['sent', 'partially_paid', 'overdue'] },
     amount_due: { $gt: 0.01 },
   };
@@ -2007,8 +2008,8 @@ const VENDOR_BILL_STATUSES = [
 ];
 
 async function buildVendorBillsView(tenantId, options = {}) {
-  const { search, status, aging_bucket: agingFilter } = options;
-  const filter = { tenant_id: tenantId };
+  const { search, status, aging_bucket: agingFilter, branchFilter = {} } = options;
+  const filter = { tenant_id: tenantId, ...branchFilter };
   if (status) {
     const statuses = String(status).split(',').map((s) => s.trim()).filter(Boolean);
     filter.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
@@ -2076,8 +2077,8 @@ async function buildVendorBillsView(tenantId, options = {}) {
 }
 
 async function buildCreditNotesView(tenantId, options = {}) {
-  const { search, status } = options;
-  const filter = { tenant_id: tenantId };
+  const { search, status, branchFilter = {} } = options;
+  const filter = { tenant_id: tenantId, ...branchFilter };
   if (status) filter.status = status;
 
   const notes = await CreditNote.find(filter)
