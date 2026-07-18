@@ -77,7 +77,7 @@ const deleteDocument = async (req, res) => {
 };
 
 const hrSummary = async (req, res) => {
-  const data = await hr.getHrSummary(req.tenant_id, req.query);
+  const data = await hr.getHrSummary(req.tenant_id, req.query, req.branchFilter);
   res.json({ success: true, data });
 };
 

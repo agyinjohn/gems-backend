@@ -426,7 +426,7 @@ const seed = async () => {
       const dayEnd   = new Date(date); dayEnd.setHours(23,59,59,999);
       const exists = await Attendance.findOne({ employee_id: emp._id, date: { $gte: dayStart, $lt: dayEnd } });
       if (exists) continue;
-      await Attendance.create({ tenant_id: tenant._id, employee_id: emp._id, date: dayStart, status: pick(attStatuses) });
+      await Attendance.create({ tenant_id: tenant._id, branch_id: emp.branch_id || null, employee_id: emp._id, date: dayStart, status: pick(attStatuses) });
     }
   }
 
@@ -444,7 +444,7 @@ const seed = async () => {
     if (!emp) continue;
     const exists = await LeaveRequest.findOne({ employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start) });
     if (exists) continue;
-    await LeaveRequest.create({ tenant_id: tenant._id, employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start), end_date: daysAgo(l.end), reason: l.reason, status: l.status, reviewed_by: l.status !== 'pending' ? adminUser._id : undefined });
+    await LeaveRequest.create({ tenant_id: tenant._id, branch_id: emp.branch_id || null, employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start), end_date: daysAgo(l.end), reason: l.reason, status: l.status, reviewed_by: l.status !== 'pending' ? adminUser._id : undefined });
   }
 
   // ── Journal Entries (seed balanced GL entries) ────────────────────────────

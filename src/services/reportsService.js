@@ -514,20 +514,21 @@ async function getHrReport(tenantId, query) {
   const { from, to } = parseDateRange(query);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const bf = branchFilter(query.branch_id);
 
-  const payrollMatch = { tenant_id: tenantId, status: 'approved' };
+  const payrollMatch = { tenant_id: tenantId, ...bf, status: 'approved' };
   if (from || to) {
     payrollMatch.createdAt = orderDateMatch(from, to).createdAt;
   }
 
   const [employees, payroll, byDept, onLeave] = await Promise.all([
-    Employee.find({ tenant_id: tenantId }),
+    Employee.find({ tenant_id: tenantId, ...bf }),
     PayrollRun.aggregate([
       { $match: payrollMatch },
       { $group: { _id: null, total: { $sum: '$net_salary' }, runs: { $sum: 1 } } },
     ]),
     Employee.aggregate([
-      { $match: { tenant_id: tenantId, status: 'active' } },
+      { $match: { tenant_id: tenantId, ...bf, status: 'active' } },
       { $lookup: { from: 'departments', localField: 'department_id', foreignField: '_id', as: 'dept' } },
       {
         $group: {
@@ -539,6 +540,7 @@ async function getHrReport(tenantId, query) {
     ]),
     LeaveRequest.countDocuments({
       tenant_id: tenantId,
+      ...bf,
       status: 'approved',
       start_date: { $lte: today },
       end_date: { $gte: today },

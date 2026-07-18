@@ -17,9 +17,17 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const connectDB = require('./db');
 const {
-  Tenant, Branch,
+  Tenant, Branch, Employee,
   Product, StockMovement, Order, PurchaseOrder, Expense, Asset, Customer, Lead, ContactHistory,
+  Attendance, LeaveRequest, PayrollRun,
 } = require('../models');
+
+// HR records inherit the branch of their employee (not the HQ fallback).
+const EMPLOYEE_LINKED = [
+  ['Attendance', Attendance],
+  ['LeaveRequest', LeaveRequest],
+  ['PayrollRun', PayrollRun],
+];
 
 // Collections to backfill (all carry branch_id; excludes User/Employee).
 const MODELS = [
@@ -64,10 +72,29 @@ async function run() {
       tenantTotal += n;
     }
 
+    // HR records: set branch from each employee's own branch. Employees with
+    // no branch (company-wide) leave their HR records null, as intended.
+    const employees = await Employee.find({ tenant_id: tenant._id, branch_id: { $ne: null } }, '_id branch_id');
+    const hrParts = [];
+    let hrTotal = 0;
+    for (const [name, Model] of EMPLOYEE_LINKED) {
+      let n = 0;
+      for (const emp of employees) {
+        const res = await Model.updateMany(
+          { tenant_id: tenant._id, employee_id: emp._id, branch_id: null },
+          { $set: { branch_id: emp.branch_id } },
+        );
+        n += res.modifiedCount ?? res.nModified ?? 0;
+      }
+      if (n > 0) hrParts.push(`${name}: ${n}`);
+      hrTotal += n;
+    }
+
+    tenantTotal += hrTotal;
     grandTotal += tenantTotal;
     console.log(
       `• ${tenant.business_name} → ${hq.name} (${hq._id}) — ${tenantTotal} row(s)` +
-      (parts.length ? ` [${parts.join(', ')}]` : ' [nothing to backfill]'),
+      ([...parts, ...hrParts].length ? ` [${[...parts, ...hrParts].join(', ')}]` : ' [nothing to backfill]'),
     );
   }
 
