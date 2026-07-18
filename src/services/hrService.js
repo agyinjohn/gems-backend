@@ -34,8 +34,8 @@ function getLeaveBalances(employee) {
   };
 }
 
-async function listEmployees(tenantId) {
-  const data = await Employee.find({ tenant_id: tenantId })
+async function listEmployees(tenantId, branchFilter = {}) {
+  const data = await Employee.find({ tenant_id: tenantId, ...branchFilter })
     .populate('department_id', 'name')
     .populate('manager_id', 'name employee_code')
     .populate('user_id', 'name email role')

@@ -4,6 +4,7 @@ const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwne
 const { requireFeature } = require('../middleware/featureFlags');
 const { productModeGate } = require('../middleware/productMode');
 const { requireModule } = require('../middleware/moduleAccess');
+const { resolveBranchScope } = require('../middleware/branchScope');
 const { getModeMeta } = require('../config/productMode');
 const storefrontDocsRouter = require('./storefrontDocs');
 const auditMiddleware = require('../middleware/auditMiddleware');
@@ -55,6 +56,14 @@ router.use(productModeGate);
 // Audit middleware â€” only runs for authenticated requests, skips public routes
 router.use((req, res, next) => {
   if (req.user) return auditMiddleware(req, res, next);
+  next();
+});
+
+// Branch scoping â€” resolves req.branchFilter for authenticated, tenant-bound
+// requests. Branch-level users are pinned to their branch; org-level users may
+// pass ?branch_id to filter or omit it to see all branches.
+router.use((req, res, next) => {
+  if (req.user && req.tenant_id) return resolveBranchScope(req, res, next);
   next();
 });
 

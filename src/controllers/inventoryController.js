@@ -47,7 +47,7 @@ function normalizeImages(images) {
 
 const getProducts = async (req, res) => {
   const { search, category_id, is_active, low_stock } = req.query;
-  const filter = { tenant_id: req.tenant_id };
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
   if (category_id) filter.category_id = category_id;
   if (is_active !== undefined) filter.is_active = is_active === 'true';
@@ -120,7 +120,7 @@ const adjustStock = async (req, res) => {
 };
 
 const getStockMovements = async (req, res) => {
-  const data = await StockMovement.find({ tenant_id: req.tenant_id, product_id: req.params.id })
+  const data = await StockMovement.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}), product_id: req.params.id })
     .populate('product_id', 'name')
     .populate('created_by', 'name')
     .sort({ createdAt: -1 });

@@ -78,8 +78,10 @@ function buildPoListFilter(tenantId, query) {
   return filter;
 }
 
-async function listPurchaseOrders(tenantId, query) {
-  const filter = buildPoListFilter(tenantId, query);
+async function listPurchaseOrders(tenantId, query, branchFilter = {}) {
+  // branchFilter is authoritative (server-resolved) and overrides any
+  // client-supplied query.branch_id handled inside buildPoListFilter.
+  const filter = { ...buildPoListFilter(tenantId, query), ...branchFilter };
   return PurchaseOrder.find(filter).populate('supplier_id', 'name').sort({ createdAt: -1 });
 }
 

@@ -2,7 +2,7 @@ const hr = require('../services/hrService');
 const audit = require('../utils/audit');
 
 const listEmployees = async (req, res) => {
-  const data = await hr.listEmployees(req.tenant_id);
+  const data = await hr.listEmployees(req.tenant_id, req.branchFilter);
   res.json({ success: true, data });
 };
 

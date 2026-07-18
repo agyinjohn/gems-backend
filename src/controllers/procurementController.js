@@ -35,7 +35,7 @@ const deactivateSupplier = async (req, res) => {
 
 const listPurchaseOrders = async (req, res) => {
   try {
-    const data = await procurement.listPurchaseOrders(req.tenant_id, req.query);
+    const data = await procurement.listPurchaseOrders(req.tenant_id, req.query, req.branchFilter);
     res.json({ success: true, data });
   } catch (err) { handleError(res, err); }
 };

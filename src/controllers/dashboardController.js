@@ -5,22 +5,28 @@ const getDashboard = async (req, res) => {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const tid = req.tenant_id;
   const role = req.user?.role;
+  // Branch scope — pinned for branch-level users, chosen/all for org-level.
+  // Only merged into queries on collections that carry branch_id (Order,
+  // Product, StockMovement, PurchaseOrder, Expense, Employee). Collections
+  // without branch_id (Customer, Lead, Attendance, LeaveRequest, PayrollRun,
+  // Supplier) stay tenant-scoped.
+  const bf = req.branchFilter || {};
 
   // ── SALES STAFF ──────────────────────────────────────────────────────────────────
   if (role === 'sales_staff') {
     const [todayOrders, monthRevenue, activeLeads, recentOrders, topProducts, monthlySales] = await Promise.all([
-      Order.countDocuments({ tenant_id: tid, createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } }),
-      Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+      Order.countDocuments({ tenant_id: tid, ...bf, createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } }),
+      Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
       Lead.countDocuments({ tenant_id: tid, stage: { $nin: ['won','lost'] } }),
-      Order.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(8).select('order_number customer_name total status payment_status createdAt'),
+      Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).select('order_number customer_name total status payment_status createdAt'),
       Order.aggregate([
-        { $match: { tenant_id: tid, payment_status: 'paid' } },
+        { $match: { tenant_id: tid, ...bf, payment_status: 'paid' } },
         { $unwind: '$items' },
         { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
         { $sort: { revenue: -1 } }, { $limit: 5 },
       ]),
       Order.aggregate([
-        { $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6*30*24*60*60*1000) } } },
+        { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6*30*24*60*60*1000) } } },
         { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
         { $sort: { '_id.year': 1, '_id.month': 1 } },
         { $project: { month: { $arrayElemAt: [['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
@@ -42,22 +48,22 @@ const getDashboard = async (req, res) => {
       recentMovements, lowStockItems,
       totalStockValue, movementsByType, stockTrend, topMovedProducts, pendingPOs,
     ] = await Promise.all([
-      Product.countDocuments({ tenant_id: tid, is_active: true }),
-      Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $and: [{ $lte: ['$stock_qty', '$low_stock_threshold'] }, { $gt: ['$stock_qty', 0] }] } }),
-      Product.countDocuments({ tenant_id: tid, is_active: true, stock_qty: 0 }),
-      Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $gt: ['$stock_qty', '$low_stock_threshold'] } }),
-      StockMovement.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(12).populate('product_id', 'name'),
-      Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10).select('name stock_qty low_stock_threshold sku cost_price'),
+      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
+      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, $expr: { $and: [{ $lte: ['$stock_qty', '$low_stock_threshold'] }, { $gt: ['$stock_qty', 0] }] } }),
+      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, stock_qty: 0 }),
+      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, $expr: { $gt: ['$stock_qty', '$low_stock_threshold'] } }),
+      StockMovement.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(12).populate('product_id', 'name'),
+      Product.find({ tenant_id: tid, ...bf, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10).select('name stock_qty low_stock_threshold sku cost_price'),
       // Total inventory value
-      Product.aggregate([{ $match: { tenant_id: tid, is_active: true } }, { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
+      Product.aggregate([{ $match: { tenant_id: tid, ...bf, is_active: true } }, { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
       // Movement breakdown by type — last 30 days
       StockMovement.aggregate([
-        { $match: { tenant_id: tid, createdAt: { $gte: monthAgo } } },
+        { $match: { tenant_id: tid, ...bf, createdAt: { $gte: monthAgo } } },
         { $group: { _id: '$type', count: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
       ]),
       // Daily in/out trend — last 7 days
       StockMovement.aggregate([
-        { $match: { tenant_id: tid, createdAt: { $gte: weekAgo } } },
+        { $match: { tenant_id: tid, ...bf, createdAt: { $gte: weekAgo } } },
         { $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
           in:  { $sum: { $cond: [{ $gt: ['$quantity', 0] }, '$quantity', 0] } },
@@ -68,7 +74,7 @@ const getDashboard = async (req, res) => {
       ]),
       // Top 5 most moved products — last 30 days
       StockMovement.aggregate([
-        { $match: { tenant_id: tid, createdAt: { $gte: monthAgo } } },
+        { $match: { tenant_id: tid, ...bf, createdAt: { $gte: monthAgo } } },
         { $group: { _id: '$product_id', moves: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
         { $sort: { qty: -1 } }, { $limit: 5 },
         { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'product' } },
@@ -76,7 +82,7 @@ const getDashboard = async (req, res) => {
         { $project: { name: '$product.name', stock_qty: '$product.stock_qty', moves: 1, qty: 1 } },
       ]),
       // Pending POs awaiting goods receipt
-      PurchaseOrder.countDocuments({ tenant_id: tid, status: { $in: ['approved', 'sent', 'partially_received'] } }),
+      PurchaseOrder.countDocuments({ tenant_id: tid, ...bf, status: { $in: ['approved', 'sent', 'partially_received'] } }),
     ]);
 
     return res.json({ success: true, data: {
@@ -100,18 +106,18 @@ const getDashboard = async (req, res) => {
   // ── ACCOUNTANT ─────────────────────────────────────────────────────────────────────
   if (role === 'accountant') {
     const [revenue, cogs, monthExpenses, totalExpenses, recentExpenses, monthlyRevenue, expByCategory] = await Promise.all([
-      Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
-      Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
-      Expense.aggregate([{ $match: { tenant_id: tid, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-      Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-      Expense.find({ tenant_id: tid }).sort({ expense_date: -1 }).limit(8).select('title category amount expense_date'),
+      Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
+      Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
+      Expense.aggregate([{ $match: { tenant_id: tid, ...bf, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+      Expense.aggregate([{ $match: { tenant_id: tid, ...bf } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+      Expense.find({ tenant_id: tid, ...bf }).sort({ expense_date: -1 }).limit(8).select('title category amount expense_date'),
       Order.aggregate([
-        { $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6*30*24*60*60*1000) } } },
+        { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6*30*24*60*60*1000) } } },
         { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' } } },
         { $sort: { '_id.year': 1, '_id.month': 1 } },
         { $project: { month: { $arrayElemAt: [['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], '$_id.month'] }, revenue: 1 } },
       ]),
-      Expense.aggregate([{ $match: { tenant_id: tid } }, { $group: { _id: { $ifNull: ['$category','Uncategorized'] }, total: { $sum: '$amount' } } }, { $sort: { total: -1 } }, { $limit: 6 }]),
+      Expense.aggregate([{ $match: { tenant_id: tid, ...bf } }, { $group: { _id: { $ifNull: ['$category','Uncategorized'] }, total: { $sum: '$amount' } } }, { $sort: { total: -1 } }, { $limit: 6 }]),
     ]);
     const totalRev = revenue[0]?.total || 0;
     const totalExp = totalExpenses[0]?.total || 0;
@@ -128,8 +134,8 @@ const getDashboard = async (req, res) => {
   if (role === 'hr_manager') {
     const today = new Date(); today.setHours(0,0,0,0);
     const [totalEmp, onLeave, todayAttendance, pendingLeave, recentLeave, monthPayroll] = await Promise.all([
-      Employee.countDocuments({ tenant_id: tid, status: 'active' }),
-      Employee.countDocuments({ tenant_id: tid, status: 'on_leave' }),
+      Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
+      Employee.countDocuments({ tenant_id: tid, ...bf, status: 'on_leave' }),
       Attendance.countDocuments({ tenant_id: tid, date: { $gte: today }, status: 'present' }),
       LeaveRequest.countDocuments({ tenant_id: tid, status: 'pending' }),
       LeaveRequest.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(8).populate('employee_id', 'name'),
@@ -145,11 +151,11 @@ const getDashboard = async (req, res) => {
   // ── PROCUREMENT OFFICER ──────────────────────────────────────────────────────────
   if (role === 'procurement_officer') {
     const [totalPOs, pendingPOs, totalSuppliers, totalSpend, recentPOs] = await Promise.all([
-      PurchaseOrder.countDocuments({ tenant_id: tid }),
-      PurchaseOrder.countDocuments({ tenant_id: tid, status: { $in: ['draft','pending_approval','approved','sent'] } }),
+      PurchaseOrder.countDocuments({ tenant_id: tid, ...bf }),
+      PurchaseOrder.countDocuments({ tenant_id: tid, ...bf, status: { $in: ['draft','pending_approval','approved','sent'] } }),
       Supplier.countDocuments({ tenant_id: tid, is_active: true }),
-      PurchaseOrder.aggregate([{ $match: { tenant_id: tid, status: 'completed' } }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
-      PurchaseOrder.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(8).populate('supplier_id', 'name').select('po_number status total_cost expected_date createdAt supplier_id'),
+      PurchaseOrder.aggregate([{ $match: { tenant_id: tid, ...bf, status: 'completed' } }, { $group: { _id: null, total: { $sum: '$total_cost' } } }]),
+      PurchaseOrder.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).populate('supplier_id', 'name').select('po_number status total_cost expected_date createdAt supplier_id'),
     ]);
     return res.json({ success: true, data: {
       role: 'procurement_officer',
@@ -160,23 +166,23 @@ const getDashboard = async (req, res) => {
 
   // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER ────────────────────────────────
   const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales] = await Promise.all([
-    Order.countDocuments({ tenant_id: tid, payment_status: 'paid' }),
-    Order.aggregate([{ $match: { tenant_id: tid, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-    Product.countDocuments({ tenant_id: tid, is_active: true }),
-    Product.countDocuments({ tenant_id: tid, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
+    Order.countDocuments({ tenant_id: tid, ...bf, payment_status: 'paid' }),
+    Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+    Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
+    Product.countDocuments({ tenant_id: tid, ...bf, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
     Customer.countDocuments({ tenant_id: tid }),
     Lead.countDocuments({ tenant_id: tid, stage: { $nin: ['won', 'lost'] } }),
-    Employee.countDocuments({ tenant_id: tid, status: 'active' }),
-    Expense.aggregate([{ $match: { tenant_id: tid, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-    Order.find({ tenant_id: tid }).sort({ createdAt: -1 }).limit(5).select('order_number customer_name total status payment_status createdAt'),
+    Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
+    Expense.aggregate([{ $match: { tenant_id: tid, ...bf, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+    Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(5).select('order_number customer_name total status payment_status createdAt'),
     Order.aggregate([
-      { $match: { tenant_id: tid, payment_status: 'paid' } },
+      { $match: { tenant_id: tid, ...bf, payment_status: 'paid' } },
       { $unwind: '$items' },
       { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
       { $sort: { revenue: -1 } }, { $limit: 5 },
     ]),
     Order.aggregate([
-      { $match: { tenant_id: tid, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000) } } },
+      { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000) } } },
       { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
       { $sort: { '_id.year': 1, '_id.month': 1 } },
       { $project: { month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
