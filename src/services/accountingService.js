@@ -2702,8 +2702,8 @@ const EXPENSE_CATEGORIES = [
 ];
 
 async function buildExpensesView(tenantId, options = {}) {
-  const { from, to, category, search, limit = 500 } = options;
-  const match = { tenant_id: tenantId };
+  const { from, to, category, search, limit = 500, branchFilter = {} } = options;
+  const match = { tenant_id: tenantId, ...branchFilter };
   if (from || to) {
     match.expense_date = {};
     if (from) match.expense_date.$gte = new Date(from);

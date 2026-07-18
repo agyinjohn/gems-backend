@@ -30,8 +30,8 @@ function buildZReport(shift) {
   };
 }
 
-function shiftListFilter(tenantId, user, query = {}) {
-  const filter = { tenant_id: tenantId };
+function shiftListFilter(tenantId, user, query = {}, branchFilter = {}) {
+  const filter = { tenant_id: tenantId, ...branchFilter };
   const { from, to, status = 'all' } = query;
 
   if (status && status !== 'all') filter.status = status;
@@ -46,10 +46,10 @@ function shiftListFilter(tenantId, user, query = {}) {
   return filter;
 }
 
-async function listShifts(tenantId, user, query = {}) {
+async function listShifts(tenantId, user, query = {}, branchFilter = {}) {
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
-  const filter = shiftListFilter(tenantId, user, query);
+  const filter = shiftListFilter(tenantId, user, query, branchFilter);
 
   const [shifts, total] = await Promise.all([
     PosShift.find(filter)

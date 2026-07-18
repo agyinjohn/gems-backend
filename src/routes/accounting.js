@@ -263,10 +263,11 @@ router.get('/expenses', async (req, res) => {
       to: req.query.to || null,
       category: req.query.category || null,
       search: req.query.search || '',
+      branchFilter: req.branchFilter || {},
     });
     return res.json({ success: true, data });
   }
-  const data = await Expense.find({ tenant_id: req.tenant_id })
+  const data = await Expense.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) })
     .populate('created_by', 'name')
     .sort({ expense_date: -1 });
   res.json({ success: true, data });
