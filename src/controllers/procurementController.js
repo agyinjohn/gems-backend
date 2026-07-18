@@ -1,4 +1,5 @@
 const procurement = require('../services/procurementService');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 
 function handleError(res, err) {
   const status = err.status || 500;
@@ -52,7 +53,7 @@ const createPurchaseOrder = async (req, res) => {
     const data = await procurement.createPurchaseOrder(
       req.tenant_id,
       req.user._id,
-      req.user.branch_id,
+      await resolveWriteBranchId(req),
       req.body,
     );
     res.status(201).json({ success: true, data });

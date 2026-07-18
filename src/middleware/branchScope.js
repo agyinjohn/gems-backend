@@ -60,4 +60,25 @@ const resolveBranchScope = (req, res, next) => {
   next();
 };
 
-module.exports = { resolveBranchScope, applyBranchScope, computeBranchScope };
+/**
+ * Resolve which branch a newly-created record should belong to, so org-level
+ * users' writes are branch-filterable instead of landing as company-wide null.
+ *
+ *   - Branch-level user             → their own branch.
+ *   - Org-level user, branch chosen → the selected branch (req.branchId).
+ *   - Org-level user, "all" chosen  → the tenant's HQ / Main branch fallback.
+ *
+ * Returns null only if the tenant somehow has no branch at all.
+ */
+async function resolveWriteBranchId(req) {
+  if (req.user?.branch_id) return req.user.branch_id;   // branch-level: pinned
+  if (req.branchId) return req.branchId;                // org-level: active selection
+
+  // Org-level with "all branches" selected — fall back to HQ / Main.
+  const { Branch } = require('../models');
+  const hq = await Branch.findOne({ tenant_id: req.tenant_id, slug: 'main' })
+    || await Branch.findOne({ tenant_id: req.tenant_id }).sort({ createdAt: 1 });
+  return hq?._id || null;
+}
+
+module.exports = { resolveBranchScope, applyBranchScope, computeBranchScope, resolveWriteBranchId };
