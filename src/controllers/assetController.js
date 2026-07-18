@@ -6,7 +6,7 @@ const { resolveWriteBranchId } = require('../middleware/branchScope');
 // ── STORAGE LOCATIONS ─────────────────────────────────────────────────────────
 
 const getLocations = async (req, res) => {
-  const data = await StorageLocation.find({ tenant_id: req.tenant_id, is_active: true })
+  const data = await StorageLocation.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}), is_active: true })
     .populate('branch_id', 'name')
     .sort('name');
   res.json({ success: true, data });

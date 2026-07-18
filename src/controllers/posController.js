@@ -85,7 +85,7 @@ const closeShift = async (req, res) => {
 };
 
 const listShiftHistory = async (req, res) => {
-  const data = await listShifts(req.tenant_id, req.user, req.query);
+  const data = await listShifts(req.tenant_id, req.user, req.query, req.branchFilter);
   res.json({ success: true, ...data });
 };
 

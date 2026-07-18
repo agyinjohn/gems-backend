@@ -599,11 +599,12 @@ async function getProcurementReport(tenantId, query) {
 async function getCrmReport(tenantId, query) {
   const { from, to } = parseDateRange(query);
   const leadDate = from || to ? orderDateMatch(from, to) : {};
+  const bf = branchFilter(query.branch_id);
 
   const [customers, leads, byStage, topBuyers] = await Promise.all([
-    Customer.countDocuments({ tenant_id: tenantId }),
+    Customer.countDocuments({ tenant_id: tenantId, ...bf }),
     Lead.aggregate([
-      { $match: { tenant_id: tenantId, ...(leadDate.createdAt ? { createdAt: leadDate.createdAt } : {}) } },
+      { $match: { tenant_id: tenantId, ...bf, ...(leadDate.createdAt ? { createdAt: leadDate.createdAt } : {}) } },
       {
         $group: {
           _id: null,
@@ -614,7 +615,7 @@ async function getCrmReport(tenantId, query) {
       },
     ]),
     Lead.aggregate([
-      { $match: { tenant_id: tenantId } },
+      { $match: { tenant_id: tenantId, ...bf } },
       { $group: { _id: '$stage', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ]),

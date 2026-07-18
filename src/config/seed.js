@@ -205,7 +205,7 @@ const seed = async () => {
   ];
   const customerMap = {};
   for (const c of customerDefs) {
-    const cust = await Customer.findOneAndUpdate({ tenant_id: tenant._id, email: c.email }, { ...c, tenant_id: tenant._id }, { upsert: true, new: true });
+    const cust = await Customer.findOneAndUpdate({ tenant_id: tenant._id, email: c.email }, { ...c, tenant_id: tenant._id, branch_id: branch._id }, { upsert: true, new: true });
     customerMap[c.email] = cust;
   }
   const customers = Object.values(customerMap);
@@ -329,6 +329,7 @@ const seed = async () => {
       { tenant_id: tenant._id, title: leadTitles[i] },
       {
         tenant_id: tenant._id,
+        branch_id: branch._id,
         title: leadTitles[i],
         customer_id: cust._id,
         stage: stages[i % stages.length],

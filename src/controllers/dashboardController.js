@@ -17,7 +17,7 @@ const getDashboard = async (req, res) => {
     const [todayOrders, monthRevenue, activeLeads, recentOrders, topProducts, monthlySales] = await Promise.all([
       Order.countDocuments({ tenant_id: tid, ...bf, createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } }),
       Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
-      Lead.countDocuments({ tenant_id: tid, stage: { $nin: ['won','lost'] } }),
+      Lead.countDocuments({ tenant_id: tid, ...bf, stage: { $nin: ['won','lost'] } }),
       Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).select('order_number customer_name total status payment_status createdAt'),
       Order.aggregate([
         { $match: { tenant_id: tid, ...bf, payment_status: 'paid' } },
@@ -170,8 +170,8 @@ const getDashboard = async (req, res) => {
     Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
     Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
     Product.countDocuments({ tenant_id: tid, ...bf, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
-    Customer.countDocuments({ tenant_id: tid }),
-    Lead.countDocuments({ tenant_id: tid, stage: { $nin: ['won', 'lost'] } }),
+    Customer.countDocuments({ tenant_id: tid, ...bf }),
+    Lead.countDocuments({ tenant_id: tid, ...bf, stage: { $nin: ['won', 'lost'] } }),
     Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
     Expense.aggregate([{ $match: { tenant_id: tid, ...bf, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(5).select('order_number customer_name total status payment_status createdAt'),
