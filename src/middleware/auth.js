@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../models');
 const { resolveTenantForUser } = require('../services/tenantService');
+const { applyBranchScope } = require('./branchScope');
 
 const authenticate = async (req, res, next) => {
   try {
@@ -24,6 +25,9 @@ const authenticate = async (req, res, next) => {
       req.tenant = tenantContext.tenant;
       req.tenant_id = tenantContext.tenant_id;
     }
+
+    // Resolve branch scope now that req.user (and tenant) are populated.
+    applyBranchScope(req);
 
     next();
   } catch {
