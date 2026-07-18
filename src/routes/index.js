@@ -4,6 +4,7 @@ const { authenticate, authorize, superAdminOnly, platformAdminOnly, businessOwne
 const { requireFeature } = require('../middleware/featureFlags');
 const { productModeGate } = require('../middleware/productMode');
 const { requireModule } = require('../middleware/moduleAccess');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 const { getModeMeta } = require('../config/productMode');
 const storefrontDocsRouter = require('./storefrontDocs');
 const auditMiddleware = require('../middleware/auditMiddleware');
@@ -896,26 +897,26 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
 
 // CRM - CUSTOMERS
 router.get('/customers', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
-  const data = await Customer.find({ tenant_id: req.tenant_id }).sort({ createdAt: -1 });
+  const data = await Customer.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).sort({ createdAt: -1 });
   res.json({ success: true, data });
 });
 router.post('/customers', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { name, email, phone, company, address, segment, notes } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'name required.' });
-  const data = await Customer.create({ tenant_id: req.tenant_id, name, email, phone, company, address, segment: segment || 'general', notes, created_by: req.user._id });
+  const data = await Customer.create({ tenant_id: req.tenant_id, branch_id: await resolveWriteBranchId(req), name, email, phone, company, address, segment: segment || 'general', notes, created_by: req.user._id });
   res.status(201).json({ success: true, data });
 });
 
 // CRM - LEADS
 router.get('/leads', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
-  const data = await Lead.find({ tenant_id: req.tenant_id }).populate('customer_id', 'name').populate('assigned_to', 'name').sort({ createdAt: -1 });
+  const data = await Lead.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).populate('customer_id', 'name').populate('assigned_to', 'name').sort({ createdAt: -1 });
   const mapped = data.map(l => ({ ...l.toJSON(), customer_name: l.customer_id?.name || null, assigned_to_name: l.assigned_to?.name || null }));
   res.json({ success: true, data: mapped });
 });
 router.post('/leads', authenticate, requireTenant, requireModule('crm'), authorize('business_owner', 'sales_staff'), async (req, res) => {
   const { customer_id, title, stage, value, assigned_to, notes, next_followup } = req.body;
   if (!title) return res.status(400).json({ success: false, message: 'title required.' });
-  const data = await Lead.create({ tenant_id: req.tenant_id, customer_id: customer_id || null, title, stage: stage || 'new', value: value || 0, assigned_to: assigned_to || null, notes, next_followup: next_followup || null });
+  const data = await Lead.create({ tenant_id: req.tenant_id, branch_id: await resolveWriteBranchId(req), customer_id: customer_id || null, title, stage: stage || 'new', value: value || 0, assigned_to: assigned_to || null, notes, next_followup: next_followup || null });
   res.status(201).json({ success: true, data });
 });
 router.patch('/leads/:id', authenticate, requireTenant, requireModule('crm'), async (req, res) => {

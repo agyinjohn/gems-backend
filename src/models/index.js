@@ -131,6 +131,7 @@ const stockMovementSchema = new Schema({
 // CUSTOMER
 const customerSchema = new Schema({
   tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:  { type: Schema.Types.ObjectId, ref: 'Branch' },
   name:       { type: String, required: true },
   email:      String,
   phone:      String,
@@ -144,6 +145,7 @@ const customerSchema = new Schema({
 // LEAD
 const leadSchema = new Schema({
   tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:     { type: Schema.Types.ObjectId, ref: 'Branch' },
   customer_id:   { type: Schema.Types.ObjectId, ref: 'Customer' },
   title:         { type: String, required: true },
   stage:         { type: String, enum: ['new','contacted','qualified','proposal','negotiation','won','lost'], default: 'new' },
