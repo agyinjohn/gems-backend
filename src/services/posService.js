@@ -5,12 +5,17 @@ const { sendOrderConfirmation } = require('./notificationService');
 const { verifyPaystackTransaction } = require('./paymentService');
 const { clearCustomerDisplayByOrderId, setPaidDisplayFlash } = require('./posDisplayService');
 
-async function getOpenShift(tenantId, userId) {
-  return PosShift.findOne({ tenant_id: tenantId, opened_by: userId, status: 'open' }).sort({ opened_at: -1 });
+async function getOpenShift(tenantId, userId, branchId) {
+  const filter = { tenant_id: tenantId, opened_by: userId, status: 'open' };
+  // When a branch context is given, resolve the shift for that branch.
+  // Legacy shifts opened before branch stamping (branch_id null) still match
+  // so they remain visible and closable.
+  if (branchId !== undefined) filter.$or = [{ branch_id: branchId }, { branch_id: null }];
+  return PosShift.findOne(filter).sort({ opened_at: -1 });
 }
 
-async function requireOpenShift(tenantId, userId) {
-  const shift = await getOpenShift(tenantId, userId);
+async function requireOpenShift(tenantId, userId, branchId) {
+  const shift = await getOpenShift(tenantId, userId, branchId);
   if (!shift) {
     throw Object.assign(new Error('Open a shift before making sales.'), { status: 403 });
   }

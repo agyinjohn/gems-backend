@@ -30,15 +30,16 @@ const {
 } = require('../services/posReservationService');
 
 const openShift = async (req, res) => {
-  const existing = await getOpenShift(req.tenant_id, req.user._id);
-  if (existing) return res.status(400).json({ success: false, message: 'You already have an open shift.', data: existing });
+  const branchId = await resolveWriteBranchId(req);
+  const existing = await getOpenShift(req.tenant_id, req.user._id, branchId);
+  if (existing) return res.status(400).json({ success: false, message: 'You already have an open shift on this branch.', data: existing });
 
   const openingFloat = parseFloat(req.body.opening_float) || 0;
   const cashierName = String(req.body.cashier_name || '').trim() || req.user.name || req.user.email || 'Cashier';
 
   const shift = await PosShift.create({
     tenant_id: req.tenant_id,
-    branch_id: await resolveWriteBranchId(req),
+    branch_id: branchId,
     opened_by: req.user._id,
     cashier_name: cashierName,
     shift_number: `SHIFT-${Date.now()}`,
@@ -50,7 +51,7 @@ const openShift = async (req, res) => {
 };
 
 const getCurrentShift = async (req, res) => {
-  const shift = await getOpenShift(req.tenant_id, req.user._id);
+  const shift = await getOpenShift(req.tenant_id, req.user._id, await resolveWriteBranchId(req));
   if (!shift) return res.json({ success: true, data: null });
   const data = shift.toObject();
   if (!data.cashier_name) {
@@ -60,7 +61,7 @@ const getCurrentShift = async (req, res) => {
 };
 
 const closeShift = async (req, res) => {
-  const shift = await getOpenShift(req.tenant_id, req.user._id);
+  const shift = await getOpenShift(req.tenant_id, req.user._id, await resolveWriteBranchId(req));
   if (!shift) return res.status(404).json({ success: false, message: 'No open shift found.' });
 
   const actual_cash = parseFloat(req.body.actual_cash);
@@ -108,7 +109,7 @@ const initPaystackPayment = async (req, res) => {
 
   let shift;
   try {
-    shift = await requireOpenShift(req.tenant_id, req.user._id);
+    shift = await requireOpenShift(req.tenant_id, req.user._id, await resolveWriteBranchId(req));
   } catch (err) {
     return res.status(err.status || 403).json({ success: false, message: err.message });
   }
@@ -387,7 +388,7 @@ const clearDisplaySession = async (req, res) => {
 };
 
 const getPendingPaystackOrders = async (req, res) => {
-  const shift = await getOpenShift(req.tenant_id, req.user._id);
+  const shift = await getOpenShift(req.tenant_id, req.user._id, await resolveWriteBranchId(req));
   const { pending, events } = await syncPendingPaystackOrders({
     tenantId: req.tenant_id,
     userId: req.user._id,
