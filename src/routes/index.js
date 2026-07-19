@@ -286,7 +286,7 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
     const result = await completePosSale({
       tenantId: req.tenant_id,
       userId: req.user._id,
-      branchId: req.user.branch_id,
+      branchId: await resolveWriteBranchId(req),
       items,
       payment_method: payment_method || 'cash',
       payment_ref: payment_ref || null,
@@ -360,6 +360,7 @@ router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), a
     await Product.findByIdAndUpdate(p._id, { $inc: { stock_qty: qty } });
     await StockMovement.create({
       tenant_id: req.tenant_id,
+      branch_id: order.branch_id || null,
       product_id: p._id,
       type: 'return',
       quantity: qty,
@@ -413,7 +414,7 @@ router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), a
 
 router.get('/pos/products', authenticate, requireTenant, requireFeature('pos'), async (req, res) => {
   const { search, category } = req.query;
-  const filter = { tenant_id: req.tenant_id, is_active: true };
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}), is_active: true };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
   if (category) {
     const { Category } = require('../models');

@@ -1,4 +1,5 @@
 const { PosShift, Order, Tenant } = require('../models');
+const { resolveWriteBranchId } = require('../middleware/branchScope');
 const { getOpenShift, fulfillPosPaystackOrder, requireOpenShift } = require('../services/posService');
 const { buildZReport, listShifts, getShiftDetail } = require('../services/posShiftService');
 const {
@@ -37,7 +38,7 @@ const openShift = async (req, res) => {
 
   const shift = await PosShift.create({
     tenant_id: req.tenant_id,
-    branch_id: req.user.branch_id || null,
+    branch_id: await resolveWriteBranchId(req),
     opened_by: req.user._id,
     cashier_name: cashierName,
     shift_number: `SHIFT-${Date.now()}`,
@@ -155,7 +156,7 @@ const initPaystackPayment = async (req, res) => {
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
   const order = await Order.create({
     tenant_id: req.tenant_id,
-    branch_id: req.user.branch_id || null,
+    branch_id: await resolveWriteBranchId(req),
     shift_id: shift._id,
     order_number: orderNumber,
     customer_name: customer_name || 'Walk-in Customer',
@@ -244,7 +245,7 @@ const initPaystackPayment = async (req, res) => {
 
       await publishCustomerDisplay({
         tenantId: req.tenant_id,
-        branchId: req.user.branch_id || null,
+        branchId: await resolveWriteBranchId(req),
         orderId: order._id,
         orderNumber: orderNumber,
         customerName: order.customer_name,
@@ -331,7 +332,7 @@ const getVirtualTerminalInfo = async (req, res) => {
 const getCustomerDisplaySession = async (req, res) => {
   const session = await getCustomerDisplay({
     tenantId: req.tenant_id,
-    branchId: req.user.branch_id || null,
+    branchId: await resolveWriteBranchId(req),
   });
 
   if (!session) {
@@ -360,7 +361,7 @@ const publishDisplayOrder = async (req, res) => {
   try {
     const session = await showOrderOnDisplay({
       tenantId: req.tenant_id,
-      branchId: req.user.branch_id || null,
+      branchId: await resolveWriteBranchId(req),
       orderId: order_id,
       userId: req.user._id,
     });
@@ -380,7 +381,7 @@ const publishDisplayOrder = async (req, res) => {
 const clearDisplaySession = async (req, res) => {
   await clearCustomerDisplay({
     tenantId: req.tenant_id,
-    branchId: req.user.branch_id || null,
+    branchId: await resolveWriteBranchId(req),
   });
   res.json({ success: true, message: 'Customer display cleared.' });
 };
@@ -390,7 +391,7 @@ const getPendingPaystackOrders = async (req, res) => {
   const { pending, events } = await syncPendingPaystackOrders({
     tenantId: req.tenant_id,
     userId: req.user._id,
-    branchId: req.user.branch_id || null,
+    branchId: await resolveWriteBranchId(req),
     shiftId: shift?._id,
   });
   res.json({ success: true, data: pending, events });
@@ -399,7 +400,7 @@ const getPendingPaystackOrders = async (req, res) => {
 const getDisplayQueueSession = async (req, res) => {
   const { queue, paid_flash } = await getDisplayQueue({
     tenantId: req.tenant_id,
-    branchId: req.user.branch_id || null,
+    branchId: await resolveWriteBranchId(req),
   });
   res.json({ success: true, data: queue, paid_flash });
 };
@@ -426,7 +427,7 @@ const verifyPaystackPayment = async (req, res) => {
       orderId: order_id,
       reference,
       userId: req.user._id,
-      branchId: req.user.branch_id,
+      branchId: await resolveWriteBranchId(req),
       amount_tendered,
     });
     res.json({
