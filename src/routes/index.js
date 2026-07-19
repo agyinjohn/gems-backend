@@ -282,11 +282,12 @@ router.post('/pos/sale', authenticate, requireTenant, requireFeature('pos'), aut
     return res.status(400).json({ success: false, message: 'Use Paystack flow for QR card, virtual terminal, and mobile money payments.' });
   }
   try {
-    const shift = await requireOpenShift(req.tenant_id, req.user._id);
+    const saleBranchId = await resolveWriteBranchId(req);
+    const shift = await requireOpenShift(req.tenant_id, req.user._id, saleBranchId);
     const result = await completePosSale({
       tenantId: req.tenant_id,
       userId: req.user._id,
-      branchId: await resolveWriteBranchId(req),
+      branchId: saleBranchId,
       items,
       payment_method: payment_method || 'cash',
       payment_ref: payment_ref || null,
@@ -322,7 +323,7 @@ router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), a
   if (!order_number) return res.status(400).json({ success: false, message: 'order_number required.' });
 
   try {
-    await requireOpenShift(req.tenant_id, req.user._id);
+    await requireOpenShift(req.tenant_id, req.user._id, await resolveWriteBranchId(req));
   } catch (err) {
     return res.status(err.status || 403).json({ success: false, message: err.message });
   }
