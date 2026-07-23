@@ -105,6 +105,7 @@ async function createEmployee(tenantId, body) {
     photo, date_of_birth, gender, nationality, marital_status, national_id, address, employment_type,
     emergency_name, emergency_phone, emergency_relation, user_id, manager_id, branch_id,
     annual_leave_entitlement, sick_leave_entitlement,
+    ssnit_number, tin, payment_method, bank_name, bank_account_name, bank_account_number, bank_branch, momo_number,
   } = body;
   if (!name || gross_salary === undefined) throw httpError('name and gross_salary required.');
   const linkedUserId = await assertUserLinkable(tenantId, normalizeRefId(user_id));
@@ -133,6 +134,14 @@ async function createEmployee(tenantId, body) {
     emergency_name,
     emergency_phone,
     emergency_relation,
+    ssnit_number,
+    tin,
+    payment_method: payment_method || 'bank',
+    bank_name,
+    bank_account_name,
+    bank_account_number,
+    bank_branch,
+    momo_number,
     annual_leave_entitlement: annual_leave_entitlement ?? DEFAULT_ANNUAL_ENTITLEMENT,
     sick_leave_entitlement: sick_leave_entitlement ?? DEFAULT_SICK_ENTITLEMENT,
     leave_balances: { annual_used: 0, sick_used: 0 },
@@ -149,6 +158,8 @@ async function updateEmployee(tenantId, id, body) {
     'photo', 'date_of_birth', 'gender', 'nationality', 'marital_status', 'national_id', 'address', 'employment_type',
     'emergency_name', 'emergency_phone', 'emergency_relation', 'manager_id', 'branch_id',
     'annual_leave_entitlement', 'sick_leave_entitlement',
+    'ssnit_number', 'tin', 'payment_method', 'bank_name', 'bank_account_name',
+    'bank_account_number', 'bank_branch', 'momo_number',
   ];
   const refFields = ['department_id', 'manager_id', 'branch_id'];
   for (const key of allowed) {

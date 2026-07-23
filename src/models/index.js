@@ -345,6 +345,16 @@ const employeeSchema = new Schema({
   national_id:      String,
   address:          String,
   employment_type:  { type: String, enum: ['full_time','part_time','contract','intern'], default: 'full_time' },
+  // Statutory (Ghana) — required for SSNIT & GRA PAYE filing
+  ssnit_number:     String,
+  tin:              String, // Tax Identification Number
+  // Payment / bank details — how the employee is paid
+  payment_method:   { type: String, enum: ['bank','momo','cash'], default: 'bank' },
+  bank_name:        String,
+  bank_account_name:String,
+  bank_account_number: String,
+  bank_branch:      String,
+  momo_number:      String,
   // Emergency contact
   emergency_name:   String,
   emergency_phone:  String,
