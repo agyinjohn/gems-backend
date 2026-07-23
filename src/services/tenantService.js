@@ -1,7 +1,7 @@
 const { Tenant, PlatformSettings } = require('../models');
 
 const DEFAULT_FEATURE_FLAGS = {
-  starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
+  starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: true, storefront: true },
   pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
   enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
 };

@@ -207,16 +207,17 @@ router.get('/billing/module-prices', billing.getModulePrices);
 
 // AUDIT LOGS
 router.get('/audit-logs', authenticate, async (req, res) => {
-  const { AuditLog } = require('../models');
-  const { module: mod, action, user_id, from, to, page = 1, limit = 50 } = req.query;
+  const { AuditLog, Branch } = require('../models');
+  const { module: mod, action, user_id, branch_id, from, to, page = 1, limit = 50 } = req.query;
   const filter = {};
 
   // Platform admin sees all, tenant users see only their tenant
   if (req.user.role !== 'platform_admin') filter.tenant_id = req.tenant_id;
 
-  if (mod)     filter.module = mod;
-  if (action)  filter.action = new RegExp(action, 'i');
-  if (user_id) filter.user_id = user_id;
+  if (mod)       filter.module    = mod;
+  if (action)    filter.action    = new RegExp(action, 'i');
+  if (user_id)   filter.user_id   = user_id;
+  if (branch_id) filter.branch_id = branch_id;
   if (from || to) {
     filter.createdAt = {};
     if (from) filter.createdAt.$gte = new Date(from);
@@ -224,11 +225,22 @@ router.get('/audit-logs', authenticate, async (req, res) => {
   }
 
   const skip = (parseInt(page) - 1) * parseInt(limit);
-  const [logs, total] = await Promise.all([
-    AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
+  const [logs, total, branches] = await Promise.all([
+    AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
     AuditLog.countDocuments(filter),
+    Branch.find(
+      req.user.role === 'platform_admin' ? { is_active: true } : { tenant_id: req.tenant_id, is_active: true }
+    ).select('_id name').lean(),
   ]);
-  res.json({ success: true, data: logs, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) });
+
+  const branchMap = Object.fromEntries(branches.map(b => [String(b._id), b.name]));
+  const data = logs.map(l => ({
+    ...l,
+    id: l._id,
+    branch_name: l.branch_id ? (branchMap[String(l.branch_id)] || 'Unknown') : null,
+  }));
+
+  res.json({ success: true, data, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), branches });
 });
 
 // DASHBOARD
