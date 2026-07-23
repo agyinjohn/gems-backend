@@ -1,4 +1,5 @@
-const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, Attendance, Tenant } = require('../models');
+const mongoose = require('mongoose');
+const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, EmployeeLoan, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
 
@@ -36,12 +37,23 @@ function getLeaveBalances(employee) {
   };
 }
 
+/** Sum of outstanding active-loan balances per employee id. */
+async function getActiveLoanBalances(tenantId, employeeIds) {
+  if (!employeeIds.length) return {};
+  const rows = await EmployeeLoan.aggregate([
+    { $match: { tenant_id: new mongoose.Types.ObjectId(tenantId), employee_id: { $in: employeeIds }, status: 'active' } },
+    { $group: { _id: '$employee_id', balance: { $sum: '$balance' } } },
+  ]);
+  return Object.fromEntries(rows.map((r) => [String(r._id), r.balance]));
+}
+
 async function listEmployees(tenantId, branchFilter = {}) {
   const data = await Employee.find({ tenant_id: tenantId, ...branchFilter })
     .populate('department_id', 'name')
     .populate('manager_id', 'name employee_code')
     .populate('user_id', 'name email role')
     .sort('name');
+  const loanMap = await getActiveLoanBalances(tenantId, data.map((e) => e._id));
   return data.map((e) => {
     const json = e.toJSON();
     return {
@@ -51,6 +63,7 @@ async function listEmployees(tenantId, branchFilter = {}) {
       manager_name: e.manager_id?.name || null,
       linked_user: e.user_id ? { id: e.user_id._id, name: e.user_id.name, email: e.user_id.email, role: e.user_id.role } : null,
       leave_balance: getLeaveBalances(e),
+      active_loan_balance: loanMap[String(e._id)] || 0,
     };
   });
 }
@@ -61,6 +74,7 @@ async function getEmployee(tenantId, id) {
     .populate('manager_id', 'name employee_code')
     .populate('user_id', 'name email role');
   if (!e) throw httpError('Employee not found.', 404);
+  const loanMap = await getActiveLoanBalances(tenantId, [e._id]);
   const json = e.toJSON();
   return {
     ...json,
@@ -69,6 +83,7 @@ async function getEmployee(tenantId, id) {
     manager_name: e.manager_id?.name || null,
     linked_user: e.user_id ? { id: e.user_id._id, name: e.user_id.name, email: e.user_id.email, role: e.user_id.role } : null,
     leave_balance: getLeaveBalances(e),
+    active_loan_balance: loanMap[String(e._id)] || 0,
   };
 }
 
@@ -238,6 +253,157 @@ function normalizePayLines(lines) {
     .filter((line) => line.name && line.amount > 0);
 }
 
+// ── PRO-RATION ─────────────────────────────────────────────────────────────
+// Mid-period joiners/leavers are paid for the days they were actually
+// employed within the pay period, not a full month.
+
+function stripTime(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function periodBounds(month, year) {
+  const start = new Date(year, month - 1, 1);
+  const end = new Date(year, month, 0); // last day of the month
+  return { start: stripTime(start), end: stripTime(end) };
+}
+
+function daysInclusive(a, b) {
+  return Math.round((b.getTime() - a.getTime()) / 86400000) + 1;
+}
+
+/**
+ * Days an employee actually worked within the pay period, based on
+ * start_date (joined mid-period) and end_date (terminated mid-period).
+ * workedDays === 0 means the employee was not employed at all during this
+ * period (e.g. hired after it ended, or terminated before it began).
+ *
+ * Intentionally returns raw day counts rather than a pre-divided/rounded
+ * factor — rounding a fraction before multiplying it into a salary can shift
+ * the prorated amount by several currency units; the division only happens
+ * once, at the point the prorated gross is computed.
+ */
+function calcProration(emp, month, year) {
+  const { start, end } = periodBounds(month, year);
+  const totalDays = daysInclusive(start, end);
+
+  let workStart = start;
+  let workEnd = end;
+  if (emp.start_date) {
+    const sd = stripTime(emp.start_date);
+    if (sd > workStart) workStart = sd;
+  }
+  if (emp.end_date && emp.status === 'terminated') {
+    const ed = stripTime(emp.end_date);
+    if (ed < workEnd) workEnd = ed;
+  }
+
+  if (workStart > workEnd) return { workedDays: 0, isProrated: false, totalDays };
+  const workedDays = daysInclusive(workStart, workEnd);
+  return { workedDays, isProrated: workedDays < totalDays, totalDays };
+}
+
+/** Active employees (status='active') plus anyone terminated mid-period, so
+ * a leaver still gets one final, prorated pay run for their last month. */
+async function getPayrollEligibleEmployees(tenantId, month, year, branchFilter = {}) {
+  const { start, end } = periodBounds(month, year);
+  const [active, exited] = await Promise.all([
+    Employee.find({ tenant_id: tenantId, status: 'active', ...branchFilter }),
+    Employee.find({ tenant_id: tenantId, status: 'terminated', end_date: { $gte: start, $lte: end }, ...branchFilter }),
+  ]);
+  return [...active, ...exited];
+}
+
+// ── EMPLOYEE LOANS / SALARY ADVANCES ────────────────────────────────────────
+
+async function createLoan(tenantId, body) {
+  const { employee_id, type, reason, principal, monthly_deduction, disbursed_date } = body;
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId });
+  if (!emp) throw httpError('Employee not found.', 404);
+  const p = round2(parseFloat(principal));
+  const m = round2(parseFloat(monthly_deduction));
+  if (!p || p <= 0) throw httpError('principal must be greater than zero.');
+  if (!m || m <= 0) throw httpError('monthly_deduction must be greater than zero.');
+  return EmployeeLoan.create({
+    tenant_id: tenantId,
+    branch_id: emp.branch_id || null,
+    employee_id: emp._id,
+    type: type === 'advance' ? 'advance' : 'loan',
+    reason: reason || '',
+    principal: p,
+    balance: p,
+    monthly_deduction: m,
+    disbursed_date: disbursed_date || new Date(),
+  });
+}
+
+async function listLoans(tenantId, { employee_id, status } = {}, branchFilter = {}) {
+  const filter = { tenant_id: tenantId, ...branchFilter };
+  if (employee_id) filter.employee_id = employee_id;
+  if (status) filter.status = status;
+  const loans = await EmployeeLoan.find(filter).populate('employee_id', 'name employee_code').sort({ createdAt: -1 });
+  return loans.map((l) => ({ ...l.toJSON(), employee_name: l.employee_id?.name || '—' }));
+}
+
+async function getLoan(tenantId, id) {
+  const loan = await EmployeeLoan.findOne({ _id: id, tenant_id: tenantId }).populate('employee_id', 'name employee_code');
+  if (!loan) throw httpError('Loan not found.', 404);
+  return { ...loan.toJSON(), employee_name: loan.employee_id?.name || '—' };
+}
+
+async function cancelLoan(tenantId, id) {
+  const loan = await EmployeeLoan.findOne({ _id: id, tenant_id: tenantId });
+  if (!loan) throw httpError('Loan not found.', 404);
+  if (loan.status !== 'active') throw httpError('Only an active loan can be cancelled.');
+  loan.status = 'cancelled';
+  await loan.save();
+  return loan;
+}
+
+async function getActiveLoansForEmployee(tenantId, employeeId) {
+  return EmployeeLoan.find({ tenant_id: tenantId, employee_id: employeeId, status: 'active' }).sort({ createdAt: 1 });
+}
+
+/** Deduction lines for this pay run — capped at whatever balance remains. */
+function loanDeductionLines(loans) {
+  return loans
+    .map((loan) => ({
+      name: `${loan.type === 'advance' ? 'Advance' : 'Loan'} repayment${loan.reason ? ` (${loan.reason})` : ''}`,
+      amount: round2(Math.min(loan.monthly_deduction, loan.balance)),
+      loan_id: loan._id,
+    }))
+    .filter((line) => line.amount > 0);
+}
+
+/** After a payroll run is created, apply its loan deduction lines to the
+ * loan balances and record the repayment. */
+async function commitLoanRepayments(tenantId, loanLines, payrollRunId, month, year) {
+  for (const line of loanLines) {
+    const loan = await EmployeeLoan.findOne({ _id: line.loan_id, tenant_id: tenantId });
+    if (!loan) continue;
+    loan.balance = round2(Math.max(0, loan.balance - line.amount));
+    loan.repayments.push({ month, year, amount: line.amount, payroll_run_id: payrollRunId, date: new Date() });
+    if (loan.balance <= 0) loan.status = 'completed';
+    await loan.save();
+  }
+}
+
+/** Proration + active-loan deductions + statutory calc for one employee. */
+async function computePayrollForEmployee(tenantId, emp, month, year, allowanceLines, sharedDeductionLines, settings) {
+  const proration = calcProration(emp, month, year);
+  if (proration.workedDays <= 0) throw httpError(`${emp.name} was not employed during this period.`);
+
+  const loans = await getActiveLoansForEmployee(tenantId, emp._id);
+  const loanLines = loanDeductionLines(loans);
+  const proratedGross = proration.isProrated
+    ? round2(emp.gross_salary * (proration.workedDays / proration.totalDays))
+    : emp.gross_salary;
+
+  const amounts = buildPayrollAmounts(proratedGross, allowanceLines, [...sharedDeductionLines, ...loanLines], settings);
+  return { amounts, proration };
+}
+
 /** Tenant's statutory payroll toggles, merged with defaults (both on). */
 async function getPayrollSettings(tenantId) {
   const tenant = await Tenant.findById(tenantId).select('payroll_settings');
@@ -286,33 +452,39 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
 }
 
 async function runPayroll(tenantId, { employee_id, month, year, allowance_lines = [], deduction_lines = [] }, settings) {
-  const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId, status: 'active' });
-  if (!emp) throw httpError('Active employee not found.', 404);
+  // Not restricted to status:'active' — a just-terminated employee still
+  // needs one final, prorated run for their last month.
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId });
+  if (!emp) throw httpError('Employee not found.', 404);
 
   const existing = await PayrollRun.findOne({ tenant_id: tenantId, employee_id, month, year });
   if (existing) throw httpError('Payroll already exists for this employee and period.');
 
   const payrollSettings = settings || await getPayrollSettings(tenantId);
-  const amounts = buildPayrollAmounts(
-    emp.gross_salary,
+  const { amounts, proration } = await computePayrollForEmployee(
+    tenantId, emp, month, year,
     normalizePayLines(allowance_lines),
     normalizePayLines(deduction_lines),
     payrollSettings,
   );
 
-  return PayrollRun.create({
+  const run = await PayrollRun.create({
     tenant_id: tenantId,
     branch_id: emp.branch_id || null,
     employee_id,
     month,
     year,
     status: 'submitted',
+    ...(proration.isProrated ? { proration: { worked_days: proration.workedDays, total_days: proration.totalDays, full_gross_salary: emp.gross_salary } } : {}),
     ...amounts,
   });
+
+  await commitLoanRepayments(tenantId, amounts.deduction_lines.filter((l) => l.loan_id), run._id, month, year);
+  return run;
 }
 
 async function runBulkPayroll(tenantId, { month, year, allowance_lines = [], deduction_lines = [] }) {
-  const employees = await Employee.find({ tenant_id: tenantId, status: 'active' });
+  const employees = await getPayrollEligibleEmployees(tenantId, month, year);
   const sharedAllowances = normalizePayLines(allowance_lines);
   const sharedDeductions = normalizePayLines(deduction_lines);
   const payrollSettings = await getPayrollSettings(tenantId);
@@ -422,8 +594,8 @@ async function runPayrollBatch(tenantId, { month, year, allowance_lines = [], de
   const y = parseInt(year, 10);
   if (!m || !y) throw httpError('month and year are required.');
 
-  const employees = await Employee.find({ tenant_id: tenantId, status: 'active', ...branchFilter });
-  if (!employees.length) throw httpError('No active employees to run payroll for.');
+  const employees = await getPayrollEligibleEmployees(tenantId, m, y, branchFilter);
+  if (!employees.length) throw httpError('No active or period-eligible employees to run payroll for.');
 
   const sharedAllowances = normalizePayLines(allowance_lines);
   const sharedDeductions = normalizePayLines(deduction_lines);
@@ -444,11 +616,14 @@ async function runPayrollBatch(tenantId, { month, year, allowance_lines = [], de
     try {
       const existing = await PayrollRun.findOne({ tenant_id: tenantId, employee_id: emp._id, month: m, year: y });
       if (existing) { result.skipped.push({ name: emp.name, reason: 'Already has payroll for this period' }); continue; }
-      const amounts = buildPayrollAmounts(emp.gross_salary, sharedAllowances, sharedDeductions, payrollSettings);
+      const { amounts, proration } = await computePayrollForEmployee(tenantId, emp, m, y, sharedAllowances, sharedDeductions, payrollSettings);
       const run = await PayrollRun.create({
         tenant_id: tenantId, branch_id: emp.branch_id || null, employee_id: emp._id,
-        month: m, year: y, status: 'submitted', batch_id: batch._id, ...amounts,
+        month: m, year: y, status: 'submitted', batch_id: batch._id,
+        ...(proration.isProrated ? { proration: { worked_days: proration.workedDays, total_days: proration.totalDays, full_gross_salary: emp.gross_salary } } : {}),
+        ...amounts,
       });
+      await commitLoanRepayments(tenantId, amounts.deduction_lines.filter((l) => l.loan_id), run._id, m, y);
       result.created.push({ name: emp.name, payroll_id: run._id });
     } catch (err) {
       result.errors.push({ name: emp.name, message: err.message });
@@ -515,6 +690,10 @@ module.exports = {
   markPayrollBatchPaid,
   getPayrollSettings,
   updatePayrollSettings,
+  createLoan,
+  listLoans,
+  getLoan,
+  cancelLoan,
   uploadEmployeeDocument,
   addEmployeeDocument,
   deleteEmployeeDocument,
