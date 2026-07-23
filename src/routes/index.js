@@ -910,8 +910,19 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
   res.json({ success: true, data });
 });
 
-// ── PAYROLL BATCHES (period pay runs) ──────────────────────────────────────
+// ── PAYROLL SETTINGS ─────────────────────────────────────────────────────
 const hrService = require('../services/hrService');
+
+router.get('/hr/payroll-settings', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const data = await hrService.getPayrollSettings(req.tenant_id);
+  res.json({ success: true, data: { apply_ssnit: data.applySsnit, apply_paye: data.applyPaye } });
+});
+router.patch('/hr/payroll-settings', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const data = await hrService.updatePayrollSettings(req.tenant_id, req.body);
+  res.json({ success: true, data });
+});
+
+// ── PAYROLL BATCHES (period pay runs) ──────────────────────────────────────
 
 router.post('/payroll/batches', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
   const data = await hrService.runPayrollBatch(req.tenant_id, req.body, req.user._id, req.branchFilter);

@@ -22,6 +22,14 @@ const tenantSchema = new Schema({
   trial_ends_at:           Date,
   auto_renew:              { type: Boolean, default: true },
   trial_warning_sent:      { type: Boolean, default: false },
+  // Statutory payroll deductions — some tenants (informal/non-registered
+  // employers, contractor-only shops) don't run formal SSNIT/PAYE. Lets a
+  // business owner turn either off; payroll then computes gross-to-net
+  // without that deduction.
+  payroll_settings: {
+    apply_ssnit: { type: Boolean, default: true },
+    apply_paye:  { type: Boolean, default: true },
+  },
   storefront_settings: {
     delivery_fee:              { type: Number, default: 30 },
     free_delivery_threshold:   { type: Number, default: 500 },
