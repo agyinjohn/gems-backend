@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { User } = require('../models');
 const { resolveTenantForUser } = require('../services/tenantService');
 const { applyBranchScope } = require('./branchScope');
+const auditMiddleware = require('./auditMiddleware');
 
 const authenticate = async (req, res, next) => {
   try {
@@ -29,7 +30,8 @@ const authenticate = async (req, res, next) => {
     // Resolve branch scope now that req.user (and tenant) are populated.
     applyBranchScope(req);
 
-    next();
+    // Audit logging must run after auth (needs req.user); wrap the response here.
+    return auditMiddleware(req, res, next);
   } catch {
     return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
   }

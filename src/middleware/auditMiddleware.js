@@ -1,34 +1,26 @@
 const { AuditLog } = require('../models');
+const { getRequestContext } = require('../utils/requestContext');
 
 const routeMap = [
-  // AUTH
-  { method: 'POST',   pattern: /\/auth\/login/,                    action: 'LOGIN',                 module: 'auth' },
-  { method: 'POST',   pattern: /\/auth\/change-password/,          action: 'CHANGE_PASSWORD',        module: 'auth' },
+  // AUTH  (LOGIN, CHANGE_PASSWORD logged explicitly in the controller)
   { method: 'POST',   pattern: /\/auth\/forgot-password/,          action: 'FORGOT_PASSWORD',        module: 'auth' },
   { method: 'POST',   pattern: /\/auth\/reset-password/,           action: 'RESET_PASSWORD',         module: 'auth' },
-  // USERS
+  // USERS  (CREATE_USER, UPDATE_USER logged explicitly in the controller)
   { method: 'GET',    pattern: /\/users$/,                         action: 'VIEW_USERS',             module: 'users' },
-  { method: 'POST',   pattern: /\/users$/,                         action: 'CREATE_USER',            module: 'users' },
-  { method: 'PUT',    pattern: /\/users\//,                        action: 'UPDATE_USER',            module: 'users' },
   { method: 'DELETE', pattern: /\/users\//,                        action: 'DEACTIVATE_USER',        module: 'users' },
   // BRANCHES
   { method: 'GET',    pattern: /\/branches$/,                      action: 'VIEW_BRANCHES',          module: 'branches' },
   { method: 'POST',   pattern: /\/branches$/,                      action: 'CREATE_BRANCH',          module: 'branches' },
   { method: 'PUT',    pattern: /\/branches\//,                     action: 'UPDATE_BRANCH',          module: 'branches' },
   { method: 'DELETE', pattern: /\/branches\//,                     action: 'DELETE_BRANCH',          module: 'branches' },
-  // INVENTORY
+  // INVENTORY  (CREATE_PRODUCT, UPDATE_PRODUCT, ADJUST_STOCK logged explicitly)
   { method: 'GET',    pattern: /\/products$/,                      action: 'VIEW_PRODUCTS',          module: 'inventory' },
   { method: 'GET',    pattern: /\/products\//,                     action: 'VIEW_PRODUCT',           module: 'inventory' },
-  { method: 'POST',   pattern: /\/products$/,                      action: 'CREATE_PRODUCT',         module: 'inventory' },
-  { method: 'PUT',    pattern: /\/products\//,                     action: 'UPDATE_PRODUCT',         module: 'inventory' },
   { method: 'DELETE', pattern: /\/products\//,                     action: 'DELETE_PRODUCT',         module: 'inventory' },
-  { method: 'POST',   pattern: /\/adjust-stock/,                   action: 'ADJUST_STOCK',           module: 'inventory' },
   { method: 'POST',   pattern: /\/categories$/,                    action: 'CREATE_CATEGORY',        module: 'inventory' },
-  // ORDERS
+  // ORDERS  (CREATE_ORDER, UPDATE_ORDER_STATUS logged explicitly)
   { method: 'GET',    pattern: /\/orders$/,                        action: 'VIEW_ORDERS',            module: 'orders' },
   { method: 'GET',    pattern: /\/orders\//,                       action: 'VIEW_ORDER',             module: 'orders' },
-  { method: 'POST',   pattern: /\/orders$/,                        action: 'CREATE_ORDER',           module: 'orders' },
-  { method: 'PATCH',  pattern: /\/orders\/.*\/status/,             action: 'UPDATE_ORDER_STATUS',    module: 'orders' },
   // POS
   { method: 'POST',   pattern: /\/pos\/sale/,                      action: 'POS_SALE',               module: 'orders' },
   // PROCUREMENT
@@ -50,15 +42,11 @@ const routeMap = [
   { method: 'DELETE', pattern: /\/expenses\//,                     action: 'DELETE_EXPENSE',         module: 'accounting' },
   { method: 'POST',   pattern: /\/journal-entries/,                action: 'CREATE_JOURNAL_ENTRY',   module: 'accounting' },
   { method: 'GET',    pattern: /\/accounting\//,                   action: 'VIEW_FINANCIAL_REPORT',  module: 'accounting' },
-  // HR
-  { method: 'POST',   pattern: /\/employees$/,                     action: 'CREATE_EMPLOYEE',        module: 'hr' },
-  { method: 'PUT',    pattern: /\/employees\//,                    action: 'UPDATE_EMPLOYEE',        module: 'hr' },
-  { method: 'PATCH',  pattern: /\/employees\/.*\/terminate/,       action: 'TERMINATE_EMPLOYEE',     module: 'hr' },
-  { method: 'POST',   pattern: /\/payroll\/bulk/,                  action: 'RUN_BULK_PAYROLL',       module: 'hr' },
+  // HR  (CREATE_EMPLOYEE, UPDATE_EMPLOYEE, TERMINATE_EMPLOYEE, RUN_PAYROLL,
+  //      RUN_BULK_PAYROLL logged explicitly in the controller)
   { method: 'POST',   pattern: /\/attendance/,                     action: 'MARK_ATTENDANCE',        module: 'hr' },
   { method: 'POST',   pattern: /\/leave-requests$/,                action: 'CREATE_LEAVE_REQUEST',   module: 'hr' },
   { method: 'PATCH',  pattern: /\/leave-requests\//,               action: 'UPDATE_LEAVE_REQUEST',   module: 'hr' },
-  { method: 'POST',   pattern: /\/payroll$/,                       action: 'RUN_PAYROLL',            module: 'hr' },
   { method: 'PATCH',  pattern: /\/payroll\/.*\/approve/,           action: 'APPROVE_PAYROLL',        module: 'hr' },
   // CRM
   { method: 'POST',   pattern: /\/customers$/,                     action: 'CREATE_CUSTOMER',        module: 'crm' },
@@ -175,7 +163,7 @@ const auditMiddleware = (req, res, next) => {
         ...(req.body?.amount          && { amount: req.body.amount }),
         ...(req.params?.id            && { record_id: req.params.id }),
       },
-      ip:     req.ip || req.headers['x-forwarded-for'] || null,
+      ...getRequestContext(req),
       status,
     }).catch(() => {});
 

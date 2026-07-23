@@ -13,6 +13,9 @@ const errorHandler = require('./middleware/errorHandler');
 connectDB();
 
 const app = express();
+// Trust the hosting proxy (Render/Vercel/etc.) so req.ip reflects the real
+// client address for audit logging, not the proxy's.
+app.set('trust proxy', true);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 

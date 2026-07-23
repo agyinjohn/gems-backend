@@ -512,6 +512,8 @@ const auditLogSchema = new Schema({
   description: { type: String, required: true }, // human readable
   metadata:    { type: Schema.Types.Mixed },      // extra data e.g. { order_number, total }
   ip:          String,
+  user_agent:  String,                            // raw browser/device user-agent
+  device:      String,                            // parsed label e.g. "Chrome on Windows · Desktop"
   status:      { type: String, enum: ['success','failed'], default: 'success' },
 }, { timestamps: true });
 auditLogSchema.index({ tenant_id: 1, createdAt: -1 });
