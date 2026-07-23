@@ -731,10 +731,29 @@ router.get('/notifications', authenticate, async (req, res) => {
 });
 
 // EMPLOYEE SELF-SERVICE
+// Resolves the Employee record for the logged-in user: match by the explicit
+// user_id link first, then fall back to a case-insensitive email match (User
+// emails are always stored lowercase; Employee emails aren't), auto-linking
+// on first successful match so future lookups hit the fast user_id path.
+async function resolveEssEmployee(req) {
+  let employee = await Employee.findOne({ user_id: req.user._id });
+  if (!employee && req.user.email) {
+    const escaped = req.user.email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    employee = await Employee.findOne({ email: new RegExp(`^${escaped}$`, 'i') });
+  }
+  if (employee && !employee.user_id) {
+    employee.user_id = req.user._id;
+    await employee.save().catch(() => {});
+  }
+  return employee;
+}
+
 router.get('/ess/me', authenticate, async (req, res) => {
   const hrService = require('../services/hrService');
-  const employee = await Employee.findOne({ user_id: req.user._id }).populate('department_id', 'name').populate('manager_id', 'name');
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: null });
+  await employee.populate('department_id', 'name');
+  await employee.populate('manager_id', 'name');
   const leaveTypes = await hrService.listLeaveTypes(employee.tenant_id || req.user.tenant_id);
   res.json({
     success: true,
@@ -748,7 +767,7 @@ router.get('/ess/me', authenticate, async (req, res) => {
   });
 });
 router.get('/ess/leave-requests', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: [] });
   const data = await LeaveRequest.find({ employee_id: employee._id }).sort({ createdAt: -1 });
   res.json({ success: true, data });
@@ -756,7 +775,7 @@ router.get('/ess/leave-requests', authenticate, async (req, res) => {
 router.post('/ess/leave-requests', authenticate, async (req, res) => {
   const { leave_type, start_date, end_date, reason } = req.body;
   if (!start_date || !end_date) return res.status(400).json({ success: false, message: 'start_date and end_date required.' });
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
   const tenant_id = employee.tenant_id || req.user.tenant_id;
   if (!tenant_id) return res.status(400).json({ success: false, message: 'Could not determine tenant for this employee.' });
@@ -766,19 +785,8 @@ router.post('/ess/leave-requests', authenticate, async (req, res) => {
   res.status(201).json({ success: true, data });
 });
 router.get('/ess/payslips', authenticate, async (req, res) => {
-  const { User } = require('../models');
-  let employee = await Employee.findOne({ user_id: req.user._id });
-  // Fallback: match by email if no user_id link exists
-  if (!employee && req.user.email) {
-    const user = await User.findById(req.user._id).select('email');
-    if (user?.email) employee = await Employee.findOne({ email: user.email });
-  }
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: [] });
-  // Auto-link for future requests
-  if (!employee.user_id) {
-    employee.user_id = req.user._id;
-    await employee.save().catch(() => {});
-  }
   const filter = { employee_id: employee._id };
   if (req.query.month) filter.month = parseInt(req.query.month);
   if (req.query.year)  filter.year  = parseInt(req.query.year);
@@ -787,7 +795,7 @@ router.get('/ess/payslips', authenticate, async (req, res) => {
 });
 
 router.patch('/ess/leave-requests/:id/cancel', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found.' });
   const leave = await LeaveRequest.findOne({ _id: req.params.id, employee_id: employee._id });
   if (!leave) return res.status(404).json({ success: false, message: 'Leave request not found.' });
@@ -798,13 +806,13 @@ router.patch('/ess/leave-requests/:id/cancel', authenticate, async (req, res) =>
 });
 
 router.get('/ess/attendance', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: [] });
   const data = await Attendance.find({ employee_id: employee._id }).sort({ date: -1 }).limit(30);
   res.json({ success: true, data });
 });
 router.post('/ess/attendance/clock-in', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
   const hrService = require('../services/hrService');
   try {
@@ -813,7 +821,7 @@ router.post('/ess/attendance/clock-in', authenticate, async (req, res) => {
   } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
 });
 router.post('/ess/attendance/clock-out', authenticate, async (req, res) => {
-  const employee = await Employee.findOne({ user_id: req.user._id });
+  const employee = await resolveEssEmployee(req);
   if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
   const hrService = require('../services/hrService');
   try {
