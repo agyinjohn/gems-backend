@@ -1,4 +1,4 @@
-const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, Attendance } = require('../models');
+const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
 
@@ -238,9 +238,29 @@ function normalizePayLines(lines) {
     .filter((line) => line.name && line.amount > 0);
 }
 
-function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines) {
+/** Tenant's statutory payroll toggles, merged with defaults (both on). */
+async function getPayrollSettings(tenantId) {
+  const tenant = await Tenant.findById(tenantId).select('payroll_settings');
+  return {
+    applySsnit: tenant?.payroll_settings?.apply_ssnit ?? true,
+    applyPaye: tenant?.payroll_settings?.apply_paye ?? true,
+  };
+}
+
+async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye }) {
+  const update = {};
+  if (apply_ssnit !== undefined) update['payroll_settings.apply_ssnit'] = !!apply_ssnit;
+  if (apply_paye !== undefined) update['payroll_settings.apply_paye'] = !!apply_paye;
+  const tenant = await Tenant.findByIdAndUpdate(tenantId, { $set: update }, { new: true }).select('payroll_settings');
+  return {
+    apply_ssnit: tenant?.payroll_settings?.apply_ssnit ?? true,
+    apply_paye: tenant?.payroll_settings?.apply_paye ?? true,
+  };
+}
+
+function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, settings = {}) {
   const allowanceTotal = round2(allowanceLines.reduce((sum, line) => sum + line.amount, 0));
-  const statutory = calculateStatutory(grossSalary, allowanceTotal);
+  const statutory = calculateStatutory(grossSalary, allowanceTotal, settings);
   const statutoryDeductions = [
     { name: 'PAYE', amount: statutory.paye },
     { name: 'SSNIT (employee 5.5%)', amount: statutory.ssnit_employee },
@@ -265,17 +285,19 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines) {
   };
 }
 
-async function runPayroll(tenantId, { employee_id, month, year, allowance_lines = [], deduction_lines = [] }) {
+async function runPayroll(tenantId, { employee_id, month, year, allowance_lines = [], deduction_lines = [] }, settings) {
   const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId, status: 'active' });
   if (!emp) throw httpError('Active employee not found.', 404);
 
   const existing = await PayrollRun.findOne({ tenant_id: tenantId, employee_id, month, year });
   if (existing) throw httpError('Payroll already exists for this employee and period.');
 
+  const payrollSettings = settings || await getPayrollSettings(tenantId);
   const amounts = buildPayrollAmounts(
     emp.gross_salary,
     normalizePayLines(allowance_lines),
     normalizePayLines(deduction_lines),
+    payrollSettings,
   );
 
   return PayrollRun.create({
@@ -293,6 +315,7 @@ async function runBulkPayroll(tenantId, { month, year, allowance_lines = [], ded
   const employees = await Employee.find({ tenant_id: tenantId, status: 'active' });
   const sharedAllowances = normalizePayLines(allowance_lines);
   const sharedDeductions = normalizePayLines(deduction_lines);
+  const payrollSettings = await getPayrollSettings(tenantId);
   const results = { created: [], skipped: [], errors: [] };
 
   for (const emp of employees) {
@@ -308,7 +331,7 @@ async function runBulkPayroll(tenantId, { month, year, allowance_lines = [], ded
         year,
         allowance_lines: sharedAllowances,
         deduction_lines: sharedDeductions,
-      });
+      }, payrollSettings);
       results.created.push({ employee_id: emp._id, name: emp.name, payroll_id: row._id });
     } catch (err) {
       results.errors.push({ employee_id: emp._id, name: emp.name, message: err.message });
@@ -405,6 +428,7 @@ async function runPayrollBatch(tenantId, { month, year, allowance_lines = [], de
   const sharedAllowances = normalizePayLines(allowance_lines);
   const sharedDeductions = normalizePayLines(deduction_lines);
   const branchId = branchFilter.branch_id || null;
+  const payrollSettings = await getPayrollSettings(tenantId);
 
   // Reuse an open draft batch for the same period + scope, else create one.
   let batch = await PayrollBatch.findOne({ tenant_id: tenantId, month: m, year: y, branch_id: branchId, status: 'draft' });
@@ -420,7 +444,7 @@ async function runPayrollBatch(tenantId, { month, year, allowance_lines = [], de
     try {
       const existing = await PayrollRun.findOne({ tenant_id: tenantId, employee_id: emp._id, month: m, year: y });
       if (existing) { result.skipped.push({ name: emp.name, reason: 'Already has payroll for this period' }); continue; }
-      const amounts = buildPayrollAmounts(emp.gross_salary, sharedAllowances, sharedDeductions);
+      const amounts = buildPayrollAmounts(emp.gross_salary, sharedAllowances, sharedDeductions, payrollSettings);
       const run = await PayrollRun.create({
         tenant_id: tenantId, branch_id: emp.branch_id || null, employee_id: emp._id,
         month: m, year: y, status: 'submitted', batch_id: batch._id, ...amounts,
@@ -489,6 +513,8 @@ module.exports = {
   getPayrollBatch,
   approvePayrollBatch,
   markPayrollBatchPaid,
+  getPayrollSettings,
+  updatePayrollSettings,
   uploadEmployeeDocument,
   addEmployeeDocument,
   deleteEmployeeDocument,

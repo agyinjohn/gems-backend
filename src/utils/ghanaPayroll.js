@@ -34,14 +34,24 @@ function calculatePaye(taxableMonthly) {
   return round2(tax);
 }
 
-function calculateStatutory(grossSalary, extraAllowances = 0) {
+/**
+ * @param {object} options
+ * @param {boolean} [options.applySsnit=true] - false for tenants that don't run
+ *   formal SSNIT (e.g. informal/non-registered employers).
+ * @param {boolean} [options.applyPaye=true] - false for tenants that don't
+ *   withhold income tax.
+ */
+function calculateStatutory(grossSalary, extraAllowances = 0, options = {}) {
+  const { applySsnit = true, applyPaye = true } = options;
   const gross = round2(parseFloat(grossSalary) || 0);
   const allowances = round2(parseFloat(extraAllowances) || 0);
   const taxableGross = gross + allowances;
-  const ssnitEmployee = round2(taxableGross * SSNIT_EMPLOYEE_RATE);
-  const ssnitEmployer = round2(taxableGross * SSNIT_EMPLOYER_RATE);
+  const ssnitEmployee = applySsnit ? round2(taxableGross * SSNIT_EMPLOYEE_RATE) : 0;
+  const ssnitEmployer = applySsnit ? round2(taxableGross * SSNIT_EMPLOYER_RATE) : 0;
+  // PAYE relief for the SSNIT employee contribution only applies if it was
+  // actually withheld.
   const taxableIncome = Math.max(0, taxableGross - ssnitEmployee);
-  const paye = calculatePaye(taxableIncome);
+  const paye = applyPaye ? calculatePaye(taxableIncome) : 0;
   const totalDeductions = round2(ssnitEmployee + paye);
   const net = round2(taxableGross - totalDeductions);
 
