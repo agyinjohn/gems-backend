@@ -185,9 +185,9 @@ async function getOverview(tenantId, query) {
       $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] },
       ...branchFilter(branchId),
     }),
-    Employee.countDocuments({ tenant_id: tenantId, status: 'active' }),
+    Employee.countDocuments({ tenant_id: tenantId, status: 'active', ...branchFilter(branchId) }),
     Lead.aggregate([
-      { $match: { tenant_id: tenantId, stage: { $nin: ['won', 'lost'] } } },
+      { $match: { tenant_id: tenantId, stage: { $nin: ['won', 'lost'] }, ...branchFilter(branchId) } },
       { $group: { _id: null, count: { $sum: 1 }, value: { $sum: '$value' } } },
     ]),
     PurchaseOrder.aggregate([
@@ -226,7 +226,7 @@ async function getOverview(tenantId, query) {
     ]),
   ]);
 
-  const expMatch = { tenant_id: tenantId, ...expenseDateMatch(from, to) };
+  const expMatch = { tenant_id: tenantId, ...expenseDateMatch(from, to), ...branchFilter(branchId) };
   const [expRow] = await Expense.aggregate([{ $match: expMatch }, { $group: { _id: null, total: { $sum: '$amount' } } }]);
   const expenses = expRow?.total || 0;
   const netProfit = (sales.revenue || 0) - expenses;
@@ -484,11 +484,11 @@ async function getFinanceReport(tenantId, query) {
   const [sales, expAgg, byCat, glSummary] = await Promise.all([
     paidOrderStats(tenantId, from, to, branchId),
     Expense.aggregate([
-      { $match: { tenant_id: tenantId, ...expenseDateMatch(from, to) } },
+      { $match: { tenant_id: tenantId, ...expenseDateMatch(from, to), ...branchFilter(branchId) } },
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]),
     Expense.aggregate([
-      { $match: { tenant_id: tenantId, ...expenseDateMatch(from, to) } },
+      { $match: { tenant_id: tenantId, ...expenseDateMatch(from, to), ...branchFilter(branchId) } },
       { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, total: { $sum: '$amount' } } },
       { $sort: { total: -1 } },
     ]),
@@ -627,6 +627,7 @@ async function getCrmReport(tenantId, query) {
           tenant_id: tenantId,
           payment_status: 'paid',
           ...orderDateMatch(from, to),
+          ...bf,
         },
       },
       {
