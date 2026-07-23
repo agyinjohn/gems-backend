@@ -1,6 +1,8 @@
-const { Employee, User, Department, LeaveRequest, PayrollRun, Attendance } = require('../models');
+const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, Attendance } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -376,6 +378,102 @@ async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
   };
 }
 
+// ── PAYROLL BATCHES (period pay runs) ──────────────────────────────────────
+async function recomputeBatchTotals(tenantId, batchId) {
+  const runs = await PayrollRun.find({ tenant_id: tenantId, batch_id: batchId });
+  const t = runs.reduce((a, r) => ({
+    total_gross:          a.total_gross + (r.gross_salary || 0),
+    total_allowances:     a.total_allowances + (r.allowances || 0),
+    total_deductions:     a.total_deductions + (r.deductions || 0),
+    total_paye:           a.total_paye + (r.paye || 0),
+    total_ssnit_employee: a.total_ssnit_employee + (r.ssnit_employee || 0),
+    total_ssnit_employer: a.total_ssnit_employer + (r.ssnit_employer || 0),
+    total_net:            a.total_net + (r.net_salary || 0),
+  }), { total_gross: 0, total_allowances: 0, total_deductions: 0, total_paye: 0, total_ssnit_employee: 0, total_ssnit_employer: 0, total_net: 0 });
+  await PayrollBatch.findByIdAndUpdate(batchId, { ...t, employee_count: runs.length });
+}
+
+/** Run payroll for every active employee in scope, grouped under one batch. */
+async function runPayrollBatch(tenantId, { month, year, allowance_lines = [], deduction_lines = [] }, userId, branchFilter = {}) {
+  const m = parseInt(month, 10);
+  const y = parseInt(year, 10);
+  if (!m || !y) throw httpError('month and year are required.');
+
+  const employees = await Employee.find({ tenant_id: tenantId, status: 'active', ...branchFilter });
+  if (!employees.length) throw httpError('No active employees to run payroll for.');
+
+  const sharedAllowances = normalizePayLines(allowance_lines);
+  const sharedDeductions = normalizePayLines(deduction_lines);
+  const branchId = branchFilter.branch_id || null;
+
+  // Reuse an open draft batch for the same period + scope, else create one.
+  let batch = await PayrollBatch.findOne({ tenant_id: tenantId, month: m, year: y, branch_id: branchId, status: 'draft' });
+  if (!batch) {
+    batch = await PayrollBatch.create({
+      tenant_id: tenantId, branch_id: branchId, month: m, year: y,
+      label: `${MONTHS[m - 1]} ${y}`, status: 'draft', created_by: userId,
+    });
+  }
+
+  const result = { created: [], skipped: [], errors: [] };
+  for (const emp of employees) {
+    try {
+      const existing = await PayrollRun.findOne({ tenant_id: tenantId, employee_id: emp._id, month: m, year: y });
+      if (existing) { result.skipped.push({ name: emp.name, reason: 'Already has payroll for this period' }); continue; }
+      const amounts = buildPayrollAmounts(emp.gross_salary, sharedAllowances, sharedDeductions);
+      const run = await PayrollRun.create({
+        tenant_id: tenantId, branch_id: emp.branch_id || null, employee_id: emp._id,
+        month: m, year: y, status: 'submitted', batch_id: batch._id, ...amounts,
+      });
+      result.created.push({ name: emp.name, payroll_id: run._id });
+    } catch (err) {
+      result.errors.push({ name: emp.name, message: err.message });
+    }
+  }
+
+  await recomputeBatchTotals(tenantId, batch._id);
+  const fresh = await PayrollBatch.findById(batch._id);
+  return { batch: fresh, ...result };
+}
+
+async function listPayrollBatches(tenantId, branchFilter = {}) {
+  return PayrollBatch.find({ tenant_id: tenantId, ...branchFilter }).sort({ year: -1, month: -1, createdAt: -1 });
+}
+
+async function getPayrollBatch(tenantId, id) {
+  const batch = await PayrollBatch.findOne({ _id: id, tenant_id: tenantId });
+  if (!batch) throw httpError('Pay run not found.', 404);
+  const runs = await PayrollRun.find({ tenant_id: tenantId, batch_id: id })
+    .populate('employee_id', 'name employee_code payment_method bank_name bank_account_name bank_account_number bank_branch momo_number ssnit_number tin');
+  return {
+    batch,
+    runs: runs.map((r) => ({ ...r.toJSON(), employee_name: r.employee_id?.name || '—', employee: r.employee_id })),
+  };
+}
+
+async function approvePayrollBatch(tenantId, id, userId) {
+  const batch = await PayrollBatch.findOne({ _id: id, tenant_id: tenantId });
+  if (!batch) throw httpError('Pay run not found.', 404);
+  if (batch.status !== 'draft') throw httpError('Only draft pay runs can be approved.');
+  await PayrollRun.updateMany({ tenant_id: tenantId, batch_id: id }, { status: 'approved', approved_by: userId });
+  batch.status = 'approved';
+  batch.approved_by = userId;
+  batch.approved_at = new Date();
+  await batch.save();
+  return batch;
+}
+
+async function markPayrollBatchPaid(tenantId, id) {
+  const batch = await PayrollBatch.findOne({ _id: id, tenant_id: tenantId });
+  if (!batch) throw httpError('Pay run not found.', 404);
+  if (batch.status !== 'approved') throw httpError('Only approved pay runs can be marked paid.');
+  await PayrollRun.updateMany({ tenant_id: tenantId, batch_id: id }, { status: 'paid' });
+  batch.status = 'paid';
+  batch.paid_at = new Date();
+  await batch.save();
+  return batch;
+}
+
 module.exports = {
   listEmployees,
   getEmployee,
@@ -386,6 +484,11 @@ module.exports = {
   approveLeaveRequest,
   runPayroll,
   runBulkPayroll,
+  runPayrollBatch,
+  listPayrollBatches,
+  getPayrollBatch,
+  approvePayrollBatch,
+  markPayrollBatchPaid,
   uploadEmployeeDocument,
   addEmployeeDocument,
   deleteEmployeeDocument,

@@ -910,6 +910,66 @@ router.patch('/payroll/:id/approve', authenticate, requireTenant, authorize('bus
   res.json({ success: true, data });
 });
 
+// ── PAYROLL BATCHES (period pay runs) ──────────────────────────────────────
+const hrService = require('../services/hrService');
+
+router.post('/payroll/batches', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.runPayrollBatch(req.tenant_id, req.body, req.user._id, req.branchFilter);
+  res.status(201).json({ success: true, data });
+});
+
+router.get('/payroll/batches', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.listPayrollBatches(req.tenant_id, req.branchFilter);
+  res.json({ success: true, data });
+});
+
+router.get('/payroll/batches/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.getPayrollBatch(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+
+router.patch('/payroll/batches/:id/approve', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+  const batch = await hrService.approvePayrollBatch(req.tenant_id, req.params.id, req.user._id);
+  const ref = `BATCH-${batch.label?.replace(/\s+/g, '-') || batch._id}`;
+  // One aggregate GL entry + payment log for the whole pay run.
+  await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${ref}`, amount: batch.total_net, method: 'bank_transfer', status: 'success', description: `Payroll approved — ${batch.label} (${batch.employee_count} employees)`, source_id: batch._id, recorded_by: req.user._id });
+  await accounting.postPayrollEntry({
+    tenantId: req.tenant_id,
+    grossSalary: batch.total_gross,
+    allowances: batch.total_allowances || 0,
+    paye: batch.total_paye || 0,
+    ssnitEmployee: batch.total_ssnit_employee || 0,
+    ssnitEmployer: batch.total_ssnit_employer || 0,
+    netSalary: batch.total_net,
+    reference: ref,
+    date: new Date(),
+    sourceId: batch._id,
+    createdBy: req.user._id,
+    payFromCash: true,
+  }).catch((err) => console.error('[Payroll] Batch GL post failed:', err.message));
+  res.json({ success: true, data: batch });
+});
+
+router.patch('/payroll/batches/:id/mark-paid', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
+  const data = await hrService.markPayrollBatchPaid(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+
+// Bank payment file (CSV) — one row per employee with pay + bank details
+router.get('/payroll/batches/:id/bank-file', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const { batch, runs } = await hrService.getPayrollBatch(req.tenant_id, req.params.id);
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const header = ['Employee Code', 'Employee Name', 'Payment Method', 'Bank', 'Branch', 'Account Name', 'Account Number', 'MoMo Number', 'Net Pay (GHS)'];
+  const rows = runs.map((r) => {
+    const e = r.employee || {};
+    return [e.employee_code, r.employee_name, e.payment_method || 'bank', e.bank_name, e.bank_branch, e.bank_account_name, e.bank_account_number, e.momo_number, (r.net_salary || 0).toFixed(2)].map(esc).join(',');
+  });
+  const csv = [header.map(esc).join(','), ...rows].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="bank-file-${(batch.label || 'payrun').replace(/\s+/g, '-')}.csv"`);
+  res.send(csv);
+});
+
 // CRM - CUSTOMERS
 router.get('/customers', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const data = await Customer.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).sort({ createdAt: -1 });
