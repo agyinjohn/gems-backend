@@ -1,4 +1,5 @@
 const { AuditLog } = require('../models');
+const { getRequestContext } = require('./requestContext');
 
 const audit = async (req, action, module, description, metadata = {}, status = 'success') => {
   try {
@@ -13,7 +14,7 @@ const audit = async (req, action, module, description, metadata = {}, status = '
       module,
       description,
       metadata,
-      ip:          req.ip || req.headers['x-forwarded-for'] || null,
+      ...getRequestContext(req),
       status,
     });
   } catch (e) {

@@ -7,7 +7,6 @@ const { requireModule } = require('../middleware/moduleAccess');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const { getModeMeta } = require('../config/productMode');
 const storefrontDocsRouter = require('./storefrontDocs');
-const auditMiddleware = require('../middleware/auditMiddleware');
 const auth = require('../controllers/authController');
 const users = require('../controllers/usersController');
 const dashboard = require('../controllers/dashboardController');
@@ -53,11 +52,9 @@ router.use(storefrontDocsRouter);
 // Restrict API surface when PRODUCT_MODE=pos|storefront|accounting
 router.use(productModeGate);
 
-// Audit middleware â€” only runs for authenticated requests, skips public routes
-router.use((req, res, next) => {
-  if (req.user) return auditMiddleware(req, res, next);
-  next();
-});
+// Audit logging is resolved inside the `authenticate` middleware — it must run
+// after auth (needs req.user), and per-route authenticate runs after any
+// router.use() here, so a router-level middleware would see no req.user.
 
 // Branch scoping (req.branchFilter) is resolved inside the `authenticate`
 // middleware — it must run after auth, and per-route authenticate runs after
