@@ -345,6 +345,16 @@ const employeeSchema = new Schema({
   national_id:      String,
   address:          String,
   employment_type:  { type: String, enum: ['full_time','part_time','contract','intern'], default: 'full_time' },
+  // Statutory (Ghana) — required for SSNIT & GRA PAYE filing
+  ssnit_number:     String,
+  tin:              String, // Tax Identification Number
+  // Payment / bank details — how the employee is paid
+  payment_method:   { type: String, enum: ['bank','momo','cash'], default: 'bank' },
+  bank_name:        String,
+  bank_account_name:String,
+  bank_account_number: String,
+  bank_branch:      String,
+  momo_number:      String,
   // Emergency contact
   emergency_name:   String,
   emergency_phone:  String,
@@ -402,8 +412,33 @@ const payrollRunSchema = new Schema({
   net_salary:   { type: Number, required: true },
   status:       { type: String, enum: ['draft','submitted','approved','paid'], default: 'submitted' },
   approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+  batch_id:     { type: Schema.Types.ObjectId, ref: 'PayrollBatch' },
 }, { timestamps: true });
 payrollRunSchema.index({ tenant_id: 1, employee_id: 1, month: 1, year: 1 }, { unique: true });
+
+// PAYROLL BATCH — one pay run for a period grouping all employees' payslips
+const payrollBatchSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
+  month:        { type: Number, required: true },
+  year:         { type: Number, required: true },
+  label:        String, // e.g. "January 2025"
+  status:       { type: String, enum: ['draft','approved','paid'], default: 'draft' },
+  employee_count:       { type: Number, default: 0 },
+  total_gross:          { type: Number, default: 0 },
+  total_allowances:     { type: Number, default: 0 },
+  total_deductions:     { type: Number, default: 0 },
+  total_paye:           { type: Number, default: 0 },
+  total_ssnit_employee: { type: Number, default: 0 },
+  total_ssnit_employer: { type: Number, default: 0 },
+  total_net:            { type: Number, default: 0 },
+  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+  approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+  approved_at:  Date,
+  paid_at:      Date,
+  journal_entry_id: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
+}, { timestamps: true });
+payrollBatchSchema.index({ tenant_id: 1, year: -1, month: -1 });
 
 // CARD AUTHORIZATION
 const cardAuthorizationSchema = new Schema({
@@ -918,7 +953,7 @@ const allSchemas = [
   stockMovementSchema, customerSchema, leadSchema, contactHistorySchema,
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
-  attendanceSchema, leaveRequestSchema, payrollRunSchema, taxRateSchema,
+  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
@@ -959,6 +994,7 @@ module.exports = {
   Attendance:     mongoose.model('Attendance', attendanceSchema),
   LeaveRequest:   mongoose.model('LeaveRequest', leaveRequestSchema),
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
+  PayrollBatch:   mongoose.model('PayrollBatch', payrollBatchSchema),
   TaxRate:        mongoose.model('TaxRate', taxRateSchema),
   Cart:           mongoose.model('Cart', cartSchema),
   PaymentLog:        mongoose.model('PaymentLog', paymentLogSchema),
