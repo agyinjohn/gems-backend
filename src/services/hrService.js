@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, EmployeeLoan, Attendance, Tenant } = require('../models');
+const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
 
@@ -15,26 +15,154 @@ function normalizeRefId(value) {
   return str || null;
 }
 
-function leaveDays(start, end) {
-  return Math.ceil((new Date(end) - new Date(start)) / 86400000) + 1;
+// ── PUBLIC HOLIDAYS ──────────────────────────────────────────────────────────
+// Excluded from leave-day counts (see leaveDays) and used to distinguish an
+// unworked holiday from an unexplained absence.
+
+function ymd(d) {
+  const x = new Date(d);
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+}
+
+async function createHoliday(tenantId, { name, date, is_recurring }, userId) {
+  if (!name || !date) throw httpError('name and date are required.');
+  return PublicHoliday.create({ tenant_id: tenantId, name, date: new Date(date), is_recurring: !!is_recurring, created_by: userId });
+}
+
+async function deleteHoliday(tenantId, id) {
+  const holiday = await PublicHoliday.findOneAndDelete({ _id: id, tenant_id: tenantId });
+  if (!holiday) throw httpError('Holiday not found.', 404);
+  return holiday;
+}
+
+/** Holidays for a given year — recurring ones are remapped onto that year. */
+async function listHolidays(tenantId, year) {
+  const all = await PublicHoliday.find({ tenant_id: tenantId }).sort({ date: 1 });
+  if (!year) return all;
+  const y = parseInt(year, 10);
+  return all
+    .map((h) => {
+      if (!h.is_recurring) return h;
+      const d = new Date(h.date);
+      const mapped = new Date(y, d.getMonth(), d.getDate());
+      return { ...h.toJSON(), id: h._id, date: mapped };
+    })
+    .filter((h) => h.is_recurring || new Date(h.date).getFullYear() === y);
+}
+
+/** Set of 'YYYY-MM-DD' strings that are public holidays anywhere in [start, end]. */
+async function getHolidaySet(tenantId, start, end) {
+  const startYear = new Date(start).getFullYear();
+  const endYear = new Date(end).getFullYear();
+  const years = [];
+  for (let y = startYear; y <= endYear; y++) years.push(y);
+  const perYear = await Promise.all(years.map((y) => listHolidays(tenantId, y)));
+  const set = new Set();
+  for (const list of perYear) {
+    for (const h of list) {
+      const d = ymd(h.date);
+      if (d >= ymd(start) && d <= ymd(end)) set.add(d);
+    }
+  }
+  return set;
+}
+
+// ── LEAVE TYPES ──────────────────────────────────────────────────────────────
+// Tenant-configurable leave categories, each with its own entitlement — so
+// maternity/paternity/compassionate/study leave don't silently share (and get
+// blocked by) the annual-leave bucket.
+
+const DEFAULT_LEAVE_TYPES = [
+  { name: 'Annual Leave',       code: 'annual',       default_days: 21, paid: true },
+  { name: 'Sick Leave',         code: 'sick',         default_days: 10, paid: true },
+  { name: 'Maternity Leave',    code: 'maternity',    default_days: 84, paid: true },
+  { name: 'Paternity Leave',    code: 'paternity',    default_days: 7,  paid: true },
+  { name: 'Compassionate Leave',code: 'compassionate',default_days: 5,  paid: true },
+  { name: 'Study Leave',        code: 'study',        default_days: 10, paid: false },
+  { name: 'Unpaid Leave',       code: 'unpaid',       default_days: 0,  paid: false },
+];
+
+/** Lazily seeds a tenant's default leave types the first time they're listed. */
+async function listLeaveTypes(tenantId) {
+  let types = await LeaveType.find({ tenant_id: tenantId }).sort('name');
+  if (!types.length) {
+    await LeaveType.insertMany(DEFAULT_LEAVE_TYPES.map((d) => ({ tenant_id: tenantId, ...d })));
+    types = await LeaveType.find({ tenant_id: tenantId }).sort('name');
+  }
+  return types;
+}
+
+async function createLeaveType(tenantId, { name, code, default_days, paid }, userId) {
+  if (!name) throw httpError('name is required.');
+  const slug = (code || name).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  const exists = await LeaveType.findOne({ tenant_id: tenantId, code: slug });
+  if (exists) throw httpError('A leave type with this code already exists.');
+  return LeaveType.create({
+    tenant_id: tenantId, name, code: slug,
+    default_days: Math.max(0, parseInt(default_days, 10) || 0),
+    paid: paid !== false, created_by: userId,
+  });
+}
+
+async function updateLeaveType(tenantId, id, { name, default_days, paid, is_active }) {
+  const type = await LeaveType.findOne({ _id: id, tenant_id: tenantId });
+  if (!type) throw httpError('Leave type not found.', 404);
+  if (name !== undefined) type.name = name;
+  if (default_days !== undefined) type.default_days = Math.max(0, parseInt(default_days, 10) || 0);
+  if (paid !== undefined) type.paid = !!paid;
+  if (is_active !== undefined) type.is_active = !!is_active;
+  await type.save();
+  return type;
+}
+
+/** Working days (excludes weekends and public holidays) between two dates, inclusive. */
+async function leaveDays(tenantId, start, end) {
+  const holidays = await getHolidaySet(tenantId, start, end);
+  let count = 0;
+  const cursor = new Date(start);
+  const last = new Date(end);
+  while (cursor <= last) {
+    const dow = cursor.getDay();
+    if (dow !== 0 && dow !== 6 && !holidays.has(ymd(cursor))) count += 1;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return count;
 }
 
 const DEFAULT_ANNUAL_ENTITLEMENT = 21;
 const DEFAULT_SICK_ENTITLEMENT = 10;
 
-function getLeaveBalances(employee) {
-  const annualEntitlement = employee.annual_leave_entitlement ?? DEFAULT_ANNUAL_ENTITLEMENT;
-  const sickEntitlement = employee.sick_leave_entitlement ?? DEFAULT_SICK_ENTITLEMENT;
-  const annualUsed = employee.leave_balances?.annual_used ?? 0;
-  const sickUsed = employee.leave_balances?.sick_used ?? 0;
-  return {
-    annual_entitlement: annualEntitlement,
-    sick_entitlement: sickEntitlement,
-    annual_remaining: Math.max(0, annualEntitlement - annualUsed),
-    sick_remaining: Math.max(0, sickEntitlement - sickUsed),
-    annual_used: annualUsed,
-    sick_used: sickUsed,
-  };
+/**
+ * Per-leave-type balances for an employee. `leaveTypes` should be fetched once
+ * (via listLeaveTypes) and passed in — callers that build balances for many
+ * employees at once (listEmployees) must not re-fetch it per employee.
+ */
+function getLeaveBalances(employee, leaveTypes = []) {
+  const entitlements = employee.leave_entitlements || [];
+  const byCode = Object.fromEntries(entitlements.map((e) => [e.code, e]));
+
+  return leaveTypes.filter((lt) => lt.is_active !== false).map((lt) => {
+    const existing = byCode[lt.code];
+    let entitlement_days = existing?.entitlement_days ?? lt.default_days;
+    let used_days = existing?.used_days ?? 0;
+    // Fall back to the legacy annual/sick fields when no per-type entry has
+    // been created yet for this employee (pre-migration data).
+    if (!existing && lt.code === 'annual') {
+      entitlement_days = employee.annual_leave_entitlement ?? lt.default_days ?? DEFAULT_ANNUAL_ENTITLEMENT;
+      used_days = employee.leave_balances?.annual_used ?? 0;
+    } else if (!existing && lt.code === 'sick') {
+      entitlement_days = employee.sick_leave_entitlement ?? lt.default_days ?? DEFAULT_SICK_ENTITLEMENT;
+      used_days = employee.leave_balances?.sick_used ?? 0;
+    }
+    return {
+      code: lt.code,
+      name: lt.name,
+      paid: lt.paid,
+      entitlement_days,
+      used_days,
+      remaining_days: Math.max(0, entitlement_days - used_days),
+    };
+  });
 }
 
 /** Sum of outstanding active-loan balances per employee id. */
@@ -53,7 +181,10 @@ async function listEmployees(tenantId, branchFilter = {}) {
     .populate('manager_id', 'name employee_code')
     .populate('user_id', 'name email role')
     .sort('name');
-  const loanMap = await getActiveLoanBalances(tenantId, data.map((e) => e._id));
+  const [loanMap, leaveTypes] = await Promise.all([
+    getActiveLoanBalances(tenantId, data.map((e) => e._id)),
+    listLeaveTypes(tenantId),
+  ]);
   return data.map((e) => {
     const json = e.toJSON();
     return {
@@ -62,7 +193,7 @@ async function listEmployees(tenantId, branchFilter = {}) {
       department_name: e.department_id?.name || null,
       manager_name: e.manager_id?.name || null,
       linked_user: e.user_id ? { id: e.user_id._id, name: e.user_id.name, email: e.user_id.email, role: e.user_id.role } : null,
-      leave_balance: getLeaveBalances(e),
+      leave_balance: getLeaveBalances(e, leaveTypes),
       active_loan_balance: loanMap[String(e._id)] || 0,
     };
   });
@@ -74,7 +205,10 @@ async function getEmployee(tenantId, id) {
     .populate('manager_id', 'name employee_code')
     .populate('user_id', 'name email role');
   if (!e) throw httpError('Employee not found.', 404);
-  const loanMap = await getActiveLoanBalances(tenantId, [e._id]);
+  const [loanMap, leaveTypes] = await Promise.all([
+    getActiveLoanBalances(tenantId, [e._id]),
+    listLeaveTypes(tenantId),
+  ]);
   const json = e.toJSON();
   return {
     ...json,
@@ -82,7 +216,7 @@ async function getEmployee(tenantId, id) {
     department_name: e.department_id?.name || null,
     manager_name: e.manager_id?.name || null,
     linked_user: e.user_id ? { id: e.user_id._id, name: e.user_id.name, email: e.user_id.email, role: e.user_id.role } : null,
-    leave_balance: getLeaveBalances(e),
+    leave_balance: getLeaveBalances(e, leaveTypes),
     active_loan_balance: loanMap[String(e._id)] || 0,
   };
 }
@@ -203,6 +337,10 @@ async function terminateEmployee(tenantId, id, { end_date, reason }) {
   return emp;
 }
 
+function slugifyLeaveType(value) {
+  return String(value || 'annual').toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+
 async function approveLeaveRequest(tenantId, leaveId, reviewerId, status) {
   const leave = await LeaveRequest.findOne({ _id: leaveId, tenant_id: tenantId });
   if (!leave) throw httpError('Leave request not found.', 404);
@@ -211,24 +349,38 @@ async function approveLeaveRequest(tenantId, leaveId, reviewerId, status) {
   if (status === 'approved' && leave.status === 'pending') {
     const emp = await Employee.findById(leave.employee_id);
     if (!emp) throw httpError('Employee not found.');
-    const days = leaveDays(leave.start_date, leave.end_date);
-    const type = (leave.leave_type || 'annual').toLowerCase();
-    if (!emp.leave_balances) emp.leave_balances = { annual_used: 0, sick_used: 0 };
 
-    if (type === 'sick') {
-      const entitlement = emp.sick_leave_entitlement ?? DEFAULT_SICK_ENTITLEMENT;
-      const used = emp.leave_balances.sick_used || 0;
-      if (used + days > entitlement) {
-        throw httpError(`Insufficient sick leave. ${entitlement - used} day(s) remaining.`);
+    const days = await leaveDays(tenantId, leave.start_date, leave.end_date);
+    const code = slugifyLeaveType(leave.leave_type);
+    const leaveTypes = await listLeaveTypes(tenantId);
+    const leaveType = leaveTypes.find((lt) => lt.code === code);
+
+    // Types with no entitlement (unpaid, or an unrecognised/custom label)
+    // aren't balance-checked — same as the old 'unpaid'/'other' exemption.
+    if (leaveType && leaveType.default_days > 0) {
+      if (!emp.leave_entitlements) emp.leave_entitlements = [];
+      let entry = emp.leave_entitlements.find((e) => e.code === code);
+      if (!entry) {
+        // Seed from the legacy fields for annual/sick so existing balances
+        // aren't lost; otherwise start from the tenant's default.
+        let entitlement_days = leaveType.default_days;
+        let used_days = 0;
+        if (code === 'annual') {
+          entitlement_days = emp.annual_leave_entitlement ?? leaveType.default_days;
+          used_days = emp.leave_balances?.annual_used ?? 0;
+        } else if (code === 'sick') {
+          entitlement_days = emp.sick_leave_entitlement ?? leaveType.default_days;
+          used_days = emp.leave_balances?.sick_used ?? 0;
+        }
+        entry = emp.leave_entitlements.create
+          ? emp.leave_entitlements.create({ code, entitlement_days, used_days })
+          : { code, entitlement_days, used_days };
+        emp.leave_entitlements.push(entry);
       }
-      emp.leave_balances.sick_used = used + days;
-    } else if (type !== 'unpaid' && type !== 'other') {
-      const entitlement = emp.annual_leave_entitlement ?? DEFAULT_ANNUAL_ENTITLEMENT;
-      const used = emp.leave_balances.annual_used || 0;
-      if (used + days > entitlement) {
-        throw httpError(`Insufficient annual leave. ${entitlement - used} day(s) remaining.`);
+      if (entry.used_days + days > entry.entitlement_days) {
+        throw httpError(`Insufficient ${leaveType.name.toLowerCase()}. ${Math.max(0, entry.entitlement_days - entry.used_days)} day(s) remaining.`);
       }
-      emp.leave_balances.annual_used = used + days;
+      entry.used_days += days;
     }
     await emp.save();
   }
@@ -422,6 +574,70 @@ async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye }) {
     apply_ssnit: tenant?.payroll_settings?.apply_ssnit ?? true,
     apply_paye: tenant?.payroll_settings?.apply_paye ?? true,
   };
+}
+
+// ── ATTENDANCE — CLOCK IN/OUT ────────────────────────────────────────────────
+
+async function getAttendanceSettings(tenantId) {
+  const tenant = await Tenant.findById(tenantId).select('attendance_settings');
+  return { standardHoursPerDay: tenant?.attendance_settings?.standard_hours_per_day ?? 8 };
+}
+
+async function updateAttendanceSettings(tenantId, { standard_hours_per_day }) {
+  const hours = parseFloat(standard_hours_per_day);
+  if (!hours || hours <= 0) throw httpError('standard_hours_per_day must be greater than zero.');
+  const tenant = await Tenant.findByIdAndUpdate(
+    tenantId,
+    { $set: { 'attendance_settings.standard_hours_per_day': hours } },
+    { new: true },
+  ).select('attendance_settings');
+  return { standard_hours_per_day: tenant.attendance_settings.standard_hours_per_day };
+}
+
+function todayBounds() {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function computeHours(clockIn, clockOut, standardHoursPerDay) {
+  const hoursWorked = round2(Math.max(0, (new Date(clockOut) - new Date(clockIn)) / 3600000));
+  const overtimeHours = round2(Math.max(0, hoursWorked - standardHoursPerDay));
+  return { hoursWorked, overtimeHours };
+}
+
+async function clockIn(tenantId, employeeId, branchId) {
+  const { start, end } = todayBounds();
+  let record = await Attendance.findOne({ tenant_id: tenantId, employee_id: employeeId, date: { $gte: start, $lte: end } });
+  if (record?.clock_in && !record?.clock_out) throw httpError('Already clocked in today.');
+  if (record) {
+    record.clock_in = new Date();
+    record.clock_out = undefined;
+    record.hours_worked = undefined;
+    record.overtime_hours = undefined;
+    record.status = 'present';
+    await record.save();
+  } else {
+    record = await Attendance.create({
+      tenant_id: tenantId, branch_id: branchId || null, employee_id: employeeId,
+      date: start, status: 'present', clock_in: new Date(),
+    });
+  }
+  return record;
+}
+
+async function clockOut(tenantId, employeeId) {
+  const { start, end } = todayBounds();
+  const record = await Attendance.findOne({ tenant_id: tenantId, employee_id: employeeId, date: { $gte: start, $lte: end } });
+  if (!record || !record.clock_in) throw httpError('You have not clocked in today.');
+  if (record.clock_out) throw httpError('Already clocked out today.');
+  const { standardHoursPerDay } = await getAttendanceSettings(tenantId);
+  record.clock_out = new Date();
+  const { hoursWorked, overtimeHours } = computeHours(record.clock_in, record.clock_out, standardHoursPerDay);
+  record.hours_worked = hoursWorked;
+  record.overtime_hours = overtimeHours;
+  await record.save();
+  return record;
 }
 
 function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, settings = {}) {
@@ -700,4 +916,14 @@ module.exports = {
   getLeaveBalances,
   getHrSummary,
   leaveDays,
+  listLeaveTypes,
+  createLeaveType,
+  updateLeaveType,
+  createHoliday,
+  deleteHoliday,
+  listHolidays,
+  getAttendanceSettings,
+  updateAttendanceSettings,
+  clockIn,
+  clockOut,
 };

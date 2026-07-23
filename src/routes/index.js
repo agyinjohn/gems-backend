@@ -735,6 +735,7 @@ router.get('/ess/me', authenticate, async (req, res) => {
   const hrService = require('../services/hrService');
   const employee = await Employee.findOne({ user_id: req.user._id }).populate('department_id', 'name').populate('manager_id', 'name');
   if (!employee) return res.json({ success: true, data: null });
+  const leaveTypes = await hrService.listLeaveTypes(employee.tenant_id || req.user.tenant_id);
   res.json({
     success: true,
     data: {
@@ -742,7 +743,7 @@ router.get('/ess/me', authenticate, async (req, res) => {
       id: employee._id,
       department_name: employee.department_id?.name || null,
       manager_name: employee.manager_id?.name || null,
-      leave_balance: hrService.getLeaveBalances(employee),
+      leave_balance: hrService.getLeaveBalances(employee, leaveTypes),
     },
   });
 });
@@ -802,6 +803,24 @@ router.get('/ess/attendance', authenticate, async (req, res) => {
   const data = await Attendance.find({ employee_id: employee._id }).sort({ date: -1 }).limit(30);
   res.json({ success: true, data });
 });
+router.post('/ess/attendance/clock-in', authenticate, async (req, res) => {
+  const employee = await Employee.findOne({ user_id: req.user._id });
+  if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.clockIn(employee.tenant_id || req.user.tenant_id, employee._id, employee.branch_id);
+    res.status(201).json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
+router.post('/ess/attendance/clock-out', authenticate, async (req, res) => {
+  const employee = await Employee.findOne({ user_id: req.user._id });
+  if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.clockOut(employee.tenant_id || req.user.tenant_id, employee._id);
+    res.json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
 
 // DEPARTMENTS
 router.get('/departments', authenticate, requireTenant, async (req, res) => {
@@ -850,16 +869,101 @@ router.get('/attendance', authenticate, requireTenant, requireModule('hr'), asyn
   res.json({ success: true, data: mapped });
 });
 router.post('/attendance', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
-  const { employee_id, date, status, notes } = req.body;
+  const { employee_id, date, status, notes, clock_in, clock_out } = req.body;
   if (!employee_id || !date) return res.status(400).json({ success: false, message: 'employee_id and date required.' });
   // Attendance follows the employee's branch.
   const emp = await Employee.findOne({ _id: employee_id, tenant_id: req.tenant_id }).select('branch_id');
+  const update = { status: status || 'present', notes, branch_id: emp?.branch_id || null };
+  if (clock_in) update.clock_in = new Date(clock_in);
+  if (clock_out) update.clock_out = new Date(clock_out);
+  if (clock_in && clock_out) {
+    const hrService = require('../services/hrService');
+    const { standardHoursPerDay } = await hrService.getAttendanceSettings(req.tenant_id);
+    const hoursWorked = Math.round(Math.max(0, (new Date(clock_out) - new Date(clock_in)) / 3600000) * 100) / 100;
+    update.hours_worked = hoursWorked;
+    update.overtime_hours = Math.round(Math.max(0, hoursWorked - standardHoursPerDay) * 100) / 100;
+  } else if (clock_in && !clock_out) {
+    update.hours_worked = undefined;
+    update.overtime_hours = undefined;
+  }
   const data = await Attendance.findOneAndUpdate(
     { tenant_id: req.tenant_id, employee_id, date: new Date(date) },
-    { status: status || 'present', notes, branch_id: emp?.branch_id || null },
+    update,
     { upsert: true, new: true }
   );
   res.status(201).json({ success: true, data });
+});
+
+// Clock in/out — HR marking on behalf of an employee
+router.post('/attendance/clock-in', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const { employee_id } = req.body;
+  if (!employee_id) return res.status(400).json({ success: false, message: 'employee_id is required.' });
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: req.tenant_id }).select('branch_id');
+  if (!emp) return res.status(404).json({ success: false, message: 'Employee not found.' });
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.clockIn(req.tenant_id, employee_id, emp.branch_id);
+    res.status(201).json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
+router.post('/attendance/clock-out', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const { employee_id } = req.body;
+  if (!employee_id) return res.status(400).json({ success: false, message: 'employee_id is required.' });
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.clockOut(req.tenant_id, employee_id);
+    res.json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
+
+// ── ATTENDANCE SETTINGS ──────────────────────────────────────────────────
+router.get('/hr/attendance-settings', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.getAttendanceSettings(req.tenant_id);
+  res.json({ success: true, data: { standard_hours_per_day: data.standardHoursPerDay } });
+});
+router.patch('/hr/attendance-settings', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.updateAttendanceSettings(req.tenant_id, req.body);
+  res.json({ success: true, data });
+});
+
+// ── LEAVE TYPES ──────────────────────────────────────────────────────────
+router.get('/leave-types', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.listLeaveTypes(req.tenant_id);
+  res.json({ success: true, data });
+});
+router.post('/leave-types', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.createLeaveType(req.tenant_id, req.body, req.user._id);
+    res.status(201).json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
+router.patch('/leave-types/:id', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.updateLeaveType(req.tenant_id, req.params.id, req.body);
+  res.json({ success: true, data });
+});
+
+// ── PUBLIC HOLIDAYS ────────────────────────────────────────────────────────
+router.get('/holidays', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.listHolidays(req.tenant_id, req.query.year);
+  res.json({ success: true, data });
+});
+router.post('/holidays', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.createHoliday(req.tenant_id, req.body, req.user._id);
+    res.status(201).json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
+router.delete('/holidays/:id', authenticate, requireTenant, requireModule('hr'), authorize('business_owner', 'hr_manager'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  await hrService.deleteHoliday(req.tenant_id, req.params.id);
+  res.json({ success: true });
 });
 
 // LEAVE REQUESTS

@@ -30,6 +30,9 @@ const tenantSchema = new Schema({
     apply_ssnit: { type: Boolean, default: true },
     apply_paye:  { type: Boolean, default: true },
   },
+  attendance_settings: {
+    standard_hours_per_day: { type: Number, default: 8 },
+  },
   storefront_settings: {
     delivery_fee:              { type: Number, default: 30 },
     free_delivery_threshold:   { type: Number, default: 500 },
@@ -338,12 +341,22 @@ const employeeSchema = new Schema({
   end_date:      Date,
   termination_reason: String,
   status:        { type: String, enum: ['active','on_leave','terminated'], default: 'active' },
+  // Legacy annual/sick fields — superseded by leave_entitlements below, kept
+  // for backward compatibility (used as a fallback when an employee has no
+  // leave_entitlements entry yet for 'annual'/'sick').
   annual_leave_entitlement: { type: Number, default: 21 },
   sick_leave_entitlement:   { type: Number, default: 10 },
   leave_balances: {
     annual_used: { type: Number, default: 0 },
     sick_used:   { type: Number, default: 0 },
   },
+  // Per leave-type entitlement + usage (one entry per LeaveType.code this
+  // employee has taken or been granted a specific allowance for).
+  leave_entitlements: [{
+    code:            String,
+    entitlement_days:{ type: Number, default: 0 },
+    used_days:       { type: Number, default: 0 },
+  }],
   // Personal
   photo:            String, // base64
   date_of_birth:    Date,
@@ -407,10 +420,36 @@ const attendanceSchema = new Schema({
   branch_id:   { type: Schema.Types.ObjectId, ref: 'Branch' },
   employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   date:        { type: Date, required: true },
-  status:      { type: String, enum: ['present','absent','half_day','leave'], default: 'present' },
+  status:      { type: String, enum: ['present','absent','half_day','leave','holiday'], default: 'present' },
+  clock_in:       Date,
+  clock_out:      Date,
+  hours_worked:   Number, // computed from clock_in/clock_out
+  overtime_hours: Number, // hours_worked beyond the tenant's standard_hours_per_day
   notes:       String,
 }, { timestamps: true });
 attendanceSchema.index({ tenant_id: 1, employee_id: 1, date: 1 }, { unique: true });
+
+// LEAVE TYPE — tenant-configurable leave categories with their own entitlement
+const leaveTypeSchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:          { type: String, required: true },
+  code:          { type: String, required: true }, // slug, e.g. 'maternity'
+  default_days:  { type: Number, default: 0 },      // standard entitlement per employee per year
+  paid:          { type: Boolean, default: true },
+  is_active:     { type: Boolean, default: true },
+  created_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+leaveTypeSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
+
+// PUBLIC HOLIDAY — excluded from leave-day counts and attendance expectations
+const publicHolidaySchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  name:          { type: String, required: true },
+  date:          { type: Date, required: true },
+  is_recurring:  { type: Boolean, default: false }, // repeats on this month/day every year
+  created_by:    { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+publicHolidaySchema.index({ tenant_id: 1, date: 1 });
 
 // LEAVE REQUEST
 const leaveRequestSchema = new Schema({
@@ -990,7 +1029,8 @@ const allSchemas = [
   stockMovementSchema, customerSchema, leadSchema, contactHistorySchema,
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
-  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, employeeLoanSchema, taxRateSchema,
+  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, employeeLoanSchema,
+  leaveTypeSchema, publicHolidaySchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
@@ -1033,6 +1073,8 @@ module.exports = {
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
   PayrollBatch:   mongoose.model('PayrollBatch', payrollBatchSchema),
   EmployeeLoan:   mongoose.model('EmployeeLoan', employeeLoanSchema),
+  LeaveType:      mongoose.model('LeaveType', leaveTypeSchema),
+  PublicHoliday:  mongoose.model('PublicHoliday', publicHolidaySchema),
   TaxRate:        mongoose.model('TaxRate', taxRateSchema),
   Cart:           mongoose.model('Cart', cartSchema),
   PaymentLog:        mongoose.model('PaymentLog', paymentLogSchema),
