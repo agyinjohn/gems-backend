@@ -981,6 +981,24 @@ router.get('/payroll/batches/:id/bank-file', authenticate, requireTenant, requir
   res.send(csv);
 });
 
+// ── EMPLOYEE LOANS / SALARY ADVANCES ────────────────────────────────────────
+router.get('/loans', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const data = await hrService.listLoans(req.tenant_id, { employee_id: req.query.employee_id, status: req.query.status }, req.branchFilter);
+  res.json({ success: true, data });
+});
+router.post('/loans', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.createLoan(req.tenant_id, req.body);
+  res.status(201).json({ success: true, data });
+});
+router.get('/loans/:id', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const data = await hrService.getLoan(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+router.patch('/loans/:id/cancel', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.cancelLoan(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+
 // CRM - CUSTOMERS
 router.get('/customers', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
   const data = await Customer.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) }).sort({ createdAt: -1 });

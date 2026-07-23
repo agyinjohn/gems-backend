@@ -378,6 +378,29 @@ const employeeSchema = new Schema({
 }, { timestamps: true });
 employeeSchema.index({ tenant_id: 1, employee_code: 1 }, { unique: true });
 
+// EMPLOYEE LOAN / SALARY ADVANCE
+const employeeLoanSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:   { type: Schema.Types.ObjectId, ref: 'Branch' },
+  employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
+  type:        { type: String, enum: ['loan', 'advance'], default: 'loan' },
+  reason:      String,
+  principal:         { type: Number, required: true }, // original amount disbursed
+  balance:           { type: Number, required: true }, // amount still owed
+  monthly_deduction: { type: Number, required: true }, // installment taken from each pay run
+  status:      { type: String, enum: ['active', 'completed', 'cancelled'], default: 'active' },
+  disbursed_date: { type: Date, default: Date.now },
+  repayments: [{
+    month:          Number,
+    year:           Number,
+    amount:         Number,
+    payroll_run_id: { type: Schema.Types.ObjectId, ref: 'PayrollRun' },
+    date:           { type: Date, default: Date.now },
+  }],
+  created_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+employeeLoanSchema.index({ tenant_id: 1, employee_id: 1, status: 1 });
+
 // ATTENDANCE
 const attendanceSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -413,7 +436,13 @@ const payrollRunSchema = new Schema({
   allowances:   { type: Number, default: 0 },
   allowance_lines: [{ name: String, amount: Number }],
   deductions:   { type: Number, default: 0 },
-  deduction_lines: [{ name: String, amount: Number }],
+  deduction_lines: [{ name: String, amount: Number, loan_id: { type: Schema.Types.ObjectId, ref: 'EmployeeLoan' } }],
+  // Set only when this run covers a partial period (mid-month joiner/leaver).
+  proration: {
+    worked_days:       Number,
+    total_days:        Number,
+    full_gross_salary: Number, // the employee's normal (unprorated) monthly salary
+  },
   paye:         { type: Number, default: 0 },
   ssnit_employee: { type: Number, default: 0 },
   ssnit_employer: { type: Number, default: 0 },
@@ -961,7 +990,7 @@ const allSchemas = [
   stockMovementSchema, customerSchema, leadSchema, contactHistorySchema,
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
-  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, taxRateSchema,
+  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, employeeLoanSchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
@@ -1003,6 +1032,7 @@ module.exports = {
   LeaveRequest:   mongoose.model('LeaveRequest', leaveRequestSchema),
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
   PayrollBatch:   mongoose.model('PayrollBatch', payrollBatchSchema),
+  EmployeeLoan:   mongoose.model('EmployeeLoan', employeeLoanSchema),
   TaxRate:        mongoose.model('TaxRate', taxRateSchema),
   Cart:           mongoose.model('Cart', cartSchema),
   PaymentLog:        mongoose.model('PaymentLog', paymentLogSchema),
