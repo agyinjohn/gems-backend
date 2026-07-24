@@ -81,6 +81,12 @@ const hrSummary = async (req, res) => {
   res.json({ success: true, data });
 };
 
+const hrReport = async (req, res) => {
+  const { from, to } = req.query;
+  const data = await hr.getHrReportForRange(req.tenant_id, { from, to }, req.branchFilter);
+  res.json({ success: true, data });
+};
+
 module.exports = {
   listEmployees,
   getEmployee,
@@ -94,4 +100,5 @@ module.exports = {
   uploadDocument,
   deleteDocument,
   hrSummary,
+  hrReport,
 };

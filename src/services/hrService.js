@@ -859,6 +859,103 @@ async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
   };
 }
 
+/** A point-in-time-plus-period HR report: current headcount snapshot, and
+ * leave/attendance/payroll/loans activity within [from, to] (inclusive). */
+async function getHrReportForRange(tenantId, { from, to } = {}, branchFilter = {}) {
+  const bf = branchFilter || {};
+  const range = {};
+  if (from) range.$gte = new Date(from);
+  if (to) { const end = new Date(to); end.setHours(23, 59, 59, 999); range.$lte = end; }
+  const rangeMatch = Object.keys(range).length ? { createdAt: range } : {};
+  const inRange = (d) => {
+    if (!d) return false;
+    const t = new Date(d).getTime();
+    if (range.$gte && t < range.$gte.getTime()) return false;
+    if (range.$lte && t > range.$lte.getTime()) return false;
+    return true;
+  };
+
+  const employees = await Employee.find({ tenant_id: tenantId, ...bf }).populate('department_id', 'name');
+  const activeEmployees = employees.filter((e) => e.status === 'active');
+
+  const deptCounts = new Map();
+  const typeCounts = new Map();
+  for (const e of activeEmployees) {
+    const dept = e.department_id?.name || 'Unassigned';
+    deptCounts.set(dept, (deptCounts.get(dept) || 0) + 1);
+    const type = e.employment_type || 'full_time';
+    typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+  }
+
+  const newHires = employees.filter((e) => inRange(e.start_date));
+  const terminations = employees.filter((e) => e.status === 'terminated' && inRange(e.end_date));
+
+  const [leaveByStatusAgg, leaveList, attendanceByStatusAgg, payrollAgg, payrollByMonth, loansDisbursedAgg, loanRepaymentsAgg, outstandingLoansAgg] = await Promise.all([
+    LeaveRequest.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, ...rangeMatch } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]),
+    LeaveRequest.find({ tenant_id: tenantId, ...bf, ...rangeMatch }).populate('employee_id', 'name').sort({ createdAt: -1 }).limit(50),
+    Attendance.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, ...(Object.keys(range).length ? { date: range } : {}) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]),
+    PayrollRun.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, status: { $in: ['approved', 'paid'] }, ...rangeMatch } },
+      { $group: { _id: null, total: { $sum: '$net_salary' }, runs: { $sum: 1 } } },
+    ]),
+    PayrollRun.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, status: { $in: ['approved', 'paid'] }, ...rangeMatch } },
+      { $group: { _id: { month: '$month', year: '$year' }, total: { $sum: '$net_salary' } } },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+    ]),
+    EmployeeLoan.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, ...(Object.keys(range).length ? { disbursed_date: range } : {}) } },
+      { $group: { _id: null, total: { $sum: '$principal' }, count: { $sum: 1 } } },
+    ]),
+    EmployeeLoan.aggregate([
+      { $match: { tenant_id: tenantId, ...bf } },
+      { $unwind: '$repayments' },
+      ...(Object.keys(range).length ? [{ $match: { 'repayments.date': range } }] : []),
+      { $group: { _id: null, total: { $sum: '$repayments.amount' } } },
+    ]),
+    EmployeeLoan.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, status: 'active' } },
+      { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const leaveMap = Object.fromEntries(leaveByStatusAgg.map((l) => [l._id, l.count]));
+  const attendanceMap = Object.fromEntries(attendanceByStatusAgg.map((a) => [a._id, a.count]));
+
+  return {
+    period: { from: from || null, to: to || null },
+    total_employees: employees.length,
+    active: activeEmployees.length,
+    department_breakdown: [...deptCounts.entries()].map(([department, count]) => ({ department, count })).sort((a, b) => b.count - a.count),
+    employment_type_breakdown: [...typeCounts.entries()].map(([type, count]) => ({ type, count })),
+    new_hires: newHires.map((e) => ({ name: e.name, start_date: e.start_date, department: e.department_id?.name || 'Unassigned' })),
+    terminations: terminations.map((e) => ({ name: e.name, end_date: e.end_date, reason: e.termination_reason || '' })),
+    leave_by_status: { approved: leaveMap.approved || 0, pending: leaveMap.pending || 0, rejected: leaveMap.rejected || 0 },
+    leave_list: leaveList.map((l) => ({
+      employee_name: l.employee_id?.name || 'Unknown', leave_type: l.leave_type,
+      start_date: l.start_date, end_date: l.end_date, status: l.status,
+    })),
+    attendance_by_status: {
+      present: attendanceMap.present || 0, absent: attendanceMap.absent || 0,
+      half_day: attendanceMap.half_day || 0, leave: attendanceMap.leave || 0, holiday: attendanceMap.holiday || 0,
+    },
+    payroll_total: payrollAgg[0]?.total || 0,
+    payroll_runs: payrollAgg[0]?.runs || 0,
+    payroll_by_month: payrollByMonth.map((r) => ({ month: r._id.month, year: r._id.year, total: r.total })),
+    loans_disbursed_total: loansDisbursedAgg[0]?.total || 0,
+    loans_disbursed_count: loansDisbursedAgg[0]?.count || 0,
+    loan_repayments_total: loanRepaymentsAgg[0]?.total || 0,
+    outstanding_loans_total: outstandingLoansAgg[0]?.total || 0,
+    outstanding_loans_count: outstandingLoansAgg[0]?.count || 0,
+  };
+}
+
 // ── PAYROLL BATCHES (period pay runs) ──────────────────────────────────────
 async function recomputeBatchTotals(tenantId, batchId) {
   const runs = await PayrollRun.find({ tenant_id: tenantId, batch_id: batchId });
@@ -985,6 +1082,7 @@ module.exports = {
   deleteEmployeeDocument,
   getLeaveBalances,
   getHrSummary,
+  getHrReportForRange,
   leaveDays,
   listLeaveTypes,
   createLeaveType,
