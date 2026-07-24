@@ -464,6 +464,25 @@ const leaveRequestSchema = new Schema({
   reviewed_by: { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
+// PERFORMANCE APPRAISAL — simple periodic rating + comments
+const appraisalSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
+  employee_id:  { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
+  reviewer_id:  { type: Schema.Types.ObjectId, ref: 'User' },
+  period_label: { type: String, required: true }, // e.g. "Q1 2026", "Annual 2026"
+  rating:       { type: Number, required: true, min: 1, max: 5 },
+  strengths:             String,
+  areas_for_improvement: String,
+  goals_next_period:     String,
+  status:            { type: String, enum: ['draft','submitted','acknowledged'], default: 'draft' },
+  employee_comments: String,
+  submitted_at:      Date,
+  acknowledged_at:   Date,
+  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+appraisalSchema.index({ tenant_id: 1, employee_id: 1, createdAt: -1 });
+
 // PAYROLL RUN
 const payrollRunSchema = new Schema({
   tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -1029,7 +1048,7 @@ const allSchemas = [
   stockMovementSchema, customerSchema, leadSchema, contactHistorySchema,
   orderSchema, supplierSchema, purchaseOrderSchema, accountSchema,
   journalEntrySchema, expenseSchema, departmentSchema, employeeSchema,
-  attendanceSchema, leaveRequestSchema, payrollRunSchema, payrollBatchSchema, employeeLoanSchema,
+  attendanceSchema, leaveRequestSchema, appraisalSchema, payrollRunSchema, payrollBatchSchema, employeeLoanSchema,
   leaveTypeSchema, publicHolidaySchema, taxRateSchema,
   cartSchema, auditLogSchema, paymentLogSchema, budgetSchema,
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
@@ -1070,6 +1089,7 @@ module.exports = {
   Employee:       mongoose.model('Employee', employeeSchema),
   Attendance:     mongoose.model('Attendance', attendanceSchema),
   LeaveRequest:   mongoose.model('LeaveRequest', leaveRequestSchema),
+  Appraisal:      mongoose.model('Appraisal', appraisalSchema),
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
   PayrollBatch:   mongoose.model('PayrollBatch', payrollBatchSchema),
   EmployeeLoan:   mongoose.model('EmployeeLoan', employeeLoanSchema),

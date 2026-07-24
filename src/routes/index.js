@@ -834,6 +834,22 @@ router.post('/ess/attendance/clock-out', authenticate, async (req, res) => {
     res.json({ success: true, data });
   } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
 });
+router.get('/ess/appraisals', authenticate, async (req, res) => {
+  const employee = await resolveEssEmployee(req);
+  if (!employee) return res.json({ success: true, data: [] });
+  const hrService = require('../services/hrService');
+  const data = await hrService.listMyAppraisals(employee.tenant_id || req.user.tenant_id, employee._id);
+  res.json({ success: true, data });
+});
+router.patch('/ess/appraisals/:id/acknowledge', authenticate, async (req, res) => {
+  const employee = await resolveEssEmployee(req);
+  if (!employee) return res.status(404).json({ success: false, message: 'Employee record not found for your account.' });
+  const hrService = require('../services/hrService');
+  try {
+    const data = await hrService.acknowledgeAppraisal(employee.tenant_id || req.user.tenant_id, req.params.id, employee._id, req.body.employee_comments);
+    res.json({ success: true, data });
+  } catch (err) { res.status(err.status || 500).json({ success: false, message: err.message }); }
+});
 
 // DEPARTMENTS
 router.get('/departments', authenticate, requireTenant, async (req, res) => {
@@ -1115,6 +1131,32 @@ router.get('/loans/:id', authenticate, requireTenant, requireModule('hr'), async
 router.patch('/loans/:id/cancel', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
   const data = await hrService.cancelLoan(req.tenant_id, req.params.id);
   res.json({ success: true, data });
+});
+
+// ── PERFORMANCE APPRAISALS ───────────────────────────────────────────────────
+router.get('/appraisals', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.listAppraisals(req.tenant_id, req.branchFilter, { employee_id: req.query.employee_id });
+  res.json({ success: true, data });
+});
+router.post('/appraisals', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.createAppraisal(req.tenant_id, req.body, req.user._id);
+  res.status(201).json({ success: true, data });
+});
+router.get('/appraisals/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.getAppraisal(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+router.put('/appraisals/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.updateAppraisal(req.tenant_id, req.params.id, req.body);
+  res.json({ success: true, data });
+});
+router.patch('/appraisals/:id/submit', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  const data = await hrService.submitAppraisal(req.tenant_id, req.params.id);
+  res.json({ success: true, data });
+});
+router.delete('/appraisals/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
+  await hrService.deleteAppraisal(req.tenant_id, req.params.id);
+  res.json({ success: true });
 });
 
 // CRM - CUSTOMERS

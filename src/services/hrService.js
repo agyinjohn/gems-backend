@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { Employee, User, Department, LeaveRequest, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
+const { Employee, User, Department, LeaveRequest, Appraisal, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
 
@@ -576,6 +576,109 @@ async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye }) {
   };
 }
 
+// ── PERFORMANCE APPRAISALS ───────────────────────────────────────────────────
+
+function mapAppraisal(a) {
+  return {
+    ...a.toJSON(),
+    employee_name: a.employee_id?.name || '—',
+    employee_code: a.employee_id?.employee_code || '',
+    reviewer_name: a.reviewer_id?.name || '—',
+  };
+}
+
+async function createAppraisal(tenantId, body, userId) {
+  const { employee_id, period_label, rating, strengths, areas_for_improvement, goals_next_period } = body;
+  if (!employee_id || !period_label || !rating) throw httpError('employee_id, period_label and rating are required.');
+  const r = parseInt(rating, 10);
+  if (!Number.isInteger(r) || r < 1 || r > 5) throw httpError('rating must be an integer from 1 to 5.');
+  const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId });
+  if (!emp) throw httpError('Employee not found.', 404);
+  const appraisal = await Appraisal.create({
+    tenant_id: tenantId,
+    branch_id: emp.branch_id || null,
+    employee_id: emp._id,
+    reviewer_id: userId,
+    period_label,
+    rating: r,
+    strengths: strengths || '',
+    areas_for_improvement: areas_for_improvement || '',
+    goals_next_period: goals_next_period || '',
+    created_by: userId,
+  });
+  return getAppraisal(tenantId, appraisal._id);
+}
+
+async function listAppraisals(tenantId, branchFilter = {}, { employee_id } = {}) {
+  const filter = { tenant_id: tenantId, ...branchFilter };
+  if (employee_id) filter.employee_id = employee_id;
+  const rows = await Appraisal.find(filter)
+    .populate('employee_id', 'name employee_code')
+    .populate('reviewer_id', 'name')
+    .sort({ createdAt: -1 });
+  return rows.map(mapAppraisal);
+}
+
+async function getAppraisal(tenantId, id) {
+  const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId })
+    .populate('employee_id', 'name employee_code')
+    .populate('reviewer_id', 'name');
+  if (!a) throw httpError('Appraisal not found.', 404);
+  return mapAppraisal(a);
+}
+
+async function updateAppraisal(tenantId, id, body) {
+  const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId });
+  if (!a) throw httpError('Appraisal not found.', 404);
+  if (a.status !== 'draft') throw httpError('Only draft appraisals can be edited.');
+  if (body.rating !== undefined) {
+    const r = parseInt(body.rating, 10);
+    if (!Number.isInteger(r) || r < 1 || r > 5) throw httpError('rating must be an integer from 1 to 5.');
+    a.rating = r;
+  }
+  for (const key of ['period_label', 'strengths', 'areas_for_improvement', 'goals_next_period']) {
+    if (body[key] !== undefined) a[key] = body[key];
+  }
+  await a.save();
+  return getAppraisal(tenantId, a._id);
+}
+
+async function submitAppraisal(tenantId, id) {
+  const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId });
+  if (!a) throw httpError('Appraisal not found.', 404);
+  if (a.status !== 'draft') throw httpError('Only draft appraisals can be submitted.');
+  a.status = 'submitted';
+  a.submitted_at = new Date();
+  await a.save();
+  return getAppraisal(tenantId, a._id);
+}
+
+async function deleteAppraisal(tenantId, id) {
+  const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId });
+  if (!a) throw httpError('Appraisal not found.', 404);
+  if (a.status !== 'draft') throw httpError('Only a draft appraisal can be deleted.');
+  await Appraisal.deleteOne({ _id: id });
+}
+
+/** ESS: an employee's own appraisals — only ones released by HR (not drafts). */
+async function listMyAppraisals(tenantId, employeeId) {
+  const rows = await Appraisal.find({ tenant_id: tenantId, employee_id: employeeId, status: { $in: ['submitted', 'acknowledged'] } })
+    .populate('reviewer_id', 'name')
+    .sort({ createdAt: -1 });
+  return rows.map(mapAppraisal);
+}
+
+async function acknowledgeAppraisal(tenantId, id, employeeId, employeeComments) {
+  const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId, employee_id: employeeId });
+  if (!a) throw httpError('Appraisal not found.', 404);
+  if (a.status !== 'submitted') throw httpError('Only a submitted appraisal can be acknowledged.');
+  a.status = 'acknowledged';
+  a.acknowledged_at = new Date();
+  if (employeeComments !== undefined) a.employee_comments = employeeComments;
+  await a.save();
+  return getAppraisal(tenantId, a._id);
+}
+
 // ── ATTENDANCE — CLOCK IN/OUT ────────────────────────────────────────────────
 
 async function getAttendanceSettings(tenantId) {
@@ -1077,6 +1180,14 @@ module.exports = {
   listLoans,
   getLoan,
   cancelLoan,
+  createAppraisal,
+  listAppraisals,
+  getAppraisal,
+  updateAppraisal,
+  submitAppraisal,
+  deleteAppraisal,
+  listMyAppraisals,
+  acknowledgeAppraisal,
   uploadEmployeeDocument,
   addEmployeeDocument,
   deleteEmployeeDocument,
