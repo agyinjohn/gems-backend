@@ -180,7 +180,7 @@ const getDashboard = async (req, res) => {
   }
 
   // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER ────────────────────────────────
-  const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales] = await Promise.all([
+  const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales, recentLeave, hrSummary, monthPayrollAgg] = await Promise.all([
     Order.countDocuments({ tenant_id: tid, ...bf, payment_status: 'paid' }),
     Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
     Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
@@ -202,6 +202,17 @@ const getDashboard = async (req, res) => {
       { $sort: { '_id.year': 1, '_id.month': 1 } },
       { $project: { month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
     ]),
+    // HR module is only accessible to business_owner/hr_manager, so only fetch/send
+    // this data for business_owner — branch_manager/super_admin skip it.
+    role === 'business_owner'
+      ? LeaveRequest.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).populate('employee_id', 'name')
+      : Promise.resolve([]),
+    role === 'business_owner'
+      ? require('../services/hrService').getHrSummary(tid, {}, bf)
+      : Promise.resolve(null),
+    role === 'business_owner'
+      ? PayrollRun.aggregate([{ $match: { tenant_id: tid, ...bf, month: now.getMonth() + 1, year: now.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }])
+      : Promise.resolve([]),
   ]);
 
   res.json({ success: true, data: {
@@ -211,8 +222,19 @@ const getDashboard = async (req, res) => {
       total_products: products, low_stock_items: lowStock,
       total_customers: customers, active_leads: leads,
       total_employees: employees, monthly_expenses: expenses[0]?.total || 0,
+      ...(hrSummary ? { on_leave: hrSummary.on_leave, pending_leave: hrSummary.pending_leave, month_payroll: monthPayrollAgg[0]?.total || 0 } : {}),
     },
     recent_orders: recentOrders, top_products: topProducts, monthly_sales: monthlySales,
+    ...(hrSummary ? {
+      recent_leave: recentLeave.map(l => ({ ...l.toJSON(), employee_name: l.employee_id?.name || 'Unknown' })),
+      department_breakdown: hrSummary.department_breakdown,
+      employment_type_breakdown: hrSummary.employment_type_breakdown,
+      payroll_trend: hrSummary.payroll_trend,
+      outstanding_loans_total: hrSummary.outstanding_loans_total,
+      outstanding_loans_count: hrSummary.outstanding_loans_count,
+      upcoming_birthdays: hrSummary.upcoming_birthdays,
+      upcoming_anniversaries: hrSummary.upcoming_anniversaries,
+    } : {}),
   }});
 };
 
