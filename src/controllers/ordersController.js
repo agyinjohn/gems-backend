@@ -133,7 +133,7 @@ const getStorefrontProducts = async (req, res) => {
 };
 
 const initiateCheckout = async (req, res) => {
-  const { customer_name, customer_email, customer_phone, delivery_address, delivery_fee, items, tenant_id, branch_id, coupon_code } = req.body;
+  const { customer_name, customer_email, customer_phone, delivery_address, delivery_fee, items, tenant_id, branch_id, coupon_code, via_marketplace } = req.body;
   if (!customer_name || !customer_email || !items?.length) return res.status(400).json({ success: false, message: 'customer_name, customer_email and items are required.' });
 
   // Group items by branch
@@ -227,6 +227,7 @@ const initiateCheckout = async (req, res) => {
       payment_ref: paystackRef,
       status: 'pending',
       source: 'storefront',
+      via_marketplace: !!via_marketplace,
       items: enrichedItems,
     });
     orders.push({ order_id: order._id, order_number: orderNumber, total, branch_name: group.branch_name, discount: branchDiscount });

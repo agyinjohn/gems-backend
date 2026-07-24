@@ -158,7 +158,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     paystack_public_key, paystack_secret_key, paystack_webhook_url,
     paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days,
-    audit_retention_days, feature_flags,
+    audit_retention_days, feature_flags, marketplace_commission_pct,
   } = req.body;
   let settings = await PlatformSettings.findOne();
   if (!settings) settings = new PlatformSettings();
@@ -168,6 +168,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     paystack_public_key, paystack_webhook_url,
     paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days, audit_retention_days,
+    marketplace_commission_pct,
   };
   for (const [k, v] of Object.entries(fields)) {
     if (v !== undefined) settings[k] = v;
@@ -474,6 +475,36 @@ router.patch('/orders/:id/pay', authenticate, requireTenant, authorize('business
   await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: order.total, method: payment_method || 'cash', status: 'success', payer_name: order.customer_name, payer_email: order.customer_email, description: `Payment collected for order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
   await accounting.postSaleEntry({ tenantId: req.tenant_id, amount: order.total, cogsAmount: order.subtotal, taxAmount: order.tax_amount || 0, reference: order.order_number, date: new Date(), sourceId: order._id, createdBy: req.user._id }).catch(() => {});
   res.json({ success: true, message: 'Order marked as paid.', data: order });
+});
+
+// MARKETPLACE — cross-tenant shop directory (public, no auth)
+router.get('/marketplace/shops', async (req, res) => {
+  const { Tenant, Product } = require('../models');
+  const tenants = await Tenant.find({
+    is_active: true,
+    subscription_status: { $in: ['trial', 'active'] },
+    'storefront_settings.store_enabled': true,
+  }).select('business_name slug logo storefront_settings.announcement').sort('business_name');
+
+  const tenantIds = tenants.map((t) => t._id);
+  const counts = await Product.aggregate([
+    { $match: { tenant_id: { $in: tenantIds }, is_active: true } },
+    { $group: { _id: '$tenant_id', count: { $sum: 1 } } },
+  ]);
+  const countMap = Object.fromEntries(counts.map((c) => [String(c._id), c.count]));
+
+  const shops = tenants
+    .map((t) => ({
+      id: t._id,
+      business_name: t.business_name,
+      slug: t.slug,
+      logo: t.logo || '',
+      announcement: t.storefront_settings?.announcement || '',
+      product_count: countMap[String(t._id)] || 0,
+    }))
+    .filter((s) => s.product_count > 0);
+
+  res.json({ success: true, data: shops });
 });
 
 // STOREFRONT
