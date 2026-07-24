@@ -207,6 +207,11 @@ const orderSchema = new Schema({
   payment_status:   { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' },
   status:           { type: String, enum: ['pending','processing','shipped','delivered','cancelled'], default: 'pending' },
   source:           { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
+  // Order was placed via the cross-tenant marketplace directory rather than
+  // a direct visit to the tenant's own storefront URL — the platform takes
+  // a commission (platform_fee) out of the payout for these.
+  via_marketplace:  { type: Boolean, default: false },
+  platform_fee:     { type: Number, default: 0 },
   refund_amount:    { type: Number, default: 0 },
   discount_amount:  { type: Number, default: 0 },
   coupon_code:      String,
@@ -636,6 +641,9 @@ const platformSettingsSchema = new Schema({
   expiry_alert_days:    { type: Number, default: 7 },
   // Audit & data retention
   audit_retention_days: { type: Number, default: 90 },
+  // Marketplace: platform commission (%) deducted from the tenant payout
+  // for orders placed via the cross-tenant marketplace directory.
+  marketplace_commission_pct: { type: Number, default: 5 },
   // Feature flags per plan
   feature_flags: { type: Schema.Types.Mixed, default: {
     starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },

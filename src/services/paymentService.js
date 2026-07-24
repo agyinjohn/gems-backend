@@ -1,6 +1,6 @@
 const https = require('node:https');
 const crypto = require('crypto');
-const { Order, Product, StockMovement, PayoutMethod } = require('../models');
+const { Order, Product, StockMovement, PayoutMethod, PlatformSettings } = require('../models');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
@@ -202,6 +202,11 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     order.payment_ref = reference || order.payment_ref;
     order.payment_method = 'paystack';
     order.status = 'processing';
+    if (order.via_marketplace) {
+      const settings = await PlatformSettings.findOne().select('marketplace_commission_pct').lean();
+      const pct = settings?.marketplace_commission_pct ?? 5;
+      order.platform_fee = Math.round(order.total * (pct / 100) * 100) / 100;
+    }
     await order.save();
 
     orderNumbers.push(order.order_number);
@@ -248,8 +253,9 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       channel: 'storefront',
     }).catch(() => {});
 
-    // Trigger immediate payout to tenant's default payout method
-    await triggerStorefrontPayout(order.tenant_id, order.total, order.order_number);
+    // Trigger immediate payout to tenant's default payout method — minus the
+    // platform's marketplace commission, if this order came via the directory.
+    await triggerStorefrontPayout(order.tenant_id, order.total - (order.platform_fee || 0), order.order_number);
 
     if (order.coupon_code) {
       const { Coupon } = require('../models');
