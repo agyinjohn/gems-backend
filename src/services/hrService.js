@@ -755,37 +755,107 @@ async function deleteEmployeeDocument(tenantId, employeeId, docId) {
   await emp.save();
 }
 
+// Next month/day occurrence of `dateStr` on/after `today` (this year, or next year if already passed).
+function nextAnnualOccurrence(dateStr, today) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  let next = new Date(today.getFullYear(), d.getMonth(), d.getDate());
+  next.setHours(0, 0, 0, 0);
+  if (next < today) next = new Date(today.getFullYear() + 1, d.getMonth(), d.getDate());
+  return next;
+}
+function daysUntilAnnual(dateStr, today) {
+  const next = nextAnnualOccurrence(dateStr, today);
+  return next ? Math.round((next - today) / 86400000) : null;
+}
+
 async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
   const bf = branchFilter || {};
-  const employees = await Employee.find({ tenant_id: tenantId, ...bf });
+  const employees = await Employee.find({ tenant_id: tenantId, ...bf }).populate('department_id', 'name');
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const [onLeave, pendingLeave, attendanceToday, payrollAgg] = await Promise.all([
-    LeaveRequest.countDocuments({
+  const [onLeaveList, pendingLeaveList, attendanceToday, payrollAgg, payrollTrendAgg, loanAgg] = await Promise.all([
+    LeaveRequest.find({
       tenant_id: tenantId,
       ...bf,
       status: 'approved',
       start_date: { $lte: today },
       end_date: { $gte: today },
-    }),
-    LeaveRequest.countDocuments({ tenant_id: tenantId, ...bf, status: 'pending' }),
+    }).populate('employee_id', 'name'),
+    LeaveRequest.find({ tenant_id: tenantId, ...bf, status: 'pending' })
+      .populate('employee_id', 'name').sort({ createdAt: -1 }),
     Attendance.countDocuments({ tenant_id: tenantId, ...bf, date: today }),
     PayrollRun.aggregate([
       { $match: { tenant_id: tenantId, ...bf, status: 'approved' } },
       { $group: { _id: null, total: { $sum: '$net_salary' }, runs: { $sum: 1 } } },
     ]),
+    PayrollRun.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, status: { $in: ['approved', 'paid'] } } },
+      { $group: { _id: { month: '$month', year: '$year' }, total: { $sum: '$net_salary' } } },
+      { $sort: { '_id.year': -1, '_id.month': -1 } },
+      { $limit: 6 },
+    ]),
+    EmployeeLoan.aggregate([
+      { $match: { tenant_id: tenantId, ...bf, status: 'active' } },
+      { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } },
+    ]),
   ]);
+
+  const activeEmployees = employees.filter((e) => e.status === 'active');
+
+  const deptCounts = new Map();
+  const typeCounts = new Map();
+  for (const e of activeEmployees) {
+    const dept = e.department_id?.name || 'Unassigned';
+    deptCounts.set(dept, (deptCounts.get(dept) || 0) + 1);
+    const type = e.employment_type || 'full_time';
+    typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+  }
+
+  const upcomingBirthdays = activeEmployees
+    .map((e) => ({ name: e.name, date: e.date_of_birth, days_until: daysUntilAnnual(e.date_of_birth, today) }))
+    .filter((e) => e.days_until !== null && e.days_until <= 30)
+    .sort((a, b) => a.days_until - b.days_until)
+    .slice(0, 5);
+
+  const upcomingAnniversaries = activeEmployees
+    .map((e) => {
+      const next = nextAnnualOccurrence(e.start_date, today);
+      if (!next) return null;
+      const years = next.getFullYear() - new Date(e.start_date).getFullYear();
+      return { name: e.name, start_date: e.start_date, days_until: Math.round((next - today) / 86400000), years };
+    })
+    .filter((e) => e && e.days_until <= 30 && e.years > 0)
+    .sort((a, b) => a.days_until - b.days_until)
+    .slice(0, 5);
 
   return {
     total_employees: employees.length,
-    active: employees.filter((e) => e.status === 'active').length,
+    active: activeEmployees.length,
     terminated: employees.filter((e) => e.status === 'terminated').length,
-    on_leave: onLeave,
-    pending_leave: pendingLeave,
+    on_leave: onLeaveList.length,
+    on_leave_list: onLeaveList.slice(0, 10).map((l) => ({
+      employee_name: l.employee_id?.name || 'Unknown', leave_type: l.leave_type, end_date: l.end_date,
+    })),
+    pending_leave: pendingLeaveList.length,
+    pending_leave_list: pendingLeaveList.slice(0, 8).map((l) => ({
+      id: l._id, employee_name: l.employee_id?.name || 'Unknown', leave_type: l.leave_type,
+      start_date: l.start_date, end_date: l.end_date,
+    })),
     attendance_today: attendanceToday,
     payroll_total: payrollAgg[0]?.total || 0,
     payroll_runs: payrollAgg[0]?.runs || 0,
+    payroll_trend: payrollTrendAgg
+      .map((r) => ({ month: r._id.month, year: r._id.year, total: r.total }))
+      .reverse(),
+    outstanding_loans_total: loanAgg[0]?.total || 0,
+    outstanding_loans_count: loanAgg[0]?.count || 0,
+    department_breakdown: [...deptCounts.entries()].map(([department, count]) => ({ department, count })).sort((a, b) => b.count - a.count),
+    employment_type_breakdown: [...typeCounts.entries()].map(([type, count]) => ({ type, count })),
+    upcoming_birthdays: upcomingBirthdays,
+    upcoming_anniversaries: upcomingAnniversaries,
   };
 }
 
