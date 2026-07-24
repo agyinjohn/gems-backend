@@ -9,7 +9,7 @@ const MOMO_NETWORKS = {
 };
 
 const list = async (req, res) => {
-  const methods = await PayoutMethod.find({ tenant_id: req.user.tenant_id, is_active: true }).sort({ is_default: -1, createdAt: -1 }).lean();
+  const methods = await PayoutMethod.find({ tenant_id: req.user.tenant_id, is_active: true }).sort({ is_default: -1, createdAt: -1 });
   res.json({ success: true, data: methods });
 };
 
