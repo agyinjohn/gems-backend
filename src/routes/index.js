@@ -1142,6 +1142,9 @@ router.post('/appraisals', authenticate, requireTenant, requireModule('hr'), aut
   const data = await hrService.createAppraisal(req.tenant_id, req.body, req.user._id);
   res.status(201).json({ success: true, data });
 });
+router.get('/appraisals/categories', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), (req, res) => {
+  res.json({ success: true, data: hrService.getAppraisalCategories() });
+});
 router.get('/appraisals/:id', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), async (req, res) => {
   const data = await hrService.getAppraisal(req.tenant_id, req.params.id);
   res.json({ success: true, data });

@@ -465,13 +465,37 @@ const leaveRequestSchema = new Schema({
 }, { timestamps: true });
 
 // PERFORMANCE APPRAISAL — simple periodic rating + comments
+// Fixed set of standard rating competencies — not tenant-configurable.
+const APPRAISAL_CATEGORIES = [
+  'Job Knowledge',
+  'Quality of Work',
+  'Productivity',
+  'Communication',
+  'Teamwork',
+  'Initiative & Problem-Solving',
+  'Punctuality & Attendance',
+];
+
+const appraisalCategoryRatingSchema = new Schema({
+  category: { type: String, required: true, enum: APPRAISAL_CATEGORIES },
+  rating:   { type: Number, required: true, min: 1, max: 5 },
+}, { _id: false });
+
 const appraisalSchema = new Schema({
   tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
   employee_id:  { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   reviewer_id:  { type: Schema.Types.ObjectId, ref: 'User' },
-  period_label: { type: String, required: true }, // e.g. "Q1 2026", "Annual 2026"
-  rating:       { type: Number, required: true, min: 1, max: 5 },
+  period_start: { type: Date, required: true },
+  period_end:   { type: Date, required: true },
+  category_ratings: {
+    type: [appraisalCategoryRatingSchema],
+    validate: {
+      validator: (v) => v.length === APPRAISAL_CATEGORIES.length,
+      message: `category_ratings must include a rating for every one of the ${APPRAISAL_CATEGORIES.length} standard categories.`,
+    },
+  },
+  overall_rating: { type: Number, min: 1, max: 5 }, // computed average of category_ratings
   strengths:             String,
   areas_for_improvement: String,
   goals_next_period:     String,
@@ -1090,6 +1114,7 @@ module.exports = {
   Attendance:     mongoose.model('Attendance', attendanceSchema),
   LeaveRequest:   mongoose.model('LeaveRequest', leaveRequestSchema),
   Appraisal:      mongoose.model('Appraisal', appraisalSchema),
+  APPRAISAL_CATEGORIES,
   PayrollRun:     mongoose.model('PayrollRun', payrollRunSchema),
   PayrollBatch:   mongoose.model('PayrollBatch', payrollBatchSchema),
   EmployeeLoan:   mongoose.model('EmployeeLoan', employeeLoanSchema),

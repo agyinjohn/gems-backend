@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { Employee, User, Department, LeaveRequest, Appraisal, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
+const { Employee, User, Department, LeaveRequest, Appraisal, APPRAISAL_CATEGORIES, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
 const { uploadHrFile } = require('./uploadService');
 
@@ -578,6 +578,10 @@ async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye }) {
 
 // ── PERFORMANCE APPRAISALS ───────────────────────────────────────────────────
 
+function getAppraisalCategories() {
+  return APPRAISAL_CATEGORIES;
+}
+
 function mapAppraisal(a) {
   return {
     ...a.toJSON(),
@@ -587,11 +591,38 @@ function mapAppraisal(a) {
   };
 }
 
+/** Validates a full set of category ratings (every standard category, each 1-5)
+ * and returns { normalized, overall } — throws on anything invalid or missing. */
+function validateCategoryRatings(categoryRatings) {
+  if (!Array.isArray(categoryRatings) || categoryRatings.length !== APPRAISAL_CATEGORIES.length) {
+    throw httpError(`category_ratings must include a rating for every one of the ${APPRAISAL_CATEGORIES.length} standard categories.`);
+  }
+  const byCategory = new Map();
+  for (const entry of categoryRatings) {
+    const r = parseInt(entry?.rating, 10);
+    if (!APPRAISAL_CATEGORIES.includes(entry?.category)) throw httpError(`Unknown category "${entry?.category}".`);
+    if (!Number.isInteger(r) || r < 1 || r > 5) throw httpError(`${entry.category} rating must be an integer from 1 to 5.`);
+    byCategory.set(entry.category, r);
+  }
+  if (byCategory.size !== APPRAISAL_CATEGORIES.length) throw httpError('Each standard category must be rated exactly once.');
+  const normalized = APPRAISAL_CATEGORIES.map((category) => ({ category, rating: byCategory.get(category) }));
+  const overall = round2(normalized.reduce((sum, c) => sum + c.rating, 0) / normalized.length);
+  return { normalized, overall };
+}
+
+function validatePeriod(periodStart, periodEnd) {
+  const start = new Date(periodStart);
+  const end = new Date(periodEnd);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw httpError('period_start and period_end must be valid dates.');
+  if (end < start) throw httpError('period_end cannot be before period_start.');
+  return { start, end };
+}
+
 async function createAppraisal(tenantId, body, userId) {
-  const { employee_id, period_label, rating, strengths, areas_for_improvement, goals_next_period } = body;
-  if (!employee_id || !period_label || !rating) throw httpError('employee_id, period_label and rating are required.');
-  const r = parseInt(rating, 10);
-  if (!Number.isInteger(r) || r < 1 || r > 5) throw httpError('rating must be an integer from 1 to 5.');
+  const { employee_id, period_start, period_end, category_ratings, strengths, areas_for_improvement, goals_next_period } = body;
+  if (!employee_id || !period_start || !period_end) throw httpError('employee_id, period_start and period_end are required.');
+  const { start, end } = validatePeriod(period_start, period_end);
+  const { normalized, overall } = validateCategoryRatings(category_ratings);
   const emp = await Employee.findOne({ _id: employee_id, tenant_id: tenantId });
   if (!emp) throw httpError('Employee not found.', 404);
   const appraisal = await Appraisal.create({
@@ -599,8 +630,10 @@ async function createAppraisal(tenantId, body, userId) {
     branch_id: emp.branch_id || null,
     employee_id: emp._id,
     reviewer_id: userId,
-    period_label,
-    rating: r,
+    period_start: start,
+    period_end: end,
+    category_ratings: normalized,
+    overall_rating: overall,
     strengths: strengths || '',
     areas_for_improvement: areas_for_improvement || '',
     goals_next_period: goals_next_period || '',
@@ -631,12 +664,17 @@ async function updateAppraisal(tenantId, id, body) {
   const a = await Appraisal.findOne({ _id: id, tenant_id: tenantId });
   if (!a) throw httpError('Appraisal not found.', 404);
   if (a.status !== 'draft') throw httpError('Only draft appraisals can be edited.');
-  if (body.rating !== undefined) {
-    const r = parseInt(body.rating, 10);
-    if (!Number.isInteger(r) || r < 1 || r > 5) throw httpError('rating must be an integer from 1 to 5.');
-    a.rating = r;
+  if (body.category_ratings !== undefined) {
+    const { normalized, overall } = validateCategoryRatings(body.category_ratings);
+    a.category_ratings = normalized;
+    a.overall_rating = overall;
   }
-  for (const key of ['period_label', 'strengths', 'areas_for_improvement', 'goals_next_period']) {
+  if (body.period_start !== undefined || body.period_end !== undefined) {
+    const { start, end } = validatePeriod(body.period_start ?? a.period_start, body.period_end ?? a.period_end);
+    a.period_start = start;
+    a.period_end = end;
+  }
+  for (const key of ['strengths', 'areas_for_improvement', 'goals_next_period']) {
     if (body[key] !== undefined) a[key] = body[key];
   }
   await a.save();
@@ -1180,6 +1218,7 @@ module.exports = {
   listLoans,
   getLoan,
   cancelLoan,
+  getAppraisalCategories,
   createAppraisal,
   listAppraisals,
   getAppraisal,
