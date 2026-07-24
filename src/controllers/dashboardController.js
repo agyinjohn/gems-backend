@@ -132,19 +132,34 @@ const getDashboard = async (req, res) => {
 
   // ── HR MANAGER ──────────────────────────────────────────────────────────────────────
   if (role === 'hr_manager') {
+    const hrService = require('../services/hrService');
     const today = new Date(); today.setHours(0,0,0,0);
-    const [totalEmp, onLeave, todayAttendance, pendingLeave, recentLeave, monthPayroll] = await Promise.all([
-      Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
-      Employee.countDocuments({ tenant_id: tid, ...bf, status: 'on_leave' }),
-      Attendance.countDocuments({ tenant_id: tid, ...bf, date: { $gte: today }, status: 'present' }),
-      LeaveRequest.countDocuments({ tenant_id: tid, ...bf, status: 'pending' }),
+    const [recentLeave, monthPayroll, hrSummary] = await Promise.all([
       LeaveRequest.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).populate('employee_id', 'name'),
       PayrollRun.aggregate([{ $match: { tenant_id: tid, ...bf, month: today.getMonth()+1, year: today.getFullYear(), status: 'approved' } }, { $group: { _id: null, total: { $sum: '$net_salary' } } }]),
+      hrService.getHrSummary(tid, {}, bf),
     ]);
     return res.json({ success: true, data: {
       role: 'hr_manager',
-      kpis: { total_employees: totalEmp, on_leave: onLeave, present_today: todayAttendance, pending_leave: pendingLeave, month_payroll: monthPayroll[0]?.total || 0 },
+      // NOTE: on_leave/pending_leave/present_today now come from hrService.getHrSummary,
+      // which derives on_leave from actual LeaveRequest overlap — the previous
+      // Employee.countDocuments({status:'on_leave'}) always returned 0 since nothing
+      // in the app ever sets that status value.
+      kpis: {
+        total_employees: hrSummary.active,
+        on_leave: hrSummary.on_leave,
+        present_today: hrSummary.attendance_today,
+        pending_leave: hrSummary.pending_leave,
+        month_payroll: monthPayroll[0]?.total || 0,
+      },
       recent_leave: recentLeave.map(l => ({ ...l.toJSON(), employee_name: l.employee_id?.name || 'Unknown' })),
+      department_breakdown: hrSummary.department_breakdown,
+      employment_type_breakdown: hrSummary.employment_type_breakdown,
+      payroll_trend: hrSummary.payroll_trend,
+      outstanding_loans_total: hrSummary.outstanding_loans_total,
+      outstanding_loans_count: hrSummary.outstanding_loans_count,
+      upcoming_birthdays: hrSummary.upcoming_birthdays,
+      upcoming_anniversaries: hrSummary.upcoming_anniversaries,
     }});
   }
 

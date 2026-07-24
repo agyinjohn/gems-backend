@@ -856,6 +856,7 @@ router.put('/departments/:id', authenticate, requireTenant, authorize('business_
 // EMPLOYEES & HR
 const hrRoles = ['business_owner', 'hr_manager'];
 router.get('/hr/summary', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.hrSummary);
+router.get('/hr/report', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.hrReport);
 router.get('/employees/linkable-users', authenticate, requireTenant, requireModule('hr'), authorize(...hrRoles), hr.listLinkableUsers);
 router.get('/employees', authenticate, requireTenant, requireModule('hr'), hr.listEmployees);
 router.get('/employees/:id', authenticate, requireTenant, requireModule('hr'), hr.getEmployee);
