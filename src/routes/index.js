@@ -736,10 +736,13 @@ router.get('/notifications', authenticate, async (req, res) => {
 // emails are always stored lowercase; Employee emails aren't), auto-linking
 // on first successful match so future lookups hit the fast user_id path.
 async function resolveEssEmployee(req) {
-  let employee = await Employee.findOne({ user_id: req.user._id });
+  const tenantId = req.tenant_id || req.user?.tenant_id;
+  const baseFilter = tenantId ? { tenant_id: tenantId } : {};
+
+  let employee = await Employee.findOne({ ...baseFilter, user_id: req.user._id });
   if (!employee && req.user.email) {
     const escaped = req.user.email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    employee = await Employee.findOne({ email: new RegExp(`^${escaped}$`, 'i') });
+    employee = await Employee.findOne({ ...baseFilter, email: new RegExp(`^${escaped}$`, 'i') });
   }
   if (employee && !employee.user_id) {
     employee.user_id = req.user._id;
@@ -787,7 +790,9 @@ router.post('/ess/leave-requests', authenticate, async (req, res) => {
 router.get('/ess/payslips', authenticate, async (req, res) => {
   const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: [] });
-  const filter = { employee_id: employee._id };
+  const tenantId = employee.tenant_id || req.tenant_id || req.user?.tenant_id;
+  const filter = { employee_id: employee._id, status: { $in: ['submitted', 'approved', 'paid'] } };
+  if (tenantId) filter.tenant_id = tenantId;
   if (req.query.month) filter.month = parseInt(req.query.month);
   if (req.query.year)  filter.year  = parseInt(req.query.year);
   const data = await PayrollRun.find(filter).sort({ year: -1, month: -1 });
