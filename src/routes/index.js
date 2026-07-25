@@ -487,21 +487,36 @@ router.get('/marketplace/shops', async (req, res) => {
   }).select('business_name slug logo storefront_settings.announcement').sort('business_name');
 
   const tenantIds = tenants.map((t) => t._id);
-  const counts = await Product.aggregate([
-    { $match: { tenant_id: { $in: tenantIds }, is_active: true } },
-    { $group: { _id: '$tenant_id', count: { $sum: 1 } } },
-  ]);
-  const countMap = Object.fromEntries(counts.map((c) => [String(c._id), c.count]));
+  const products = await Product.find({ tenant_id: { $in: tenantIds }, is_active: true })
+    .select('tenant_id images category_id')
+    .populate('category_id', 'name')
+    .sort('-createdAt')
+    .limit(2000);
+
+  const byTenant = {};
+  for (const p of products) {
+    const key = String(p.tenant_id);
+    if (!byTenant[key]) byTenant[key] = { count: 0, images: [], categories: new Set() };
+    const bucket = byTenant[key];
+    bucket.count += 1;
+    if (bucket.images.length < 4 && p.images && p.images[0]) bucket.images.push(p.images[0]);
+    if (p.category_id?.name && bucket.categories.size < 4) bucket.categories.add(p.category_id.name);
+  }
 
   const shops = tenants
-    .map((t) => ({
-      id: t._id,
-      business_name: t.business_name,
-      slug: t.slug,
-      logo: t.logo || '',
-      announcement: t.storefront_settings?.announcement || '',
-      product_count: countMap[String(t._id)] || 0,
-    }))
+    .map((t) => {
+      const bucket = byTenant[String(t._id)] || { count: 0, images: [], categories: new Set() };
+      return {
+        id: t._id,
+        business_name: t.business_name,
+        slug: t.slug,
+        logo: t.logo || '',
+        announcement: t.storefront_settings?.announcement || '',
+        product_count: bucket.count,
+        sample_images: bucket.images,
+        categories: Array.from(bucket.categories),
+      };
+    })
     .filter((s) => s.product_count > 0);
 
   res.json({ success: true, data: shops });
