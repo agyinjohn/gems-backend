@@ -18,6 +18,7 @@ const orders = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
+const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -543,6 +544,12 @@ router.get('/payout-methods', authenticate, requireTenant, payoutManagers, payou
 router.post('/payout-methods', authenticate, requireTenant, payoutManagers, payout.create);
 router.patch('/payout-methods/:id/default', authenticate, requireTenant, payoutManagers, payout.setDefault);
 router.delete('/payout-methods/:id', authenticate, requireTenant, payoutManagers, payout.remove);
+
+// Paystack subaccount — opts the tenant into gateway-level payment splitting.
+router.get('/paystack/banks', authenticate, requireTenant, businessOwnerOnly, paystackSubaccount.listBanks);
+router.get('/paystack/subaccount', authenticate, requireTenant, payoutManagers, paystackSubaccount.get);
+router.post('/paystack/subaccount', authenticate, requireTenant, businessOwnerOnly, paystackSubaccount.connect);
+router.delete('/paystack/subaccount', authenticate, requireTenant, businessOwnerOnly, paystackSubaccount.disconnect);
 
 // Payouts — collected takings and withdrawals against them.
 router.get('/payouts/balance', authenticate, requireTenant, payoutManagers, payout.balance);

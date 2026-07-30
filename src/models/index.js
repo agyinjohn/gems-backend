@@ -43,6 +43,19 @@ const tenantSchema = new Schema({
     tax_rate:                  { type: Number, default: 0 },
     tax_name:                  { type: String, default: 'Tax' },
   },
+  // Paystack subaccount. When set, storefront payments are split at the
+  // gateway: the tenant's share settles directly to their own bank account and
+  // only the platform's commission reaches the platform account. Tenants
+  // without one keep collecting into the platform balance and withdrawing from
+  // it (see payoutService).
+  paystack_subaccount: {
+    subaccount_code: String,
+    account_number:  String,
+    account_name:    String,
+    bank_code:       String,
+    is_active:       { type: Boolean, default: false },
+    connected_at:    Date,
+  },
   payout_settings: {
     // When false (default) takings accumulate as a withdrawable balance and a
     // business owner / branch manager requests payouts on demand. When true,
@@ -225,6 +238,17 @@ const orderSchema = new Schema({
   // a commission (platform_fee) out of the payout for these.
   via_marketplace:  { type: Boolean, default: false },
   platform_fee:     { type: Number, default: 0 },
+  // Paystack actually collected this money, whichever channel it arrived on.
+  // POS records payment_method as the channel the customer used ('momo',
+  // 'card'), which does not say whether the funds reached Paystack — a MoMo
+  // transfer straight to the shop looks identical. This flag is what the
+  // withdrawable balance keys off, so takings can't be missed or invented.
+  paystack_settled: { type: Boolean, default: false },
+  // Paid through a Paystack split — the tenant's share went straight to their
+  // own subaccount and never reached the platform balance. These orders are
+  // excluded from the withdrawable balance so they can't be paid out twice.
+  split_settled:    { type: Boolean, default: false },
+  subaccount_code:  String,
   refund_amount:    { type: Number, default: 0 },
   discount_amount:  { type: Number, default: 0 },
   coupon_code:      String,

@@ -52,6 +52,12 @@ async function completePosSale({
   shift_id,
   amount_tendered,
   fromReservation = false,
+  // Set only when Paystack collected the money. payment_method records the
+  // channel the customer used, which cannot distinguish a Paystack MoMo
+  // payment from one sent straight to the shop.
+  paystack_settled = false,
+  split_settled = false,
+  subaccount_code = null,
 }) {
   let subtotal = 0;
   let cogsTotal = 0;
@@ -94,6 +100,9 @@ async function completePosSale({
     payment_status: 'paid',
     payment_method: payment_method || 'cash',
     payment_ref: payment_ref || null,
+    paystack_settled: !!paystack_settled,
+    split_settled: !!split_settled,
+    subaccount_code: subaccount_code || undefined,
     status: 'delivered',
     source: 'pos',
     items: enrichedItems,
@@ -218,6 +227,12 @@ async function fulfillPosPaystackOrder({ tenantId, orderId, reference, userId, b
     shift_id: pending.shift_id,
     amount_tendered,
     fromReservation: true,
+    // Paystack collected this one, so it counts towards the withdrawable
+    // balance — unless it was split, in which case the shop was already paid
+    // directly and the pending order carries the subaccount it went to.
+    paystack_settled: true,
+    split_settled: !!pending.split_settled,
+    subaccount_code: pending.subaccount_code || null,
   });
 
   await Order.findByIdAndDelete(pending._id);

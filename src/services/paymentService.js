@@ -99,7 +99,7 @@ function paystackRequest({ method, path, body, secretKey }) {
   });
 }
 
-async function initializePaystackTransaction({ email, amount, reference, channels, metadata }) {
+async function initializePaystackTransaction({ email, amount, reference, channels, metadata, subaccount, transaction_charge }) {
   const credentials = await getPaystackCredentials();
   assertPaystackConfigured(credentials);
 
@@ -112,6 +112,12 @@ async function initializePaystackTransaction({ email, amount, reference, channel
   };
   if (metadata && Object.keys(metadata).length) {
     body.metadata = metadata;
+  }
+  // Split-enabled tenants: their share settles straight to their subaccount and
+  // transaction_charge (pesewas) is the platform's cut of this transaction.
+  if (subaccount) {
+    body.subaccount = subaccount;
+    body.transaction_charge = Math.round(transaction_charge || 0);
   }
 
   const parsed = await paystackRequest({
@@ -201,8 +207,11 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     order.payment_status = 'paid';
     order.payment_ref = reference || order.payment_ref;
     order.payment_method = 'paystack';
+    order.paystack_settled = true;
     order.status = 'processing';
-    if (order.via_marketplace) {
+    // Split-settled orders had their commission taken at the gateway and
+    // stamped on the order at checkout — don't recompute it here.
+    if (order.via_marketplace && !order.split_settled) {
       const settings = await PlatformSettings.findOne().select('marketplace_commission_pct').lean();
       const pct = settings?.marketplace_commission_pct ?? 5;
       order.platform_fee = Math.round(order.total * (pct / 100) * 100) / 100;
@@ -253,15 +262,18 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       channel: 'storefront',
     }).catch(() => {});
 
-    // Push the takings straight out only when the tenant has opted into
-    // automatic payouts. Otherwise the amount stays in the balance for them to
-    // withdraw on request (see payoutService).
-    await triggerStorefrontPayout(
-      order.tenant_id,
-      order.total - (order.platform_fee || 0),
-      order.order_number,
-      order.branch_id,
-    );
+    // Split-settled orders already paid the tenant at the gateway; there is
+    // nothing in the platform balance to send on. Otherwise push the takings
+    // straight out only when the tenant has opted into automatic payouts —
+    // they stay withdrawable on request by default (see payoutService).
+    if (!order.split_settled) {
+      await triggerStorefrontPayout(
+        order.tenant_id,
+        order.total - (order.platform_fee || 0),
+        order.order_number,
+        order.branch_id,
+      );
+    }
 
     if (order.coupon_code) {
       const { Coupon } = require('../models');

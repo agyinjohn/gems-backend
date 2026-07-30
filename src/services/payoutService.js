@@ -44,7 +44,13 @@ async function getBalance({ tenantId, branchFilter = {} }) {
   const takingsMatch = {
     tenant_id: new mongoose.Types.ObjectId(tenantId),
     payment_status: 'paid',
-    payment_method: 'paystack',
+    // Money Paystack collected, on any channel. paystack_settled covers both
+    // storefront and POS; payment_method is the legacy fallback for storefront
+    // orders written before that flag existed.
+    $or: [{ paystack_settled: true }, { payment_method: 'paystack' }],
+    // Split-settled orders paid the tenant directly at the gateway, so that
+    // money is not in the platform balance and must never be withdrawable.
+    split_settled: { $ne: true },
     ...branchFilter,
   };
 

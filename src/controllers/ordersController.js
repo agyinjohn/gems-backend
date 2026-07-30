@@ -7,6 +7,7 @@ const accounting = require('../services/accountingService');
 const { verifyPaystackTransaction, fulfillStorefrontOrders, failStorefrontOrders } = require('../services/paymentService');
 const { isFeatureEnabled } = require('../services/tenantService');
 const { getActiveSalesTaxRate, calcTaxAmount } = require('../services/taxService');
+const splitService = require('../services/splitService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -234,6 +235,37 @@ const initiateCheckout = async (req, res) => {
   }
 
   const grandTotal = orders.reduce((s, o) => s + o.total, 0);
+
+  // Split-enabled tenants are paid at the gateway: their share settles straight
+  // to their own subaccount, so these orders are marked as settled and stay out
+  // of the withdrawable platform balance. A checkout is one Paystack
+  // transaction, so the commission is worked out on the whole total and then
+  // apportioned across the orders it produced.
+  const split = await splitService.buildSplitForCheckout({
+    tenantId: resolvedTenantId,
+    amount: grandTotal,
+    viaMarketplace: !!via_marketplace,
+  });
+
+  if (split) {
+    let allocated = 0;
+    for (let i = 0; i < orders.length; i++) {
+      const isLast = i === orders.length - 1;
+      // Give the rounding remainder to the last order so the apportioned fees
+      // add up to exactly the commission charged at the gateway.
+      const fee = isLast
+        ? Math.round((split.commission - allocated) * 100) / 100
+        : Math.round((split.commission * (orders[i].total / grandTotal)) * 100) / 100;
+      allocated = Math.round((allocated + fee) * 100) / 100;
+
+      await Order.findByIdAndUpdate(orders[i].order_id, {
+        split_settled: true,
+        subaccount_code: split.subaccount,
+        platform_fee: fee,
+      });
+    }
+  }
+
   res.status(201).json({
     success: true,
     data: {
@@ -246,6 +278,9 @@ const initiateCheckout = async (req, res) => {
       reference: paystackRef,
       tax_rate: taxRatePct,
       tax_name: salesTax?.name || '',
+      // Passed straight through to Paystack Inline when the tenant is
+      // split-enabled; absent otherwise.
+      ...(split && { subaccount: split.subaccount, transaction_charge: split.transaction_charge }),
     },
   });
 };
