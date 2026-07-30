@@ -150,6 +150,7 @@ router.get('/platform/settings', authenticate, platformAdminOnly, async (req, re
   // Mask secret key in response
   const data = settings.toJSON();
   if (data.paystack_secret_key) data.paystack_secret_key = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' + data.paystack_secret_key.slice(-4);
+  if (data.mnotify_api_key) data.mnotify_api_key = 'MASKED' + data.mnotify_api_key.slice(-4);
   res.json({ success: true, data });
 });
 router.put('/platform/settings', authenticate, platformAdminOnly, async (req, res) => {
@@ -161,7 +162,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days,
     audit_retention_days, feature_flags, marketplace_commission_pct,
-    sms_bundles, sms_sender_id,
+    sms_bundles, sms_sender_id, mnotify_api_key,
   } = req.body;
   let settings = await PlatformSettings.findOne();
   if (!settings) settings = new PlatformSettings();
@@ -175,6 +176,10 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
   };
   for (const [k, v] of Object.entries(fields)) {
     if (v !== undefined) settings[k] = v;
+  }
+  // Same masking rule as the Paystack secret: a masked value means "unchanged".
+  if (mnotify_api_key !== undefined && !String(mnotify_api_key).startsWith('MASKED')) {
+    settings.mnotify_api_key = String(mnotify_api_key).trim();
   }
   // Only update secret key if a real value (not masked) is provided
   if (paystack_secret_key && !paystack_secret_key.startsWith('â€¢â€¢â€¢â€¢')) {
@@ -204,6 +209,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
   invalidatePaystackCredentialsCache();
   const data = settings.toJSON();
   if (data.paystack_secret_key) data.paystack_secret_key = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' + data.paystack_secret_key.slice(-4);
+  if (data.mnotify_api_key) data.mnotify_api_key = 'MASKED' + data.mnotify_api_key.slice(-4);
   res.json({ success: true, data });
 });
 
@@ -561,6 +567,16 @@ router.get('/payout-methods', authenticate, requireTenant, payoutManagers, payou
 router.post('/payout-methods', authenticate, requireTenant, payoutManagers, payout.create);
 router.patch('/payout-methods/:id/default', authenticate, requireTenant, payoutManagers, payout.setDefault);
 router.delete('/payout-methods/:id', authenticate, requireTenant, payoutManagers, payout.remove);
+
+// Platform's own mNotify balance — the stock behind what tenants buy.
+router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req, res) => {
+  const { getProviderBalance } = require('../services/smsService');
+  try {
+    res.json({ success: true, data: await getProviderBalance() });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message || 'Could not reach the SMS gateway.' });
+  }
+});
 
 // SMS — prepaid credits resold by the platform, plus per-tenant templates.
 router.get('/sms/balance',              authenticate, requireTenant, sms.getBalance);
