@@ -23,6 +23,7 @@ const {
   getDisplayQueue,
 } = require('../services/posDisplayService');
 const { syncPendingPaystackOrders, PENDING_ORDER_TTL_MS } = require('../services/posPendingService');
+const splitService = require('../services/splitService');
 const {
   reserveStockForItems,
   releaseStockForItems,
@@ -192,6 +193,22 @@ const initPaystackPayment = async (req, res) => {
     await Order.findByIdAndDelete(order._id);
   };
 
+  // Split-enabled tenants are settled at the gateway on POS sales too. A POS
+  // sale is never a marketplace order, so the tenant keeps the whole amount and
+  // the platform takes nothing (a charge of 0). Resolved before the branch
+  // below because both the server-initialised (card) and popup (momo) paths
+  // need it.
+  const posSplit = await splitService.buildSplitForCheckout({
+    tenantId: req.tenant_id,
+    amount: subtotal,
+    viaMarketplace: false,
+  });
+  if (posSplit) {
+    order.split_settled = true;
+    order.subaccount_code = posSplit.subaccount;
+    await order.save();
+  }
+
   const basePayload = {
     order_id: order._id,
     order_number: orderNumber,
@@ -200,6 +217,7 @@ const initPaystackPayment = async (req, res) => {
     email: paystackEmail,
     paystack_public_key: credentials.publicKey,
     channels,
+    ...(posSplit && { subaccount: posSplit.subaccount, transaction_charge: posSplit.transaction_charge }),
   };
 
   if (payment_method === 'card' || payment_method === 'card_terminal') {
@@ -231,6 +249,7 @@ const initPaystackPayment = async (req, res) => {
         reference,
         channels: initChannels,
         metadata,
+        ...(posSplit && { subaccount: posSplit.subaccount, transaction_charge: posSplit.transaction_charge }),
       });
 
       let terminalName = null;

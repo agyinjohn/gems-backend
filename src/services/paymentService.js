@@ -99,7 +99,7 @@ function paystackRequest({ method, path, body, secretKey }) {
   });
 }
 
-async function initializePaystackTransaction({ email, amount, reference, channels, metadata }) {
+async function initializePaystackTransaction({ email, amount, reference, channels, metadata, subaccount, transaction_charge }) {
   const credentials = await getPaystackCredentials();
   assertPaystackConfigured(credentials);
 
@@ -112,6 +112,12 @@ async function initializePaystackTransaction({ email, amount, reference, channel
   };
   if (metadata && Object.keys(metadata).length) {
     body.metadata = metadata;
+  }
+  // Split-enabled tenants: their share settles straight to their subaccount and
+  // transaction_charge (pesewas) is the platform's cut of this transaction.
+  if (subaccount) {
+    body.subaccount = subaccount;
+    body.transaction_charge = Math.round(transaction_charge || 0);
   }
 
   const parsed = await paystackRequest({
@@ -201,6 +207,7 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     order.payment_status = 'paid';
     order.payment_ref = reference || order.payment_ref;
     order.payment_method = 'paystack';
+    order.paystack_settled = true;
     order.status = 'processing';
     // Split-settled orders had their commission taken at the gateway and
     // stamped on the order at checkout — don't recompute it here.

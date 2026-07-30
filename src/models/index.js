@@ -238,6 +238,12 @@ const orderSchema = new Schema({
   // a commission (platform_fee) out of the payout for these.
   via_marketplace:  { type: Boolean, default: false },
   platform_fee:     { type: Number, default: 0 },
+  // Paystack actually collected this money, whichever channel it arrived on.
+  // POS records payment_method as the channel the customer used ('momo',
+  // 'card'), which does not say whether the funds reached Paystack — a MoMo
+  // transfer straight to the shop looks identical. This flag is what the
+  // withdrawable balance keys off, so takings can't be missed or invented.
+  paystack_settled: { type: Boolean, default: false },
   // Paid through a Paystack split — the tenant's share went straight to their
   // own subaccount and never reached the platform balance. These orders are
   // excluded from the withdrawable balance so they can't be paid out twice.
