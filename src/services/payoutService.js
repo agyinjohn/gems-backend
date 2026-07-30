@@ -45,6 +45,9 @@ async function getBalance({ tenantId, branchFilter = {} }) {
     tenant_id: new mongoose.Types.ObjectId(tenantId),
     payment_status: 'paid',
     payment_method: 'paystack',
+    // Split-settled orders paid the tenant directly at the gateway, so that
+    // money is not in the platform balance and must never be withdrawable.
+    split_settled: { $ne: true },
     ...branchFilter,
   };
 
