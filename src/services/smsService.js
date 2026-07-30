@@ -136,23 +136,146 @@ function normalisePhone(raw) {
   return `+${digits}`;
 }
 
+/* ── mNotify gateway ──────────────────────────────────────────────────────── */
+
+const MNOTIFY_BASE_URL = (process.env.MNOTIFY_BASE_URL || 'https://api.mnotify.com/api').replace(/\/$/, '');
+
+// mNotify's documented response codes. 1003 matters most operationally: it is
+// the *platform's* mNotify account running dry, not the tenant's credits, so it
+// needs a top-up from us rather than from them.
+const MNOTIFY_ERRORS = {
+  1002: 'The SMS gateway rejected the request.',
+  1003: 'The platform SMS account has run out of credit. Top up the mNotify account.',
+  1004: 'The SMS gateway API key is invalid.',
+  1005: 'The recipient phone number was rejected.',
+  1006: 'The sender ID is not registered with the SMS gateway.',
+  1007: 'The message was scheduled rather than sent.',
+  1008: 'The message was empty.',
+};
+
 /**
- * Hand the message to the SMS gateway.
+ * mNotify expects a bare international number — no plus. Its own validator caps
+ * length at 12 characters, so the E.164 form we store (+233…, 13 characters)
+ * would be rejected outright.
+ */
+function formatForMnotify(e164) {
+  return String(e164 || '').replace(/^\+/, '');
+}
+
+async function getSmsCredentials() {
+  const settings = await PlatformSettings.findOne().select('mnotify_api_key sms_sender_id').lean();
+  return {
+    apiKey: (settings?.mnotify_api_key || process.env.MNOTIFY_API_KEY || '').trim(),
+    defaultSender: settings?.sms_sender_id || 'GEMS',
+  };
+}
+
+/** POST JSON and parse the JSON reply, without pulling in an HTTP dependency. */
+function postJson(url, payload) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const target = new URL(url);
+    const data = JSON.stringify(payload);
+
+    const req = https.request({
+      hostname: target.hostname,
+      path: `${target.pathname}${target.search}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+      timeout: 20000,
+    }, (res) => {
+      let raw = '';
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(raw));
+        } catch {
+          reject(new Error(`SMS gateway returned an unreadable response (HTTP ${res.statusCode}).`));
+        }
+      });
+    });
+
+    req.on('timeout', () => { req.destroy(new Error('SMS gateway timed out.')); });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * Hand the message to mNotify.
  *
- * No provider is wired up yet, so this reports "not configured" rather than
- * claiming a send. Credits are only spent on a real send, so nothing is
- * charged while this is a stub.
+ * Resolves { sent, provider, provider_ref } or { sent: false, reason }. Never
+ * reports a send it isn't sure of: anything other than an explicit success is
+ * treated as a failure, so the caller refunds the tenant's credits.
  */
 async function dispatchToProvider({ to, body, senderId }) {
-  const apiKey = process.env.SMS_API_KEY;
+  const { apiKey } = await getSmsCredentials();
   if (!apiKey) {
     console.log('[SMS:stub]', { to, senderId, body: body.slice(0, 80) });
-    return { sent: false, provider: 'stub', reason: 'SMS gateway is not configured.' };
+    return { sent: false, provider: 'mnotify', reason: 'The SMS gateway is not configured.' };
   }
-  // Wire the chosen Ghanaian gateway (Hubtel, mNotify, Arkesel…) here. It must
-  // resolve { sent, provider, provider_ref } or throw.
-  console.log('[SMS] gateway configured but no client wired', { to });
-  return { sent: false, provider: 'unconfigured', reason: 'No SMS gateway client is wired up.' };
+
+  const result = await postJson(
+    `${MNOTIFY_BASE_URL}/sms/quick?key=${encodeURIComponent(apiKey)}`,
+    {
+      recipient: [formatForMnotify(to)],
+      sender: senderId,
+      message: body,
+      is_schedule: false,
+      schedule_date: '',
+    },
+  );
+
+  const code = Number(result?.code);
+  const ok = code === 2000 || result?.status === 'success';
+  if (!ok) {
+    return {
+      sent: false,
+      provider: 'mnotify',
+      reason: MNOTIFY_ERRORS[code] || result?.message || 'The SMS gateway rejected the message.',
+    };
+  }
+
+  return {
+    sent: true,
+    provider: 'mnotify',
+    provider_ref: result?.summary?._id || result?.summary?.message_id || result?.message_id || null,
+  };
+}
+
+/**
+ * The platform's own credit balance at mNotify — the stock behind what tenants
+ * buy. Distinct from any tenant's balance.
+ */
+async function getProviderBalance() {
+  const { apiKey } = await getSmsCredentials();
+  if (!apiKey) return { configured: false };
+
+  const https = require('https');
+  const url = `${MNOTIFY_BASE_URL}/balance/sms?key=${encodeURIComponent(apiKey)}`;
+
+  const raw = await new Promise((resolve, reject) => {
+    https.get(url, { timeout: 15000 }, (res) => {
+      let out = '';
+      res.on('data', (c) => { out += c; });
+      res.on('end', () => resolve(out));
+    }).on('error', reject).on('timeout', function () { this.destroy(new Error('SMS gateway timed out.')); });
+  });
+
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      configured: true,
+      balance: parsed?.balance ?? parsed?.data?.balance ?? null,
+      raw: parsed,
+    };
+  } catch {
+    return { configured: true, balance: null, error: 'Unreadable response from the SMS gateway.' };
+  }
 }
 
 /**
@@ -237,6 +360,8 @@ async function sendTemplated({ tenantId, to, key, vars, userId }) {
 
 module.exports = {
   DEFAULT_TEMPLATES,
+  formatForMnotify,
+  getProviderBalance,
   TEMPLATE_VARIABLES,
   countSegments,
   isGsm7,

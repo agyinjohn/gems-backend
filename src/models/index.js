@@ -700,6 +700,9 @@ const platformSettingsSchema = new Schema({
     { label: 'Bulk',     credits: 2000, price: 230 },
   ]},
   sms_sender_id: { type: String, default: 'GEMS' },
+  // mNotify account the platform buys SMS through and resells from. Treated as
+  // a secret: masked on read, only overwritten when a real value is sent.
+  mnotify_api_key: { type: String, default: '' },
   // Feature flags per plan
   feature_flags: { type: Schema.Types.Mixed, default: {
     starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
