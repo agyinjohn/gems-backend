@@ -197,6 +197,16 @@ const listPayouts = async (req, res) => {
 const requestPayout = async (req, res) => {
   const { amount, method_id, branch_id } = req.body;
 
+  // Only an owner may draw on the whole organisation. A branch manager with no
+  // branch assigned would otherwise fall through to organisation-wide scope and
+  // be able to withdraw the entire business's money.
+  if (!isOwner(req) && !req.user.branch_id) {
+    return res.status(403).json({
+      success: false,
+      message: 'You need to be assigned to a branch before you can request a payout.',
+    });
+  }
+
   const { branchId, error } = resolveTargetBranch(req, branch_id);
   if (error) return res.status(400).json({ success: false, message: error });
 
@@ -235,20 +245,6 @@ const requestPayout = async (req, res) => {
     });
   }
 
-  // Don't stack withdrawals on the same scope while one is still in flight —
-  // the balance hasn't settled yet and a second request could overdraw it.
-  const inFlight = await Payout.findOne({
-    tenant_id: req.tenant_id,
-    branch_id: branchId || null,
-    status: { $in: ['pending', 'processing'] },
-  });
-  if (inFlight) {
-    return res.status(409).json({
-      success: false,
-      message: 'A payout is already being processed. Wait for it to complete before requesting another.',
-    });
-  }
-
   const method = await payoutService.resolvePayoutMethod({
     tenantId: req.tenant_id,
     branchId,
@@ -262,14 +258,23 @@ const requestPayout = async (req, res) => {
     });
   }
 
-  const payout = await payoutService.createPayout({
-    tenantId: req.tenant_id,
-    branchId,
-    amount: requested,
-    method,
-    trigger: 'manual',
-    userId: req.user.id || req.user._id,
-  });
+  // Two withdrawals on one scope are rejected by a unique index inside
+  // createPayout rather than a prior lookup, so simultaneous requests can't
+  // both get through.
+  let payout;
+  try {
+    payout = await payoutService.createPayout({
+      tenantId: req.tenant_id,
+      branchId,
+      amount: requested,
+      method,
+      trigger: 'manual',
+      userId: req.user.id || req.user._id,
+    });
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ success: false, message: err.message });
+    throw err;
+  }
 
   if (payout.status === 'failed') {
     return res.status(400).json({

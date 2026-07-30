@@ -1175,10 +1175,21 @@ const payoutSchema = new Schema({
   failure_reason:   String,
   requested_by:     { type: Schema.Types.ObjectId, ref: 'User' },
   completed_at:     Date,
+  // True only while a *requested* payout is still in flight. Backs the unique
+  // index below, which is what actually stops a scope having two withdrawals
+  // running at once — a read-then-write check cannot, since two concurrent
+  // requests can both read "none in flight". Automatic per-order payouts are
+  // left unflagged: they are driven by orders rather than by a person, and
+  // must not serialise behind one another.
+  is_open:          { type: Boolean },
 }, { timestamps: true });
 payoutSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
 payoutSchema.index({ reference: 1 }, { unique: true });
 payoutSchema.index({ transfer_code: 1 });
+payoutSchema.index(
+  { tenant_id: 1, branch_id: 1 },
+  { unique: true, partialFilterExpression: { is_open: true } },
+);
 
 // COUPON
 const couponSchema = new Schema({

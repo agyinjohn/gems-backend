@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { Order, Payout, PayoutMethod, Tenant } = require('../models');
 const { paystackRequest, getPaystackCredentials } = require('./paymentService');
@@ -21,11 +22,6 @@ const { paystackRequest, getPaystackCredentials } = require('./paymentService');
  */
 
 const PAYOUT_OPEN_STATUSES = ['pending', 'processing', 'paid'];
-
-/** Scope filter for a request: branch users are pinned, org users see all/one. */
-function scopeFilter(req) {
-  return { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
-}
 
 async function getTenantPayoutSettings(tenantId) {
   const tenant = await Tenant.findById(tenantId).select('payout_settings').lean();
@@ -83,6 +79,10 @@ async function getBalance({ tenantId, branchFilter = {} }) {
   const refunds = takingsRow?.refunds || 0;
   const earned = round2(gross - fees - refunds);
   const withdrawn = round2(outRow?.total || 0);
+  // Reported as-is, including when negative. That happens when an order is
+  // refunded after its takings were already paid out, and it means the tenant
+  // owes the difference back — clamping it to zero would hide a real position.
+  const available = round2(earned - withdrawn);
 
   return {
     currency: 'GHS',
@@ -91,7 +91,8 @@ async function getBalance({ tenantId, branchFilter = {} }) {
     refunds: round2(refunds),
     earned,
     withdrawn,
-    available: round2(Math.max(earned - withdrawn, 0)),
+    available,
+    is_overdrawn: available < 0,
     order_count: takingsRow?.orders || 0,
     payout_count: outRow?.count || 0,
   };
@@ -128,7 +129,22 @@ function round2(n) {
 }
 
 function buildReference(tenantId) {
-  return `PO-${String(tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+  // Random suffix as well as the timestamp: two payouts for the same tenant can
+  // land in the same millisecond — most easily in the automatic per-order loop —
+  // and a timestamp alone would collide on the unique index.
+  const salt = crypto.randomBytes(3).toString('hex').toUpperCase();
+  return `PO-${String(tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}-${salt}`;
+}
+
+const TERMINAL_STATUSES = ['paid', 'failed', 'reversed'];
+
+/**
+ * Free this scope's in-flight slot once the payout has settled one way or the
+ * other, so the next withdrawal can be requested. Leaving it set would lock the
+ * scope out permanently.
+ */
+function releaseIfSettled(payout) {
+  if (TERMINAL_STATUSES.includes(payout.status)) payout.is_open = undefined;
 }
 
 /**
@@ -139,18 +155,36 @@ function buildReference(tenantId) {
  * which releases the amount back into the available balance.
  */
 async function createPayout({ tenantId, branchId, amount, method, trigger, userId }) {
-  const payout = await Payout.create({
-    tenant_id: tenantId,
-    branch_id: branchId || null,
-    amount: round2(amount),
-    status: 'pending',
-    trigger: trigger || 'manual',
-    payout_method_id: method._id,
-    method_label: method.label,
-    recipient_code: method.recipient_code,
-    reference: buildReference(tenantId),
-    requested_by: userId || null,
-  });
+  const isManual = (trigger || 'manual') === 'manual';
+
+  let payout;
+  try {
+    payout = await Payout.create({
+      tenant_id: tenantId,
+      branch_id: branchId || null,
+      amount: round2(amount),
+      status: 'pending',
+      trigger: trigger || 'manual',
+      payout_method_id: method._id,
+      method_label: method.label,
+      recipient_code: method.recipient_code,
+      reference: buildReference(tenantId),
+      requested_by: userId || null,
+      // Claims this scope's single in-flight slot. Automatic payouts are left
+      // unflagged so they never queue behind each other.
+      ...(isManual && { is_open: true }),
+    });
+  } catch (err) {
+    // The unique partial index rejected it: another withdrawal for this scope
+    // is already in flight. This is the check that actually holds under
+    // concurrent requests.
+    if (err?.code === 11000) {
+      const conflict = new Error('A payout is already being processed. Wait for it to complete before requesting another.');
+      conflict.status = 409;
+      throw conflict;
+    }
+    throw err;
+  }
 
   try {
     const { secretKey } = await getPaystackCredentials();
@@ -171,6 +205,7 @@ async function createPayout({ tenantId, branchId, amount, method, trigger, userI
     if (!result?.status) {
       payout.status = 'failed';
       payout.failure_reason = result?.message || 'Paystack rejected the transfer.';
+      releaseIfSettled(payout);
       await payout.save();
       return payout;
     }
@@ -180,11 +215,13 @@ async function createPayout({ tenantId, branchId, amount, method, trigger, userI
     // otherwise it sits pending until the transfer.* webhook lands.
     payout.status = result.data?.status === 'success' ? 'paid' : 'processing';
     if (payout.status === 'paid') payout.completed_at = new Date();
+    releaseIfSettled(payout);
     await payout.save();
     return payout;
   } catch (err) {
     payout.status = 'failed';
     payout.failure_reason = err.message || 'Transfer request failed.';
+    releaseIfSettled(payout);
     await payout.save();
     return payout;
   }
@@ -215,13 +252,14 @@ async function applyTransferWebhook({ event, data }) {
   }
 
   if (!payout.transfer_code && data?.transfer_code) payout.transfer_code = data.transfer_code;
+  releaseIfSettled(payout);
   await payout.save();
   return payout;
 }
 
 module.exports = {
   PAYOUT_OPEN_STATUSES,
-  scopeFilter,
+  TERMINAL_STATUSES,
   getTenantPayoutSettings,
   getBalance,
   resolvePayoutMethod,
