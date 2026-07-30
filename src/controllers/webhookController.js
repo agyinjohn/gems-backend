@@ -31,6 +31,18 @@ const handlePaystackWebhook = async (req, res) => {
 
   const reference = event.data?.reference;
 
+  // Transfer lifecycle — settles payouts we pushed to Paystack. A failed or
+  // reversed transfer releases its amount back into the withdrawable balance.
+  if (typeof event.event === 'string' && event.event.startsWith('transfer.')) {
+    try {
+      const { applyTransferWebhook } = require('../services/payoutService');
+      await applyTransferWebhook({ event: event.event, data: event.data });
+    } catch (err) {
+      console.error(`[Webhook] Paystack ${event.event} failed:`, err.message);
+    }
+    return;
+  }
+
   if (event.event === 'charge.failed' && reference) {
     try {
       const pendingPos = await Order.findOne({ payment_ref: reference, payment_status: 'pending', source: 'pos' })

@@ -43,6 +43,19 @@ const tenantSchema = new Schema({
     tax_rate:                  { type: Number, default: 0 },
     tax_name:                  { type: String, default: 'Tax' },
   },
+  payout_settings: {
+    // When false (default) takings accumulate as a withdrawable balance and a
+    // business owner / branch manager requests payouts on demand. When true,
+    // each paid order is transferred out immediately on fulfillment — the
+    // original behaviour, kept as an opt-in.
+    auto_payout:        { type: Boolean, default: false },
+    // When false a single organisation-wide payout method serves every branch.
+    // When true each branch keeps its own method and branch payouts go there,
+    // falling back to the org-wide default if a branch has not set one up.
+    per_branch_methods: { type: Boolean, default: false },
+    // Smallest amount that may be withdrawn in one request.
+    min_payout_amount:  { type: Number, default: 10 },
+  },
 }, { timestamps: true });
 
 // BRANCH
@@ -1034,6 +1047,9 @@ storeCustomerSchema.index({ tenant_id: 1, email: 1 }, { unique: true });
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  // null = organisation-wide, usable by every branch. Set = belongs to that
+  // branch only (used when payout_settings.per_branch_methods is on).
+  branch_id:        { type: Schema.Types.ObjectId, ref: 'Branch', default: null },
   type:             { type: String, enum: ['mobile_money', 'bank'], required: true },
   label:            { type: String, required: true },          // e.g. "MTN MoMo - 024..."
   recipient_code:   { type: String, required: true },          // Paystack transfer recipient code
@@ -1044,7 +1060,35 @@ const payoutMethodSchema = new Schema({
   is_default:       { type: Boolean, default: false },
   is_active:        { type: Boolean, default: true },
 }, { timestamps: true });
-payoutMethodSchema.index({ tenant_id: 1 });
+payoutMethodSchema.index({ tenant_id: 1, branch_id: 1 });
+
+// PAYOUT — a withdrawal of collected takings to a payout method.
+//
+// Every transfer out of the Paystack balance, whether requested by a user or
+// fired automatically on fulfillment, gets a row here. Withdrawable balance is
+// derived as (paid Paystack takings) − (payouts not in a failed state), so the
+// ledger stays correct no matter which path moved the money.
+const payoutSchema = new Schema({
+  tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:        { type: Schema.Types.ObjectId, ref: 'Branch', default: null },
+  amount:           { type: Number, required: true },
+  currency:         { type: String, default: 'GHS' },
+  status:           { type: String, enum: ['pending', 'processing', 'paid', 'failed', 'reversed'], default: 'pending' },
+  trigger:          { type: String, enum: ['manual', 'auto'], default: 'manual' },
+  // Snapshot of the destination at the time of transfer, so history stays
+  // readable even if the payout method is later edited or removed.
+  payout_method_id: { type: Schema.Types.ObjectId, ref: 'PayoutMethod' },
+  method_label:     String,
+  recipient_code:   String,
+  reference:        { type: String, required: true },          // our own reference
+  transfer_code:    String,                                    // Paystack transfer code
+  failure_reason:   String,
+  requested_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+  completed_at:     Date,
+}, { timestamps: true });
+payoutSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
+payoutSchema.index({ reference: 1 }, { unique: true });
+payoutSchema.index({ transfer_code: 1 });
 
 // COUPON
 const couponSchema = new Schema({
@@ -1087,7 +1131,7 @@ const allSchemas = [
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
-  payoutMethodSchema,
+  payoutMethodSchema, payoutSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1154,4 +1198,5 @@ module.exports = {
   Coupon:                mongoose.model('Coupon', couponSchema),
   Promotion:             mongoose.model('Promotion', promotionSchema),
   PayoutMethod:          mongoose.model('PayoutMethod', payoutMethodSchema),
+  Payout:                mongoose.model('Payout', payoutSchema),
 };

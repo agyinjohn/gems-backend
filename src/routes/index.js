@@ -535,11 +535,21 @@ router.get('/storefront/products', orders.getStorefrontProducts);
 router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
 router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
 
-// Payout methods
-router.get('/payout-methods', authenticate, requireTenant, businessOwnerOnly, payout.list);
-router.post('/payout-methods', authenticate, requireTenant, businessOwnerOnly, payout.create);
-router.patch('/payout-methods/:id/default', authenticate, requireTenant, businessOwnerOnly, payout.setDefault);
-router.delete('/payout-methods/:id', authenticate, requireTenant, businessOwnerOnly, payout.remove);
+// Payout methods — a branch manager manages the account their own branch is
+// paid into; a business owner manages those plus the organisation-wide one.
+const payoutManagers = authorize('platform_admin', 'business_owner', 'branch_manager');
+
+router.get('/payout-methods', authenticate, requireTenant, payoutManagers, payout.list);
+router.post('/payout-methods', authenticate, requireTenant, payoutManagers, payout.create);
+router.patch('/payout-methods/:id/default', authenticate, requireTenant, payoutManagers, payout.setDefault);
+router.delete('/payout-methods/:id', authenticate, requireTenant, payoutManagers, payout.remove);
+
+// Payouts — collected takings and withdrawals against them.
+router.get('/payouts/balance', authenticate, requireTenant, payoutManagers, payout.balance);
+router.get('/payouts/settings', authenticate, requireTenant, payoutManagers, payout.getSettings);
+router.put('/payouts/settings', authenticate, requireTenant, businessOwnerOnly, payout.updateSettings);
+router.get('/payouts', authenticate, requireTenant, payoutManagers, payout.listPayouts);
+router.post('/payouts', authenticate, requireTenant, payoutManagers, payout.requestPayout);
 router.get('/storefront/resolve-domain', storefront.resolveDomain);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
