@@ -1,6 +1,6 @@
 const https = require('node:https');
 const crypto = require('crypto');
-const { Order, Product, StockMovement, PayoutMethod, PlatformSettings } = require('../models');
+const { Order, Product, StockMovement, PlatformSettings } = require('../models');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
@@ -253,9 +253,15 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       channel: 'storefront',
     }).catch(() => {});
 
-    // Trigger immediate payout to tenant's default payout method — minus the
-    // platform's marketplace commission, if this order came via the directory.
-    await triggerStorefrontPayout(order.tenant_id, order.total - (order.platform_fee || 0), order.order_number);
+    // Push the takings straight out only when the tenant has opted into
+    // automatic payouts. Otherwise the amount stays in the balance for them to
+    // withdraw on request (see payoutService).
+    await triggerStorefrontPayout(
+      order.tenant_id,
+      order.total - (order.platform_fee || 0),
+      order.order_number,
+      order.branch_id,
+    );
 
     if (order.coupon_code) {
       const { Coupon } = require('../models');
@@ -268,23 +274,37 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
   return { order_numbers: orderNumbers, fulfilled: orderNumbers.length };
 }
 
-async function triggerStorefrontPayout(tenantId, amount, reference) {
+/**
+ * Automatic per-order payout.
+ *
+ * Only runs for tenants who have opted into payout_settings.auto_payout; by
+ * default takings accumulate as a withdrawable balance instead. Either way the
+ * transfer is recorded as a Payout row so the balance calculation stays
+ * correct regardless of which path moved the money.
+ */
+async function triggerStorefrontPayout(tenantId, amount, reference, branchId = null) {
   try {
-    const method = await PayoutMethod.findOne({ tenant_id: tenantId, is_default: true, is_active: true }).lean();
+    // Required lazily — payoutService imports this module for Paystack access.
+    const payoutService = require('./payoutService');
+
+    const settings = await payoutService.getTenantPayoutSettings(tenantId);
+    if (!settings.auto_payout) return; // balance accrues for manual withdrawal
+
+    if (!(amount > 0)) return;
+
+    const method = await payoutService.resolvePayoutMethod({
+      tenantId,
+      branchId,
+      perBranchMethods: settings.per_branch_methods,
+    });
     if (!method) return; // no payout method configured — skip silently
 
-    const { secretKey } = await getPaystackCredentials();
-    await paystackRequest({
-      method: 'POST',
-      path: '/transfer',
-      body: {
-        source: 'balance',
-        amount: Math.round(amount * 100), // kobo/pesewas
-        recipient: method.recipient_code,
-        reason: `Storefront payout — ${reference}`,
-        currency: 'GHS',
-      },
-      secretKey,
+    await payoutService.createPayout({
+      tenantId,
+      branchId,
+      amount,
+      method,
+      trigger: 'auto',
     });
   } catch (err) {
     console.error('[Payout] Transfer failed for', reference, err.message);
