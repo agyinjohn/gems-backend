@@ -19,6 +19,7 @@ const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
+const sms = require('../controllers/smsController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -160,6 +161,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days,
     audit_retention_days, feature_flags, marketplace_commission_pct,
+    sms_bundles, sms_sender_id,
   } = req.body;
   let settings = await PlatformSettings.findOne();
   if (!settings) settings = new PlatformSettings();
@@ -169,7 +171,7 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
     paystack_public_key, paystack_webhook_url,
     paystack_virtual_terminal_code, paystack_terminal_whatsapp,
     trial_warning_days, expiry_alert_days, audit_retention_days,
-    marketplace_commission_pct,
+    marketplace_commission_pct, sms_sender_id,
   };
   for (const [k, v] of Object.entries(fields)) {
     if (v !== undefined) settings[k] = v;
@@ -180,6 +182,21 @@ router.put('/platform/settings', authenticate, platformAdminOnly, async (req, re
   }
   if (plans !== undefined) { settings.plans = plans; settings.markModified('plans'); }
   if (feature_flags !== undefined) { settings.feature_flags = feature_flags; settings.markModified('feature_flags'); }
+  // Mixed type, so Mongoose needs telling it changed. Rejects malformed rows
+  // rather than storing a bundle a tenant could not actually buy.
+  if (sms_bundles !== undefined) {
+    if (!Array.isArray(sms_bundles)) {
+      return res.status(400).json({ success: false, message: 'sms_bundles must be an array.' });
+    }
+    const clean = sms_bundles
+      .map((b) => ({ label: String(b?.label || '').trim(), credits: Number(b?.credits), price: Number(b?.price) }))
+      .filter((b) => b.label && Number.isFinite(b.credits) && b.credits > 0 && Number.isFinite(b.price) && b.price >= 0);
+    if (clean.length !== sms_bundles.length) {
+      return res.status(400).json({ success: false, message: 'Every bundle needs a label, a credit count above zero and a price.' });
+    }
+    settings.sms_bundles = clean;
+    settings.markModified('sms_bundles');
+  }
   await settings.save();
   const { invalidatePlatformSettingsCache } = require('../services/tenantService');
   const { invalidatePaystackCredentialsCache } = require('../services/paymentService');
@@ -544,6 +561,19 @@ router.get('/payout-methods', authenticate, requireTenant, payoutManagers, payou
 router.post('/payout-methods', authenticate, requireTenant, payoutManagers, payout.create);
 router.patch('/payout-methods/:id/default', authenticate, requireTenant, payoutManagers, payout.setDefault);
 router.delete('/payout-methods/:id', authenticate, requireTenant, payoutManagers, payout.remove);
+
+// SMS — prepaid credits resold by the platform, plus per-tenant templates.
+router.get('/sms/balance',              authenticate, requireTenant, sms.getBalance);
+router.put('/sms/settings',             authenticate, requireTenant, businessOwnerOnly, sms.updateSettings);
+router.post('/sms/purchase',            authenticate, requireTenant, businessOwnerOnly, sms.purchase);
+router.post('/sms/purchase/verify',     authenticate, requireTenant, businessOwnerOnly, sms.verifyPurchase);
+router.get('/sms/purchases',            authenticate, requireTenant, businessOwnerOnly, sms.listPurchases);
+router.get('/sms/templates',            authenticate, requireTenant, sms.listTemplates);
+router.put('/sms/templates/:key',       authenticate, requireTenant, businessOwnerOnly, sms.updateTemplate);
+router.post('/sms/templates/:key/reset', authenticate, requireTenant, businessOwnerOnly, sms.resetTemplate);
+router.post('/sms/preview',             authenticate, requireTenant, sms.previewTemplate);
+router.get('/sms/messages',             authenticate, requireTenant, sms.listMessages);
+router.post('/sms/send',                authenticate, requireTenant, businessOwnerOnly, sms.sendTest);
 
 // Paystack subaccount — opts the tenant into gateway-level payment splitting.
 router.get('/paystack/banks', authenticate, requireTenant, businessOwnerOnly, paystackSubaccount.listBanks);
