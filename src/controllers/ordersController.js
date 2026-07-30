@@ -61,6 +61,21 @@ const updateOrderStatus = async (req, res) => {
   const order = await Order.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, { status }, { new: true });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
   await audit(req, 'UPDATE_ORDER_STATUS', 'orders', `${req.user.name} updated order ${order.order_number} status to "${status}"`, { order_number: order.order_number, status });
+
+  // Let the customer know. Costs an SMS credit, uses the tenant's own template,
+  // and is skipped silently when they have no credits or switched it off —
+  // never allowed to fail the status update itself.
+  const notifiable = { shipped: 'order_shipped', delivered: 'order_delivered', cancelled: 'order_cancelled' };
+  if (notifiable[status] && order.customer_phone) {
+    const { sendOrderNotification } = require('../services/notificationService');
+    sendOrderNotification({
+      tenantId: req.tenant_id,
+      order,
+      key: notifiable[status],
+      customerPhone: order.customer_phone,
+    }).catch(() => {});
+  }
+
   res.json({ success: true, message: 'Order status updated.', data: order });
 };
 

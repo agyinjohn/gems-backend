@@ -43,6 +43,17 @@ const tenantSchema = new Schema({
     tax_rate:                  { type: Number, default: 0 },
     tax_name:                  { type: String, default: 'Tax' },
   },
+  // Prepaid SMS credits. One credit is one message segment; sending is blocked
+  // at zero. Bought from the platform in bundles (PlatformSettings.sms_bundles)
+  // and only ever moved by smsService, atomically.
+  sms_credits: { type: Number, default: 0, min: 0 },
+  sms_settings: {
+    // Shown as the message sender. Falls back to the platform default.
+    sender_id:        { type: String, default: '' },
+    // Per-event switches live on the templates themselves; this is the master.
+    enabled:          { type: Boolean, default: true },
+    low_balance_at:   { type: Number, default: 20 },
+  },
   // Paystack subaccount. When set, storefront payments are split at the
   // gateway: the tenant's share settles directly to their own bank account and
   // only the platform's commission reaches the platform account. Tenants
@@ -681,6 +692,14 @@ const platformSettingsSchema = new Schema({
   // Marketplace: platform commission (%) deducted from the tenant payout
   // for orders placed via the cross-tenant marketplace directory.
   marketplace_commission_pct: { type: Number, default: 5 },
+  // SMS resold to tenants in prepaid bundles. Price is what the tenant pays;
+  // the platform's margin is that price less what the SMS gateway charges.
+  sms_bundles: { type: Schema.Types.Mixed, default: [
+    { label: 'Starter',  credits: 100,  price: 15 },
+    { label: 'Business', credits: 500,  price: 65 },
+    { label: 'Bulk',     credits: 2000, price: 230 },
+  ]},
+  sms_sender_id: { type: String, default: 'GEMS' },
   // Feature flags per plan
   feature_flags: { type: Schema.Types.Mixed, default: {
     starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
@@ -1068,6 +1087,53 @@ const storeCustomerSchema = new Schema({
 }, { timestamps: true });
 storeCustomerSchema.index({ tenant_id: 1, email: 1 }, { unique: true });
 
+// SMS PURCHASE — a tenant buying a prepaid credit bundle from the platform.
+const smsPurchaseSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  credits:        { type: Number, required: true },
+  amount:         { type: Number, required: true },
+  currency:       { type: String, default: 'GHS' },
+  bundle_label:   String,
+  status:         { type: String, enum: ['pending', 'success', 'failed'], default: 'pending' },
+  reference:      { type: String, required: true },
+  payment_ref:    String,
+  payment_method: String,
+  initiated_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+smsPurchaseSchema.index({ tenant_id: 1, createdAt: -1 });
+smsPurchaseSchema.index({ reference: 1 }, { unique: true });
+
+// SMS TEMPLATE — a tenant's override of a built-in message.
+//
+// Only customised templates are stored; anything absent falls back to the
+// built-in default in smsService, so new templates ship without a migration.
+const smsTemplateSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  key:        { type: String, required: true },
+  body:       { type: String, required: true },
+  enabled:    { type: Boolean, default: true },
+  updated_by: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+smsTemplateSchema.index({ tenant_id: 1, key: 1 }, { unique: true });
+
+// SMS MESSAGE — one row per send attempt, including blocked ones, so a tenant
+// can see what went out and what didn't and why.
+const smsMessageSchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  to:            { type: String, required: true },
+  body:          { type: String, required: true },
+  template_key:  String,
+  segments:      { type: Number, default: 1 },
+  credits_used:  { type: Number, default: 0 },
+  status:        { type: String, enum: ['sent', 'failed', 'insufficient_credits', 'disabled'], required: true },
+  error:         String,
+  provider:      String,
+  provider_ref:  String,
+  source:        String,                                       // e.g. 'order_confirmed', 'campaign'
+  sent_by:       { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+smsMessageSchema.index({ tenant_id: 1, createdAt: -1 });
+
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -1156,6 +1222,7 @@ const allSchemas = [
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
   payoutMethodSchema, payoutSchema,
+  smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1223,4 +1290,7 @@ module.exports = {
   Promotion:             mongoose.model('Promotion', promotionSchema),
   PayoutMethod:          mongoose.model('PayoutMethod', payoutMethodSchema),
   Payout:                mongoose.model('Payout', payoutSchema),
+  SmsPurchase:           mongoose.model('SmsPurchase', smsPurchaseSchema),
+  SmsTemplate:           mongoose.model('SmsTemplate', smsTemplateSchema),
+  SmsMessage:            mongoose.model('SmsMessage', smsMessageSchema),
 };
