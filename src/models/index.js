@@ -140,7 +140,11 @@ const categorySchema = new Schema({
 }, { timestamps: true });
 categorySchema.index({ tenant_id: 1, name: 1 }, { unique: true });
 
-// PRODUCT
+// PRODUCT / SERVICE / BUNDLE CATALOG ITEM
+// item_type drives behaviour throughout the system:
+//   'product' — physical item, stock tracked, deducted on sale
+//   'service' — intangible, no stock, no stock movements, billed by time/unit
+//   'bundle'  — a named package of products + services sold together
 const productSchema = new Schema({
   tenant_id:           { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   branch_id:           { type: Schema.Types.ObjectId, ref: 'Branch' },
@@ -149,9 +153,21 @@ const productSchema = new Schema({
   barcode:             { type: String, sparse: true },
   description:         String,
   category_id:         { type: Schema.Types.ObjectId, ref: 'Category' },
+  // --- catalog type ---
+  item_type:           { type: String, enum: ['product', 'service', 'bundle'], default: 'product' },
+  // --- service-specific fields (ignored for products) ---
+  // How the service is billed: per hour, per day, as a fixed fee, or per unit
+  unit_type:           { type: String, enum: ['hour', 'day', 'fixed', 'unit'], default: 'fixed' },
+  // Estimated duration (e.g. 2 hours, 3 days). Informational only.
+  duration:            { type: Number, default: null },
+  // GL revenue account to post to. Defaults to 4001 (Sales Revenue) for
+  // products and 4010 (Service Revenue) for services when not set.
+  revenue_account_code: { type: String, default: null },
+  // --- pricing ---
   price:               { type: Number, required: true, default: 0 },
   compare_price:       { type: Number, default: 0 },
   cost_price:          { type: Number, default: 0 },
+  // --- inventory (products only, ignored for services/bundles) ---
   stock_qty:           { type: Number, default: 0 },
   reserved_qty:        { type: Number, default: 0 },
   low_stock_threshold: { type: Number, default: 10 },
@@ -163,6 +179,7 @@ const productSchema = new Schema({
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 productSchema.index({ tenant_id: 1, sku: 1 }, { unique: true, sparse: true });
+productSchema.index({ tenant_id: 1, item_type: 1, is_active: 1 });
 
 // STOCK MOVEMENT
 const stockMovementSchema = new Schema({
@@ -222,6 +239,12 @@ const orderItemSchema = new Schema({
   unit_price:   { type: Number, required: true },
   total:        { type: Number, required: true },
   refunded_qty: { type: Number, default: 0 },
+  // Snapshot of the catalog item type at the time of sale so fulfillment
+  // logic knows whether to deduct stock without re-fetching the product.
+  item_type:    { type: String, enum: ['product', 'service', 'bundle'], default: 'product' },
+  // For services: the GL revenue account code to post to (e.g. '4010').
+  // Null means fall back to the default for the item_type.
+  revenue_account_code: { type: String, default: null },
 });
 
 const orderSchema = new Schema({
@@ -242,7 +265,10 @@ const orderSchema = new Schema({
   pending_expires_at:    Date,
   payment_failure_reason: String,
   payment_status:   { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' },
-  status:           { type: String, enum: ['pending','processing','shipped','delivered','cancelled'], default: 'pending' },
+  // Product orders:  pending → processing → shipped → delivered
+  // Service orders:  pending → in_progress → completed
+  // Either type:     → cancelled
+  status:           { type: String, enum: ['pending','processing','in_progress','shipped','delivered','completed','cancelled'], default: 'pending' },
   source:           { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
   // Order was placed via the cross-tenant marketplace directory rather than
   // a direct visit to the tenant's own storefront URL — the platform takes
@@ -317,7 +343,7 @@ const accountSchema = new Schema({
   code:        { type: String, required: true },
   name:        { type: String, required: true },
   type:        { type: String, enum: ['asset','liability','equity','revenue','expense'], required: true },
-  balance:     { type: Number, default: 0 },
+  // balance field removed — balances are computed live from journal entries (GL source of truth)
   description: String,
   is_active:   { type: Boolean, default: true },
   // Hierarchy
@@ -353,6 +379,10 @@ const journalEntrySchema = new Schema({
   void_reason:  String,
 }, { timestamps: true });
 journalEntrySchema.index({ tenant_id: 1, reference: 1 }, { unique: true });
+// Performance indexes for GL aggregation queries used by all financial reports
+journalEntrySchema.index({ tenant_id: 1, status: 1, entry_date: -1 });
+journalEntrySchema.index({ tenant_id: 1, 'lines.account_id': 1, status: 1 });
+journalEntrySchema.index({ tenant_id: 1, source: 1, source_id: 1 });
 
 // EXPENSE
 const expenseSchema = new Schema({
@@ -832,6 +862,9 @@ const cartItemSchema = new Schema({
   branch_id:           { type: Schema.Types.ObjectId, ref: 'Branch' },
   branch_name:         String,
   branch_slug:         String,
+  item_type:           { type: String, enum: ['product', 'service', 'bundle'], default: 'product' },
+  unit_type:           String,
+  duration:            Number,
 });
 
 const cartSchema = new Schema({

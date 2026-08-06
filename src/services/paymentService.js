@@ -233,6 +233,9 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       source_id: order._id,
     });
 
+    const hasProduct = order.items.some((i) => i.item_type !== 'service');
+    const hasService = order.items.some((i) => i.item_type === 'service');
+    const revenueAccountCode = hasProduct ? '4001' : hasService ? '4010' : '4001';
     await accounting.postSaleEntry({
       tenantId: order.tenant_id,
       amount: order.total,
@@ -241,17 +244,21 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       reference: order.order_number,
       date: new Date(),
       sourceId: order._id,
+      revenueAccountCode,
     }).catch(() => {});
 
     for (const item of order.items) {
-      await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-      await StockMovement.create({
-        tenant_id: order.tenant_id,
-        product_id: item.product_id,
-        type: 'sale',
-        quantity: -item.quantity,
-        reference: order.order_number,
-      });
+      // Only decrement stock and log movements for physical products
+      if (item.item_type !== 'service') {
+        await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+        await StockMovement.create({
+          tenant_id:  order.tenant_id,
+          product_id: item.product_id,
+          type:       'sale',
+          quantity:   -item.quantity,
+          reference:  order.order_number,
+        });
+      }
     }
 
     await sendOrderConfirmation({

@@ -71,17 +71,20 @@ async function completePosSale({
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, tenant_id: tenantId, is_active: true });
     if (!p) throw Object.assign(new Error(`Product not found.`), { status: 400 });
-    if (fromReservation) {
-      if ((p.reserved_qty || 0) < item.quantity) {
+    const isService = p.item_type === 'service';
+    if (!isService) {
+      if (fromReservation) {
+        if ((p.reserved_qty || 0) < item.quantity) {
+          throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
+        }
+      } else if (p.stock_qty - (p.reserved_qty || 0) < item.quantity) {
         throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
       }
-    } else if (p.stock_qty - (p.reserved_qty || 0) < item.quantity) {
-      throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
     }
     const total = p.price * item.quantity;
     subtotal += total;
     cogsTotal += (p.cost_price || 0) * item.quantity;
-    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
+    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total, item_type: p.item_type || 'product' });
   }
 
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;
@@ -110,6 +113,7 @@ async function completePosSale({
   });
 
   for (const item of enrichedItems) {
+    if (item.item_type === 'service') continue;
     const stockUpdate = fromReservation
       ? { $inc: { stock_qty: -item.quantity, reserved_qty: -item.quantity } }
       : { $inc: { stock_qty: -item.quantity } };
@@ -144,6 +148,9 @@ async function completePosSale({
     recorded_by: userId,
   });
 
+  const posHasProduct = enrichedItems.some((i) => i.item_type !== 'service');
+  const posHasService = enrichedItems.some((i) => i.item_type === 'service');
+  const posRevenueAccountCode = posHasProduct ? '4001' : posHasService ? '4010' : '4001';
   await accounting.postSaleEntry({
     tenantId,
     amount: grandTotal,
@@ -153,6 +160,7 @@ async function completePosSale({
     date: new Date(),
     sourceId: order._id,
     createdBy: userId,
+    revenueAccountCode: posRevenueAccountCode,
   }).catch((err) => console.error('[POS] GL posting failed:', err.message));
 
   await sendOrderConfirmation({

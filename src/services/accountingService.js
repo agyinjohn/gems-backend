@@ -363,17 +363,17 @@ async function voidJournalEntriesBySource(tenantId, source, sourceId, voidedBy, 
   }
 }
 
-async function postSaleEntry({ tenantId, amount, cogsAmount = 0, taxAmount = 0, reference, date, sourceId, createdBy, isCredit = false }) {
+async function postSaleEntry({ tenantId, amount, cogsAmount = 0, taxAmount = 0, reference, date, sourceId, createdBy, isCredit = false, revenueAccountCode = '4001' }) {
   const netRevenue = round2(amount - taxAmount);
   const lines = [];
 
   if (isCredit) {
     lines.push({ accountCode: '1110', debit: amount, credit: 0, description: `Credit sale ${reference}` });
-    lines.push({ accountCode: '4001', debit: 0, credit: netRevenue, description: `Revenue ${reference}` });
+    lines.push({ accountCode: revenueAccountCode, debit: 0, credit: netRevenue, description: `Revenue ${reference}` });
     if (taxAmount > 0) lines.push({ accountCode: '2110', debit: 0, credit: taxAmount, description: `VAT collected ${reference}` });
   } else {
     lines.push({ accountCode: '1001', debit: amount, credit: 0, description: `Cash received ${reference}` });
-    lines.push({ accountCode: '4001', debit: 0, credit: netRevenue, description: `Revenue ${reference}` });
+    lines.push({ accountCode: revenueAccountCode, debit: 0, credit: netRevenue, description: `Revenue ${reference}` });
     if (taxAmount > 0) lines.push({ accountCode: '2110', debit: 0, credit: taxAmount, description: `VAT collected ${reference}` });
   }
 
@@ -496,11 +496,11 @@ async function postPayrollEntryLegacy({ tenantId, amount, reference, date, sourc
   });
 }
 
-async function postSaleReturnEntry({ tenantId, amount, cogsAmount = 0, taxAmount = 0, reference, date, sourceId, createdBy }) {
+async function postSaleReturnEntry({ tenantId, amount, cogsAmount = 0, taxAmount = 0, reference, date, sourceId, createdBy, revenueAccountCode = '4001' }) {
   const netRevenue = round2(amount - taxAmount);
   const lines = [
     { accountCode: '1001', debit: 0, credit: amount, description: `Cash refunded ${reference}` },
-    { accountCode: '4001', debit: netRevenue, credit: 0, description: `Revenue reversal ${reference}` },
+    { accountCode: revenueAccountCode, debit: netRevenue, credit: 0, description: `Revenue reversal ${reference}` },
   ];
   if (taxAmount > 0) lines.push({ accountCode: '2110', debit: taxAmount, credit: 0, description: `VAT reversal ${reference}` });
   if (cogsAmount > 0) {
@@ -512,10 +512,10 @@ async function postSaleReturnEntry({ tenantId, amount, cogsAmount = 0, taxAmount
   });
 }
 
-async function postCreditNoteEntry({ tenantId, amount, taxAmount = 0, reference, date, sourceId, createdBy, refundToCash = true }) {
+async function postCreditNoteEntry({ tenantId, amount, taxAmount = 0, reference, date, sourceId, createdBy, refundToCash = true, revenueAccountCode = '4001' }) {
   const net = round2(amount - taxAmount);
   const lines = [
-    { accountCode: '4001', debit: net, credit: 0, description: `Credit note ${reference}` },
+    { accountCode: revenueAccountCode, debit: net, credit: 0, description: `Credit note ${reference}` },
   ];
   if (taxAmount > 0) lines.push({ accountCode: '2110', debit: taxAmount, credit: 0, description: `VAT reversal ${reference}` });
   lines.push({

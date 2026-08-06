@@ -47,14 +47,17 @@ function normalizeImages(images) {
 }
 
 const getProducts = async (req, res) => {
-  const { search, category_id, is_active, low_stock } = req.query;
+  const { search, category_id, is_active, low_stock, item_type } = req.query;
   const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
   if (category_id) filter.category_id = category_id;
   if (is_active !== undefined) filter.is_active = is_active === 'true';
+  // Allow filtering by catalog type: ?item_type=product|service|bundle
+  if (item_type) filter.item_type = item_type;
   const products = await Product.find(filter).populate('category_id', 'name').sort({ createdAt: -1 });
   let data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name }));
-  if (low_stock === 'true') data = data.filter(p => p.stock_qty <= p.low_stock_threshold);
+  // low_stock only makes sense for physical products
+  if (low_stock === 'true') data = data.filter(p => p.item_type !== 'service' && p.stock_qty <= p.low_stock_threshold);
   res.json({ success: true, data });
 };
 
@@ -71,35 +74,109 @@ function normalizeCategoryId(value) {
 }
 
 const createProduct = async (req, res) => {
-  const { name, sku, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, images, attributes } = req.body;
+  const {
+    name, sku, barcode, description, category_id, price, cost_price,
+    stock_qty, low_stock_threshold, unit, images, attributes,
+    item_type, unit_type, duration, revenue_account_code,
+  } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
-  const finalSku = sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`;
+
+  const catalogType = ['product', 'service', 'bundle'].includes(item_type) ? item_type : 'product';
+  const isService = catalogType === 'service';
+
+  // Services don't need a SKU — only generate one for physical products
+  const finalSku = isService
+    ? (sku?.trim() || null)
+    : (sku?.trim() || `SKU-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`);
+
   const branchId = await resolveWriteBranchId(req);
-  const product = await Product.create({ tenant_id: req.tenant_id, branch_id: branchId, name, sku: finalSku, barcode: barcode?.trim() || null, description, category_id: normalizeCategoryId(category_id), price, cost_price: cost_price || 0, stock_qty: stock_qty || 0, low_stock_threshold: low_stock_threshold || 10, unit: unit || 'piece', images: normalizeImages(images), attributes: attributes || {}, created_by: req.user._id });
-  if (stock_qty > 0) await StockMovement.create({ tenant_id: req.tenant_id, branch_id: branchId, product_id: product._id, type: 'adjustment', quantity: stock_qty, notes: 'Initial stock', created_by: req.user._id });
-  await audit(req, 'CREATE_PRODUCT', 'inventory', `${req.user.name} added product "${product.name}"`, { sku: product.sku, price: product.price });
-  res.status(201).json({ success: true, message: 'Product created.', data: product });
+
+  const product = await Product.create({
+    tenant_id:    req.tenant_id,
+    branch_id:    branchId,
+    name,
+    sku:          finalSku,
+    barcode:      barcode?.trim() || null,
+    description,
+    category_id:  normalizeCategoryId(category_id),
+    item_type:    catalogType,
+    unit_type:    unit_type || 'fixed',
+    duration:     duration != null ? Number(duration) : null,
+    revenue_account_code: revenue_account_code?.trim() || null,
+    price,
+    cost_price:          cost_price || 0,
+    // Services have no physical stock
+    stock_qty:           isService ? 0 : (stock_qty || 0),
+    low_stock_threshold: isService ? 0 : (low_stock_threshold || 10),
+    unit:                unit || (isService ? 'service' : 'piece'),
+    images:              normalizeImages(images),
+    attributes:          attributes || {},
+    created_by:          req.user._id,
+  });
+
+  // Only create an opening stock movement for physical products
+  if (!isService && stock_qty > 0) {
+    await StockMovement.create({
+      tenant_id:  req.tenant_id,
+      branch_id:  branchId,
+      product_id: product._id,
+      type:       'adjustment',
+      quantity:   stock_qty,
+      notes:      'Initial stock',
+      created_by: req.user._id,
+    });
+  }
+
+  await audit(req, 'CREATE_PRODUCT', 'inventory',
+    `${req.user.name} added ${catalogType} "${product.name}"`,
+    { sku: product.sku, price: product.price, item_type: catalogType },
+  );
+  res.status(201).json({ success: true, message: `${catalogType.charAt(0).toUpperCase() + catalogType.slice(1)} created.`, data: product });
 };
 
 const updateProduct = async (req, res) => {
-  const { name, barcode, description, category_id, price, cost_price, stock_qty, low_stock_threshold, unit, is_active, images } = req.body;
+  const {
+    name, barcode, description, category_id, price, cost_price,
+    stock_qty, low_stock_threshold, unit, is_active, images,
+    unit_type, duration, revenue_account_code,
+  } = req.body;
+
+  const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!existing) return res.status(404).json({ success: false, message: 'Product not found.' });
+
+  const isService = existing.item_type === 'service';
+
   const update = {};
-  if (name !== undefined) update.name = name;
-  if (barcode !== undefined) update.barcode = barcode?.trim() || null;
+  if (name !== undefined)        update.name        = name;
+  if (barcode !== undefined)     update.barcode     = barcode?.trim() || null;
   if (description !== undefined) update.description = description;
   if (category_id !== undefined) update.category_id = normalizeCategoryId(category_id);
-  if (price !== undefined) update.price = price;
-  if (cost_price !== undefined) update.cost_price = cost_price;
-  if (stock_qty !== undefined) update.stock_qty = stock_qty;
-  if (low_stock_threshold !== undefined) update.low_stock_threshold = low_stock_threshold;
-  if (unit !== undefined) update.unit = unit;
-  if (is_active !== undefined) update.is_active = is_active;
-  if (images !== undefined) update.images = normalizeImages(images);
+  if (price !== undefined)       update.price       = price;
+  if (cost_price !== undefined)  update.cost_price  = cost_price;
+  if (is_active !== undefined)   update.is_active   = is_active;
+  if (images !== undefined)      update.images      = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
-  const product = await Product.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
-  if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
-  await audit(req, 'UPDATE_PRODUCT', 'inventory', `${req.user.name} updated product "${product.name}"`, { product_id: product._id });
-  res.json({ success: true, message: 'Product updated.', data: product });
+  // Service-specific fields
+  if (unit_type !== undefined)           update.unit_type           = unit_type;
+  if (duration !== undefined)            update.duration            = duration != null ? Number(duration) : null;
+  if (revenue_account_code !== undefined) update.revenue_account_code = revenue_account_code?.trim() || null;
+  // Stock fields only apply to physical products
+  if (!isService) {
+    if (stock_qty !== undefined)           update.stock_qty           = stock_qty;
+    if (low_stock_threshold !== undefined) update.low_stock_threshold = low_stock_threshold;
+    if (unit !== undefined)                update.unit                = unit;
+  }
+
+  const product = await Product.findOneAndUpdate(
+    { _id: req.params.id, tenant_id: req.tenant_id },
+    update,
+    { new: true },
+  );
+  await audit(req, 'UPDATE_PRODUCT', 'inventory',
+    `${req.user.name} updated ${product.item_type} "${product.name}"`,
+    { product_id: product._id, item_type: product.item_type },
+  );
+  res.json({ success: true, message: 'Updated.', data: product });
 };
 
 const deleteProduct = async (req, res) => {
@@ -112,6 +189,10 @@ const adjustStock = async (req, res) => {
   if (quantity === undefined) return res.status(400).json({ success: false, message: 'quantity is required.' });
   const product = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
+  // Stock adjustments are meaningless for services
+  if (product.item_type === 'service') {
+    return res.status(400).json({ success: false, message: 'Stock adjustments do not apply to services.' });
+  }
   const newQty = product.stock_qty + Number(quantity);
   if (newQty < 0) return res.status(400).json({ success: false, message: 'Insufficient stock.' });
   product.stock_qty = newQty;

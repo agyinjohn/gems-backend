@@ -436,6 +436,7 @@ router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), a
     date: new Date(),
     sourceId: order._id,
     createdBy: req.user._id,
+    revenueAccountCode: order.items.some((i) => i.item_type !== 'service') ? '4001' : '4010',
   }).catch((err) => console.error('[POS] Refund GL failed:', err.message));
 
   await recordShiftRefund(order.shift_id, refundSubtotal, order.payment_method);
@@ -493,11 +494,16 @@ router.patch('/orders/:id/pay', authenticate, requireTenant, authorize('business
   order.status = 'processing';
   await order.save();
   for (const item of order.items) {
-    await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-    await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
+    if (item.item_type !== 'service') {
+      await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+      await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
+    }
   }
+  const hasProduct = order.items.some((i) => i.item_type !== 'service');
+  const hasService = order.items.some((i) => i.item_type === 'service');
+  const revenueAccountCode = hasProduct ? '4001' : hasService ? '4010' : '4001';
   await logPayment({ tenant_id: req.tenant_id, source: 'internal_order', reference: order.order_number, amount: order.total, method: payment_method || 'cash', status: 'success', payer_name: order.customer_name, payer_email: order.customer_email, description: `Payment collected for order ${order.order_number}`, source_id: order._id, recorded_by: req.user._id });
-  await accounting.postSaleEntry({ tenantId: req.tenant_id, amount: order.total, cogsAmount: order.subtotal, taxAmount: order.tax_amount || 0, reference: order.order_number, date: new Date(), sourceId: order._id, createdBy: req.user._id }).catch(() => {});
+  await accounting.postSaleEntry({ tenantId: req.tenant_id, amount: order.total, cogsAmount: order.subtotal, taxAmount: order.tax_amount || 0, reference: order.order_number, date: new Date(), sourceId: order._id, createdBy: req.user._id, revenueAccountCode }).catch(() => {});
   res.json({ success: true, message: 'Order marked as paid.', data: order });
 });
 
@@ -729,22 +735,26 @@ router.post('/storefront/cart/add', async (req, res) => {
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
   const cart = await getOrCreateCart(cart_id, tenant_id || product.tenant_id);
   const existing = cart.items.find(i => String(i.product_id) === String(product._id));
+  const isService = product.item_type === 'service';
   if (existing) {
-    existing.quantity = Math.min(existing.quantity + quantity, product.stock_qty);
+    existing.quantity = isService ? existing.quantity + quantity : Math.min(existing.quantity + quantity, product.stock_qty);
   } else {
     cart.items.push({
-      product_id: product._id,
-      product_name: product.name,
-      price: product.price,
-      quantity: Math.min(quantity, product.stock_qty),
-      images: product.images,
-      category_name: product.category_id?.name || '',
-      stock_qty: product.stock_qty,
+      product_id:          product._id,
+      product_name:        product.name,
+      price:               product.price,
+      quantity:            isService ? quantity : Math.min(quantity, product.stock_qty),
+      images:              product.images,
+      category_name:       product.category_id?.name || '',
+      stock_qty:           product.stock_qty,
       low_stock_threshold: product.low_stock_threshold,
-      sku: product.sku,
-      branch_id: product.branch_id?._id || product.branch_id || null,
-      branch_name: product.branch_id?.name || 'Main Branch',
-      branch_slug: product.branch_id?.slug || 'main',
+      sku:                 product.sku,
+      branch_id:           product.branch_id?._id || product.branch_id || null,
+      branch_name:         product.branch_id?.name || 'Main Branch',
+      branch_slug:         product.branch_id?.slug || 'main',
+      item_type:           product.item_type || 'product',
+      unit_type:           product.unit_type || null,
+      duration:            product.duration || null,
     });
   }
   cart.expires_at = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
