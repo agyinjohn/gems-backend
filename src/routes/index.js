@@ -21,6 +21,7 @@ const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
+const projects = require('../controllers/projectController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -581,6 +582,32 @@ router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req,
     res.status(400).json({ success: false, message: err.message || 'Could not reach the SMS gateway.' });
   }
 });
+
+// PROJECTS — contract work, weighted progress and cost against budget.
+const projectManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
+
+router.get('/projects',                    authenticate, requireTenant, requireFeature('projects'), projects.list);
+router.post('/projects',                   authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.create);
+router.get('/projects/:id',                authenticate, requireTenant, requireFeature('projects'), projects.get);
+router.put('/projects/:id',                authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.update);
+router.delete('/projects/:id',             authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.remove);
+router.get('/projects/:id/financials',     authenticate, requireTenant, requireFeature('projects'), projects.financials);
+
+router.post('/projects/:id/milestones',              authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.addMilestone);
+router.put('/projects/:id/milestones/:milestoneId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.updateMilestone);
+router.delete('/projects/:id/milestones/:milestoneId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeMilestone);
+
+router.post('/projects/:id/tasks',           authenticate, requireTenant, requireFeature('projects'), projects.addTask);
+router.put('/projects/:id/tasks/:taskId',    authenticate, requireTenant, requireFeature('projects'), projects.updateTask);
+router.delete('/projects/:id/tasks/:taskId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeTask);
+
+router.post('/projects/:id/variations',                    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.addVariation);
+router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
+router.delete('/projects/:id/variations/:variationId',     authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeVariation);
+
+router.get('/projects/:id/time',           authenticate, requireTenant, requireFeature('projects'), projects.listTime);
+router.post('/projects/:id/time',          authenticate, requireTenant, requireFeature('projects'), projects.logTime);
+router.delete('/projects/:id/time/:logId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeTime);
 
 // SMS — prepaid credits resold by the platform, plus per-tenant templates.
 router.get('/sms/balance',              authenticate, requireTenant, sms.getBalance);
