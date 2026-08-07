@@ -1,9 +1,9 @@
 const { Tenant, PlatformSettings } = require('../models');
 
 const DEFAULT_FEATURE_FLAGS = {
-  starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: true, storefront: true },
-  pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
-  enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
+  starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: true, storefront: true, projects: false },
+  pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true, projects: true },
+  enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true, projects: true },
 };
 
 let settingsCache = null;
@@ -25,7 +25,12 @@ function invalidatePlatformSettingsCache() {
 async function getFeatureFlagsForPlan(plan = 'starter') {
   const settings = await getPlatformSettings();
   const flags = settings.feature_flags || DEFAULT_FEATURE_FLAGS;
-  return flags[plan] || flags.starter || DEFAULT_FEATURE_FLAGS.starter;
+  const stored = flags[plan] || flags.starter || {};
+  const defaults = DEFAULT_FEATURE_FLAGS[plan] || DEFAULT_FEATURE_FLAGS.starter;
+  // Stored settings predate any newly shipped module, and a missing key reads
+  // as enabled below — which would hand a new paid module to every plan until
+  // an admin happened to re-save. Defaults fill the gaps; stored values win.
+  return { ...defaults, ...stored };
 }
 
 async function isFeatureEnabled(plan, feature, tenant = null) {

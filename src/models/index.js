@@ -347,6 +347,7 @@ const purchaseOrderSchema = new Schema({
   payment_status: { type: String, enum: ['unpaid','partial','paid'], default: 'unpaid' },
   payments:       [{ amount: Number, method: String, reference: String, note: String, date: { type: Date, default: Date.now } }],
   paid_at:        Date,
+  project_id:     { type: Schema.Types.ObjectId, ref: 'Project' },
   notes:          String,
   expected_date:  Date,
   items:          [poItemSchema],
@@ -414,6 +415,9 @@ const expenseSchema = new Schema({
   description:  String,
   expense_date: { type: Date, default: Date.now },
   receipt:           { file: String, mime_type: String, name: String },
+  // Set when this belongs to a project, so project cost is read off the
+  // records already kept rather than a parallel ledger that drifts.
+  project_id:   { type: Schema.Types.ObjectId, ref: 'Project' },
   journal_entry_id:  { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
   created_by:        { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
@@ -754,9 +758,9 @@ const platformSettingsSchema = new Schema({
   mnotify_api_key: { type: String, default: '' },
   // Feature flags per plan
   feature_flags: { type: Schema.Types.Mixed, default: {
-    starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true },
-    pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
-    enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true },
+    starter:    { pos: true, crm: false, accounting: false, hr: false, procurement: false, reports: false, storefront: true, projects: false },
+    pro:        { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true, projects: true },
+    enterprise: { pos: true, crm: true,  accounting: true,  hr: true,  procurement: true,  reports: true,  storefront: true, projects: true },
   }},
 }, { timestamps: true });
 
@@ -939,6 +943,7 @@ const invoiceSchema = new Schema({
   status:         { type: String, enum: ['draft','sent','partially_paid','paid','overdue','void'], default: 'draft' },
   notes:          String,
   order_id:       { type: Schema.Types.ObjectId, ref: 'Order' },
+  project_id:     { type: Schema.Types.ObjectId, ref: 'Project' },
   journal_entry_id: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
   created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
@@ -1189,6 +1194,125 @@ const smsMessageSchema = new Schema({
 }, { timestamps: true });
 smsMessageSchema.index({ tenant_id: 1, createdAt: -1 });
 
+// ── PROJECTS ──────────────────────────────────────────────────────────────
+//
+// Contract work tracked from award to completion. Three numbers have to stay
+// honest: how much work is actually done, what it has cost, and what is owed
+// under the contract. Progress is therefore derived from weighted milestones
+// rather than typed in, and cost is captured by tagging records that already
+// exist (expenses, purchase orders) instead of a parallel ledger that drifts
+// out of step with accounting.
+
+const projectCostLineSchema = new Schema({
+  // Free-form so the same module suits site work (materials, plant,
+  // subcontractors) and professional services (labour, licences, travel).
+  category:  { type: String, required: true },
+  budget:    { type: Number, default: 0 },
+  notes:     String,
+}, { _id: true });
+
+const projectSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:      { type: Schema.Types.ObjectId, ref: 'Branch' },
+  code:           { type: String, required: true },
+  name:           { type: String, required: true },
+  description:    String,
+  // The client who awarded the contract.
+  customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
+  customer_name:  String,
+  // Original contract sum. Approved variations are held separately so the
+  // agreed figure and what changed since stay distinguishable.
+  contract_value: { type: Number, default: 0 },
+  currency:       { type: String, default: 'GHS' },
+  budget_lines:   { type: [projectCostLineSchema], default: [] },
+  // Percentage the client withholds until completion — standard on
+  // construction contracts, zero for most service work.
+  retention_pct:  { type: Number, default: 0 },
+  start_date:     Date,
+  planned_end_date: Date,
+  actual_end_date:  Date,
+  status:         { type: String, enum: ['draft', 'active', 'on_hold', 'completed', 'cancelled'], default: 'draft' },
+  manager_id:     { type: Schema.Types.ObjectId, ref: 'Employee' },
+  team:           [{ type: Schema.Types.ObjectId, ref: 'Employee' }],
+  site_address:   String,
+  // Cached from the milestone weights so lists don't have to aggregate.
+  // projectService.recalculate is the only thing that writes it.
+  progress_pct:   { type: Number, default: 0 },
+  created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
+projectSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
+
+// A stage of work. Weight is its share of the whole job, so overall progress
+// is the weighted average rather than a figure somebody felt like typing.
+const projectMilestoneSchema = new Schema({
+  tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:    { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  name:          { type: String, required: true },
+  description:   String,
+  weight:        { type: Number, default: 1, min: 0 },
+  sequence:      { type: Number, default: 0 },
+  planned_start: Date,
+  planned_end:   Date,
+  actual_start:  Date,
+  actual_end:    Date,
+  status:        { type: String, enum: ['not_started', 'in_progress', 'completed', 'blocked'], default: 'not_started' },
+  // Set directly when a milestone has no tasks; otherwise rolled up from them.
+  progress_pct:  { type: Number, default: 0, min: 0, max: 100 },
+  // What may be invoiced when this stage is certified complete.
+  billable_amount: { type: Number, default: 0 },
+}, { timestamps: true });
+projectMilestoneSchema.index({ tenant_id: 1, project_id: 1, sequence: 1 });
+
+const projectTaskSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:   { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  milestone_id: { type: Schema.Types.ObjectId, ref: 'ProjectMilestone' },
+  name:         { type: String, required: true },
+  description:  String,
+  weight:       { type: Number, default: 1, min: 0 },
+  assignee_id:  { type: Schema.Types.ObjectId, ref: 'Employee' },
+  due_date:     Date,
+  completed_at: Date,
+  status:       { type: String, enum: ['todo', 'in_progress', 'done', 'blocked'], default: 'todo' },
+  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectTaskSchema.index({ tenant_id: 1, project_id: 1, milestone_id: 1 });
+
+// A change to the agreed scope. Without these the contract value is fiction
+// within a month, and every budget comparison built on it is wrong.
+const projectVariationSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:   { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  reference:    { type: String, required: true },
+  description:  { type: String, required: true },
+  // Signed: a negative amount is an omission from the contract.
+  amount:       { type: Number, required: true },
+  status:       { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  raised_on:    { type: Date, default: Date.now },
+  decided_on:   Date,
+  decided_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectVariationSchema.index({ tenant_id: 1, project_id: 1, status: 1 });
+
+// Labour against a project. Attendance records when someone clocked in, not
+// what they worked on, so time has to be booked separately to be costed.
+const projectTimeLogSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  task_id:     { type: Schema.Types.ObjectId, ref: 'ProjectTask' },
+  employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
+  work_date:   { type: Date, required: true },
+  hours:       { type: Number, required: true, min: 0 },
+  // Snapshot, so historic cost doesn't move when a rate is revised.
+  hourly_rate: { type: Number, default: 0 },
+  cost:        { type: Number, default: 0 },
+  notes:       String,
+  created_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectTimeLogSchema.index({ tenant_id: 1, project_id: 1, work_date: -1 });
+
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -1289,6 +1413,7 @@ const allSchemas = [
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
+  projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1359,4 +1484,9 @@ module.exports = {
   SmsPurchase:           mongoose.model('SmsPurchase', smsPurchaseSchema),
   SmsTemplate:           mongoose.model('SmsTemplate', smsTemplateSchema),
   SmsMessage:            mongoose.model('SmsMessage', smsMessageSchema),
+  Project:               mongoose.model('Project', projectSchema),
+  ProjectMilestone:      mongoose.model('ProjectMilestone', projectMilestoneSchema),
+  ProjectTask:           mongoose.model('ProjectTask', projectTaskSchema),
+  ProjectVariation:      mongoose.model('ProjectVariation', projectVariationSchema),
+  ProjectTimeLog:        mongoose.model('ProjectTimeLog', projectTimeLogSchema),
 };
