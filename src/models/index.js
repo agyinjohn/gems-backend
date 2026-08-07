@@ -1323,6 +1323,57 @@ const projectTimeLogSchema = new Schema({
 }, { timestamps: true });
 projectTimeLogSchema.index({ tenant_id: 1, project_id: 1, work_date: -1 });
 
+// A day on site. Beyond being a record of what happened, this is the evidence
+// base for an extension-of-time claim — which is why weather and delays are
+// captured as structured fields with hours lost, rather than buried in prose.
+// A claim argued from "it rained a lot in March" goes nowhere; one argued from
+// dated entries with hours attributed to a cause is answerable.
+const projectDelaySchema = new Schema({
+  cause:       { type: String, enum: ['weather', 'materials', 'labour', 'plant', 'client_instruction', 'access', 'other'], required: true },
+  hours_lost:  { type: Number, default: 0, min: 0 },
+  description: String,
+}, { _id: true });
+
+const projectDiarySchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  entry_date:  { type: Date, required: true },
+  weather:     { type: String, enum: ['fine', 'overcast', 'light_rain', 'heavy_rain', 'storm'], default: 'fine' },
+  temperature: Number,
+  // False when the site could not be worked at all — the strongest single
+  // signal when totalling lost time.
+  worked:      { type: Boolean, default: true },
+  labour_count: { type: Number, default: 0 },
+  labour_notes: String,
+  plant_notes:  String,
+  work_done:    String,
+  materials_received: String,
+  delays:       { type: [projectDelaySchema], default: [] },
+  visitors:     String,
+  instructions: String,
+  recorded_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+// One entry per site per day — a second entry for the same date would double
+// count lost hours in any claim built from these.
+projectDiarySchema.index({ tenant_id: 1, project_id: 1, entry_date: -1 }, { unique: true });
+
+// Drawings, contracts, permits, certificates and site photographs.
+const projectDocumentSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  name:        { type: String, required: true },
+  category:    { type: String, enum: ['contract', 'drawing', 'permit', 'certificate', 'photo', 'correspondence', 'other'], default: 'other' },
+  url:         { type: String, required: true },
+  public_id:   String,
+  mime_type:   String,
+  size:        Number,
+  notes:       String,
+  // Site photographs belong to the day they were taken.
+  diary_id:    { type: Schema.Types.ObjectId, ref: 'ProjectDiary' },
+  uploaded_by: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectDocumentSchema.index({ tenant_id: 1, project_id: 1, category: 1 });
+
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -1424,6 +1475,7 @@ const allSchemas = [
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
+  projectDiarySchema, projectDocumentSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1499,4 +1551,6 @@ module.exports = {
   ProjectTask:           mongoose.model('ProjectTask', projectTaskSchema),
   ProjectVariation:      mongoose.model('ProjectVariation', projectVariationSchema),
   ProjectTimeLog:        mongoose.model('ProjectTimeLog', projectTimeLogSchema),
+  ProjectDiary:          mongoose.model('ProjectDiary', projectDiarySchema),
+  ProjectDocument:       mongoose.model('ProjectDocument', projectDocumentSchema),
 };

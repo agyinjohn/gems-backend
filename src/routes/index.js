@@ -609,6 +609,14 @@ router.get('/projects/:id/billing',          authenticate, requireTenant, requir
 router.post('/projects/:id/invoices',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createProgressInvoice);
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);
 
+router.get('/projects/:id/diary',              authenticate, requireTenant, requireFeature('projects'), projects.listDiary);
+router.post('/projects/:id/diary',             authenticate, requireTenant, requireFeature('projects'), projects.saveDiary);
+router.delete('/projects/:id/diary/:entryId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDiary);
+
+router.get('/projects/:id/documents',                   authenticate, requireTenant, requireFeature('projects'), projects.listDocuments);
+router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
+router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
+
 router.get('/projects/:id/time',           authenticate, requireTenant, requireFeature('projects'), projects.listTime);
 router.post('/projects/:id/time',          authenticate, requireTenant, requireFeature('projects'), projects.logTime);
 router.delete('/projects/:id/time/:logId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeTime);

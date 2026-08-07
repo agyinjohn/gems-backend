@@ -50,4 +50,21 @@ async function uploadHrFile(tenantId, employeeId, file) {
   return { url: result.secure_url, public_id: result.public_id };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadHrFile, isCloudinaryConfigured };
+/** Project drawings, permits, certificates and site photographs. */
+async function uploadProjectFile(tenantId, projectId, file) {
+  if (!isCloudinaryConfigured()) {
+    throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
+  }
+  const folder = `gems/${tenantId}/projects/${projectId}`;
+  // Cloudinary treats anything non-image as "raw"; drawings and contracts
+  // arrive as PDFs far more often than as pictures.
+  const resourceType = file.mimetype?.startsWith('image/') ? 'image' : 'raw';
+  const result = await uploadBuffer(file.buffer, folder, resourceType);
+  return {
+    url: result.secure_url,
+    public_id: result.public_id,
+    size: result.bytes,
+  };
+}
+
+module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, isCloudinaryConfigured };
