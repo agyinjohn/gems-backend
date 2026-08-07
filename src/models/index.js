@@ -136,9 +136,16 @@ const categorySchema = new Schema({
   tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   name:          { type: String, required: true },
   description:   String,
+  scope:         { type: String, enum: ['product', 'service'], default: 'product' },
   custom_fields: { type: [categoryFieldSchema], default: [] },
 }, { timestamps: true });
 categorySchema.index({ tenant_id: 1, name: 1 }, { unique: true });
+
+// BUNDLE COMPONENT — one line inside a bundle's composition
+const bundleItemSchema = new Schema({
+  product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
+  quantity:   { type: Number, required: true, min: 1, default: 1 },
+}, { _id: false });
 
 // PRODUCT / SERVICE / BUNDLE CATALOG ITEM
 // item_type drives behaviour throughout the system:
@@ -174,6 +181,8 @@ const productSchema = new Schema({
   unit:                { type: String, default: 'piece' },
   images:              [String],
   attributes:          { type: Schema.Types.Mixed, default: {} },
+  // --- bundle composition (bundle only, ignored for products/services) ---
+  bundle_items:        { type: [bundleItemSchema], default: [] },
   location_id:         { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
   is_active:           { type: Boolean, default: true },
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },

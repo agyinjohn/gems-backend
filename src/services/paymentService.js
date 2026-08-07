@@ -248,8 +248,24 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     }).catch(() => {});
 
     for (const item of order.items) {
-      // Only decrement stock and log movements for physical products
-      if (item.item_type !== 'service') {
+      // Deduct stock: bundles deduct each component, services skip
+      if (item.item_type === 'bundle') {
+        const bundle = await Product.findById(item.product_id).lean();
+        if (bundle?.bundle_items?.length) {
+          for (const comp of bundle.bundle_items) {
+            const needed = comp.quantity * item.quantity;
+            await Product.findByIdAndUpdate(comp.product_id, { $inc: { stock_qty: -needed } });
+            await StockMovement.create({
+              tenant_id:  order.tenant_id,
+              product_id: comp.product_id,
+              type:       'sale',
+              quantity:   -needed,
+              reference:  order.order_number,
+              notes:      `Bundle: ${bundle.name}`,
+            });
+          }
+        }
+      } else if (item.item_type !== 'service') {
         await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
         await StockMovement.create({
           tenant_id:  order.tenant_id,

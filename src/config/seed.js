@@ -94,7 +94,14 @@ const seed = async () => {
   const catNames = ['Electronics', 'Office Supplies', 'Furniture', 'Clothing', 'Food & Beverage', 'Tools & Equipment'];
   const catMap = {};
   for (const name of catNames) {
-    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name } }, { upsert: true, new: true });
+    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name, scope: 'product' } }, { upsert: true, new: true });
+    catMap[name] = cat._id;
+  }
+
+  // Service categories
+  const serviceCatNames = ['Printing & Copying', 'IT Services', 'Delivery & Logistics', 'Installation & Maintenance'];
+  for (const name of serviceCatNames) {
+    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name, scope: 'service' } }, { upsert: true, new: true });
     catMap[name] = cat._id;
   }
 
@@ -164,13 +171,31 @@ const seed = async () => {
     { name: 'Extension Cord 10m (4-way)',  sku: 'TOOL-006', cat: 'Tools & Equipment', price: 120,   cost_price: 75,   stock_qty: 40,  description: '4-socket extension cord, 10m, surge-protected with individual switches.', images: ['https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&auto=format&fit=crop'] },
     { name: 'Ladder Aluminium 6-Step',     sku: 'TOOL-007', cat: 'Tools & Equipment', price: 380,   cost_price: 240,  stock_qty: 10,  description: 'Lightweight aluminium step ladder, 150kg rated, non-slip feet.',          images: ['https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=600&auto=format&fit=crop'] },
     { name: 'Fire Extinguisher 2kg',       sku: 'TOOL-008', cat: 'Tools & Equipment', price: 210,   cost_price: 135,  stock_qty: 25,  description: 'ABC dry powder fire extinguisher, 2kg, wall bracket included.',           images: ['https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=600&auto=format&fit=crop'] },
+    // Services (8)
+    { name: 'Document Printing (per page)', sku: 'SVC-001', cat: 'Printing & Copying',         item_type: 'service', unit_type: 'unit',  price: 2,    cost_price: 0.5, description: 'Black & white A4 document printing, priced per page.',                    images: ['https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?w=600&auto=format&fit=crop'] },
+    { name: 'Colour Printing (per page)',   sku: 'SVC-002', cat: 'Printing & Copying',         item_type: 'service', unit_type: 'unit',  price: 5,    cost_price: 1.5, description: 'Full-colour A4 printing on glossy or matte paper, priced per page.',     images: ['https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?w=600&auto=format&fit=crop'] },
+    { name: 'Lamination (per sheet)',       sku: 'SVC-003', cat: 'Printing & Copying',         item_type: 'service', unit_type: 'unit',  price: 8,    cost_price: 2,   description: 'A4 hot lamination for documents, certificates and ID cards.',            images: ['https://images.unsplash.com/photo-1568667256549-094345857637?w=600&auto=format&fit=crop'] },
+    { name: 'Binding & Finishing',          sku: 'SVC-004', cat: 'Printing & Copying',         item_type: 'service', unit_type: 'fixed', price: 25,   cost_price: 5,   description: 'Spiral or comb binding for reports and presentations.',                  images: ['https://images.unsplash.com/photo-1568667256549-094345857637?w=600&auto=format&fit=crop'] },
+    { name: 'IT Support (per hour)',        sku: 'SVC-005', cat: 'IT Services',                item_type: 'service', unit_type: 'hour',  price: 150,  cost_price: 50,  description: 'On-site or remote IT support, troubleshooting and maintenance.',         images: ['https://images.unsplash.com/photo-1504148455328-c376907d081c?w=600&auto=format&fit=crop'] },
+    { name: 'Equipment Delivery',           sku: 'SVC-006', cat: 'Delivery & Logistics',       item_type: 'service', unit_type: 'fixed', price: 80,   cost_price: 30,  description: 'Same-day delivery of purchased equipment within Accra.',                 images: ['https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&auto=format&fit=crop'] },
+    { name: 'Equipment Installation',       sku: 'SVC-007', cat: 'Installation & Maintenance', item_type: 'service', unit_type: 'fixed', price: 200,  cost_price: 60,  description: 'Professional setup and installation of office equipment and furniture.', images: ['https://images.unsplash.com/photo-1504148455328-c376907d081c?w=600&auto=format&fit=crop'] },
+    { name: 'Annual Maintenance Contract',  sku: 'SVC-008', cat: 'Installation & Maintenance', item_type: 'service', unit_type: 'fixed', price: 1200, cost_price: 400, description: 'Yearly maintenance plan covering all purchased equipment and devices.',   images: ['https://images.unsplash.com/photo-1581244277943-fe4a9c777189?w=600&auto=format&fit=crop'] },
   ];
   const productMap = {};
   for (const p of productDefs) {
-    const { sku, cat, ...rest } = p;
+    const { sku, cat, item_type: itype, unit_type: utype, ...rest } = p;
+    const isService = itype === 'service';
     const prod = await Product.findOneAndUpdate(
       { tenant_id: tenant._id, sku },
-      { $set: { ...rest, branch_id: branch._id, category_id: catMap[cat], low_stock_threshold: 10 } },
+      { $set: {
+        ...rest,
+        branch_id:           branch._id,
+        category_id:         catMap[cat],
+        item_type:           itype || 'product',
+        unit_type:           utype || 'fixed',
+        low_stock_threshold: isService ? 0 : 10,
+        stock_qty:           isService ? 0 : (rest.stock_qty || 0),
+      }},
       { upsert: true, new: true },
     );
     productMap[sku] = prod;

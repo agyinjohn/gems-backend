@@ -114,6 +114,17 @@ async function completePosSale({
 
   for (const item of enrichedItems) {
     if (item.item_type === 'service') continue;
+    if (item.item_type === 'bundle') {
+      const bundle = await Product.findById(item.product_id).lean();
+      if (bundle?.bundle_items?.length) {
+        for (const comp of bundle.bundle_items) {
+          const needed = comp.quantity * item.quantity;
+          await Product.findOneAndUpdate({ _id: comp.product_id, tenant_id: tenantId }, { $inc: { stock_qty: -needed } });
+          await StockMovement.create({ tenant_id: tenantId, product_id: comp.product_id, type: 'sale', quantity: -needed, reference: orderNumber, notes: `Bundle: ${bundle.name}`, created_by: userId });
+        }
+      }
+      continue;
+    }
     const stockUpdate = fromReservation
       ? { $inc: { stock_qty: -item.quantity, reserved_qty: -item.quantity } }
       : { $inc: { stock_qty: -item.quantity } };

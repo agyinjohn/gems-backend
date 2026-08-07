@@ -15,6 +15,7 @@ const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
 const { imageUpload, hrDocUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
+const { deductItemStock } = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
@@ -275,17 +276,17 @@ router.get('/categories', (req, res, next) => {
   authenticate(req, res, () => requireTenant(req, res, next));
 }, inventory.getCategories);
 router.post('/categories', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
-  const { name, description, custom_fields } = req.body;
+  const { name, description, custom_fields, scope } = req.body;
   const { Category } = require('../models');
-  const data = await Category.create({ tenant_id: req.tenant_id, name, description, custom_fields: custom_fields || [] });
+  const data = await Category.create({ tenant_id: req.tenant_id, name, description, scope: scope || 'product', custom_fields: custom_fields || [] });
   res.status(201).json({ success: true, data });
 });
 router.put('/categories/:id', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
-  const { name, description, custom_fields } = req.body;
+  const { name, description, custom_fields, scope } = req.body;
   const { Category } = require('../models');
   const data = await Category.findOneAndUpdate(
     { _id: req.params.id, tenant_id: req.tenant_id },
-    { name, description, ...(custom_fields !== undefined && { custom_fields }) },
+    { name, description, ...(custom_fields !== undefined && { custom_fields }), ...(scope !== undefined && { scope }) },
     { new: true }
   );
   if (!data) return res.status(404).json({ success: false, message: 'Category not found.' });
@@ -494,10 +495,7 @@ router.patch('/orders/:id/pay', authenticate, requireTenant, authorize('business
   order.status = 'processing';
   await order.save();
   for (const item of order.items) {
-    if (item.item_type !== 'service') {
-      await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-      await StockMovement.create({ tenant_id: req.tenant_id, product_id: item.product_id, type: 'sale', quantity: -item.quantity, reference: order.order_number, created_by: req.user._id });
-    }
+    await deductItemStock({ item, tenantId: req.tenant_id, branchId: order.branch_id || null, orderNumber: order.order_number, createdBy: req.user._id });
   }
   const hasProduct = order.items.some((i) => i.item_type !== 'service');
   const hasService = order.items.some((i) => i.item_type === 'service');

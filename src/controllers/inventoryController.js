@@ -10,23 +10,25 @@ const getCategories = async (req, res) => {
     if (!t) return res.status(404).json({ success: false, message: 'Store not found.' });
     tenantId = t._id;
   }
-  const data = await Category.find({ tenant_id: tenantId }).sort('name');
+  const filter = { tenant_id: tenantId };
+  if (req.query.scope) filter.scope = req.query.scope;
+  const data = await Category.find(filter).sort('name');
   res.json({ success: true, data });
 };
 
 const createCategory = async (req, res) => {
-  const { name, description } = req.body;
+  const { name, description, scope } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'Category name is required.' });
-  const cat = await Category.create({ tenant_id: req.tenant_id, name, description });
+  const cat = await Category.create({ tenant_id: req.tenant_id, name, description, scope: scope || 'product' });
   res.status(201).json({ success: true, data: cat });
 };
 
 const updateCategory = async (req, res) => {
-  const { name, description } = req.body;
+  const { name, description, scope } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'Category name is required.' });
   const cat = await Category.findOneAndUpdate(
     { _id: req.params.id, tenant_id: req.tenant_id },
-    { name, description },
+    { name, description, ...(scope !== undefined && { scope }) },
     { new: true }
   );
   if (!cat) return res.status(404).json({ success: false, message: 'Category not found.' });
@@ -54,7 +56,10 @@ const getProducts = async (req, res) => {
   if (is_active !== undefined) filter.is_active = is_active === 'true';
   // Allow filtering by catalog type: ?item_type=product|service|bundle
   if (item_type) filter.item_type = item_type;
-  const products = await Product.find(filter).populate('category_id', 'name').sort({ createdAt: -1 });
+  const products = await Product.find(filter)
+    .populate('category_id', 'name')
+    .populate('bundle_items.product_id', 'name')
+    .sort({ createdAt: -1 });
   let data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name }));
   // low_stock only makes sense for physical products
   if (low_stock === 'true') data = data.filter(p => p.item_type !== 'service' && p.stock_qty <= p.low_stock_threshold);
@@ -77,12 +82,13 @@ const createProduct = async (req, res) => {
   const {
     name, sku, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, images, attributes,
-    item_type, unit_type, duration, revenue_account_code,
+    item_type, unit_type, duration, revenue_account_code, bundle_items,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
 
   const catalogType = ['product', 'service', 'bundle'].includes(item_type) ? item_type : 'product';
   const isService = catalogType === 'service';
+  const isBundle = catalogType === 'bundle';
 
   // Services don't need a SKU — only generate one for physical products
   const finalSku = isService
@@ -111,11 +117,12 @@ const createProduct = async (req, res) => {
     unit:                unit || (isService ? 'service' : 'piece'),
     images:              normalizeImages(images),
     attributes:          attributes || {},
+    bundle_items:        isBundle ? (Array.isArray(bundle_items) ? bundle_items : []) : [],
     created_by:          req.user._id,
   });
 
-  // Only create an opening stock movement for physical products
-  if (!isService && stock_qty > 0) {
+  // Only create an opening stock movement for physical products (not bundles)
+  if (!isService && !isBundle && stock_qty > 0) {
     await StockMovement.create({
       tenant_id:  req.tenant_id,
       branch_id:  branchId,
@@ -145,6 +152,7 @@ const updateProduct = async (req, res) => {
   if (!existing) return res.status(404).json({ success: false, message: 'Product not found.' });
 
   const isService = existing.item_type === 'service';
+  const isBundle  = existing.item_type === 'bundle';
 
   const update = {};
   if (name !== undefined)        update.name        = name;
@@ -156,12 +164,14 @@ const updateProduct = async (req, res) => {
   if (is_active !== undefined)   update.is_active   = is_active;
   if (images !== undefined)      update.images      = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
+  if (existing.item_type === 'bundle' && req.body.bundle_items !== undefined)
+    update.bundle_items = Array.isArray(req.body.bundle_items) ? req.body.bundle_items : [];
   // Service-specific fields
   if (unit_type !== undefined)           update.unit_type           = unit_type;
   if (duration !== undefined)            update.duration            = duration != null ? Number(duration) : null;
   if (revenue_account_code !== undefined) update.revenue_account_code = revenue_account_code?.trim() || null;
-  // Stock fields only apply to physical products
-  if (!isService) {
+  // Stock fields only apply to physical products (not services or bundles)
+  if (!isService && !isBundle) {
     if (stock_qty !== undefined)           update.stock_qty           = stock_qty;
     if (low_stock_threshold !== undefined) update.low_stock_threshold = low_stock_threshold;
     if (unit !== undefined)                update.unit                = unit;
@@ -189,9 +199,9 @@ const adjustStock = async (req, res) => {
   if (quantity === undefined) return res.status(400).json({ success: false, message: 'quantity is required.' });
   const product = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
-  // Stock adjustments are meaningless for services
-  if (product.item_type === 'service') {
-    return res.status(400).json({ success: false, message: 'Stock adjustments do not apply to services.' });
+  // Stock adjustments are meaningless for services and bundles
+  if (product.item_type === 'service' || product.item_type === 'bundle') {
+    return res.status(400).json({ success: false, message: 'Stock adjustments do not apply to services or bundles.' });
   }
   const newQty = product.stock_qty + Number(quantity);
   if (newQty < 0) return res.status(400).json({ success: false, message: 'Insufficient stock.' });
