@@ -15,6 +15,15 @@ async function findScoped(req) {
   return Project.findOne({ _id: req.params.id, ...scope(req) });
 }
 
+/**
+ * Lean reads skip the schema's toJSON transform, so they come back carrying
+ * `_id` and no `id`. Clients key rows and build URLs off `id`, so put it back
+ * here rather than dropping .lean() and paying for hydrated documents on every
+ * list read.
+ */
+const withId = (doc) => (doc ? { ...doc, id: String(doc._id) } : doc);
+const withIds = (docs) => (docs || []).map(withId);
+
 /* ── Projects ─────────────────────────────────────────────────────────────── */
 
 const list = async (req, res) => {
@@ -24,7 +33,7 @@ const list = async (req, res) => {
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { code: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];
 
   const projects = await Project.find(filter)
-    .populate('manager_id', 'first_name last_name')
+    .populate('manager_id', 'name')
     .sort({ createdAt: -1 })
     .lean();
 
@@ -33,7 +42,7 @@ const list = async (req, res) => {
   res.json({
     success: true,
     data: projects.map((p) => ({
-      ...p,
+      ...withId(p),
       is_overdue: !!p.planned_end_date
         && !['completed', 'cancelled'].includes(p.status)
         && new Date(p.planned_end_date).getTime() < now,
@@ -47,12 +56,21 @@ const get = async (req, res) => {
 
   const [milestones, tasks, variations, financials] = await Promise.all([
     ProjectMilestone.find({ project_id: project._id, tenant_id: req.tenant_id }).sort({ sequence: 1, createdAt: 1 }).lean(),
-    ProjectTask.find({ project_id: project._id, tenant_id: req.tenant_id }).populate('assignee_id', 'first_name last_name').sort({ createdAt: 1 }).lean(),
+    ProjectTask.find({ project_id: project._id, tenant_id: req.tenant_id }).populate('assignee_id', 'name').sort({ createdAt: 1 }).lean(),
     ProjectVariation.find({ project_id: project._id, tenant_id: req.tenant_id }).sort({ createdAt: -1 }).lean(),
     projectService.getFinancials(project._id, req.tenant_id),
   ]);
 
-  res.json({ success: true, data: { project, milestones, tasks, variations, financials } });
+  res.json({
+    success: true,
+    data: {
+      project,
+      milestones: withIds(milestones),
+      tasks: withIds(tasks),
+      variations: withIds(variations),
+      financials,
+    },
+  });
 };
 
 const create = async (req, res) => {
@@ -315,11 +333,11 @@ const listTime = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
   const logs = await ProjectTimeLog.find({ project_id: project._id, tenant_id: req.tenant_id })
-    .populate('employee_id', 'first_name last_name')
+    .populate('employee_id', 'name')
     .sort({ work_date: -1 })
     .limit(200)
     .lean();
-  res.json({ success: true, data: logs });
+  res.json({ success: true, data: withIds(logs) });
 };
 
 const logTime = async (req, res) => {
@@ -386,7 +404,10 @@ const billing = async (req, res) => {
     }).select('name billable_amount actual_end').sort({ sequence: 1 }).lean(),
   ]);
 
-  res.json({ success: true, data: { position, invoices, billable_milestones: billable } });
+  res.json({
+    success: true,
+    data: { position, invoices: withIds(invoices), billable_milestones: withIds(billable) },
+  });
 };
 
 /**
@@ -574,7 +595,7 @@ const listDiary = async (req, res) => {
     projectService.getDiarySummary(project._id, req.tenant_id),
   ]);
 
-  res.json({ success: true, data: { entries, summary } });
+  res.json({ success: true, data: { entries: withIds(entries), summary } });
 };
 
 /**
@@ -643,7 +664,7 @@ const listDocuments = async (req, res) => {
   const filter = { project_id: project._id, tenant_id: req.tenant_id };
   if (req.query.category) filter.category = req.query.category;
   const docs = await ProjectDocument.find(filter).populate('uploaded_by', 'name').sort({ createdAt: -1 }).lean();
-  res.json({ success: true, data: docs });
+  res.json({ success: true, data: withIds(docs) });
 };
 
 const uploadDocument = async (req, res) => {
