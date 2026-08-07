@@ -944,6 +944,14 @@ const invoiceSchema = new Schema({
   notes:          String,
   order_id:       { type: Schema.Types.ObjectId, ref: 'Order' },
   project_id:     { type: Schema.Types.ObjectId, ref: 'Project' },
+  // Progress billing. Construction valuations are cumulative — the gross value
+  // of work certified in this application, before the client's retention is
+  // withheld. `total` is what is actually due, i.e. work_value less retention.
+  work_value:       { type: Number, default: 0 },
+  retention_amount: { type: Number, default: 0 },
+  // An invoice that bills back retention held on earlier applications, rather
+  // than certifying new work. Carries no work_value of its own.
+  is_retention_release: { type: Boolean, default: false },
   journal_entry_id: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
   created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
@@ -1261,6 +1269,8 @@ const projectMilestoneSchema = new Schema({
   progress_pct:  { type: Number, default: 0, min: 0, max: 100 },
   // What may be invoiced when this stage is certified complete.
   billable_amount: { type: Number, default: 0 },
+  // Set once the stage has been billed, so it can't be certified twice.
+  billed_invoice_id: { type: Schema.Types.ObjectId, ref: 'Invoice' },
 }, { timestamps: true });
 projectMilestoneSchema.index({ tenant_id: 1, project_id: 1, sequence: 1 });
 
