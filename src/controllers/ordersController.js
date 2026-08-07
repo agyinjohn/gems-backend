@@ -8,6 +8,7 @@ const { verifyPaystackTransaction, fulfillStorefrontOrders, failStorefrontOrders
 const { isFeatureEnabled } = require('../services/tenantService');
 const { getActiveSalesTaxRate, calcTaxAmount } = require('../services/taxService');
 const splitService = require('../services/splitService');
+const { resolveUnitPrice } = require('../services/pricingService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -95,13 +96,16 @@ const createOrder = async (req, res) => {
     if (isService) hasServiceItems = true;
     else hasPhysicalItems = true;
 
-    const total = p.price * item.quantity;
+    // Staff raise these orders themselves, so an open-price job can be quoted
+    // here; fixed-price items still ignore anything the client sends.
+    const { unit_price } = resolveUnitPrice({ product: p, proposed: item.unit_price });
+    const total = Math.round(unit_price * item.quantity * 100) / 100;
     subtotal += total;
     enrichedItems.push({
       product_id:           p._id,
       product_name:         p.name,
       quantity:             item.quantity,
-      unit_price:           p.price,
+      unit_price,
       total,
       item_type:            p.item_type || 'product',
       revenue_account_code: p.revenue_account_code || null,
@@ -221,7 +225,9 @@ const updateOrderStatus = async (req, res) => {
 // Storefront — scoped by tenant slug via query param
 const getStorefrontProducts = async (req, res) => {
   const { search, category, page = 1, limit = 12, tenant_slug, branch_slug } = req.query;
-  const filter = { is_active: true };
+  // Open-price items are quoted in person, so they never appear in a
+  // self-service catalog.
+  const filter = { is_active: true, pricing_mode: { $ne: 'open' } };
 
   // Resolve tenant from slug
   if (tenant_slug) {
@@ -328,7 +334,10 @@ const initiateCheckout = async (req, res) => {
   let cartSubtotal = 0;
   for (const [, group] of Object.entries(branchGroups)) {
     for (const { product: p, quantity } of group.items) {
-      cartSubtotal += p.price * quantity;
+      // Self-service checkout: an open-price job has no amount to charge, so
+      // it is refused rather than sold at a guessed price.
+      const { unit_price } = resolveUnitPrice({ product: p, allowOverride: false });
+      cartSubtotal += unit_price * quantity;
     }
   }
   if (storeSettings && cartSubtotal < storeSettings.min_order_amount) {
@@ -372,13 +381,14 @@ const initiateCheckout = async (req, res) => {
     let subtotal = 0;
     const enrichedItems = [];
     for (const { product: p, quantity } of group.items) {
-      const total = p.price * quantity;
+      const { unit_price } = resolveUnitPrice({ product: p, allowOverride: false });
+      const total = Math.round(unit_price * quantity * 100) / 100;
       subtotal += total;
       enrichedItems.push({
         product_id:           p._id,
         product_name:         p.name,
         quantity,
-        unit_price:           p.price,
+        unit_price,
         total,
         item_type:            p.item_type || 'product',
         revenue_account_code: p.revenue_account_code || null,
