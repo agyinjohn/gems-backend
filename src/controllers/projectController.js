@@ -1,10 +1,11 @@
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
-  ProjectDiary, ProjectDocument,
+  ProjectDiary, ProjectDocument, ProjectBaseline,
   Customer, Employee, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const projectService = require('../services/projectService');
+const forecastService = require('../services/projectForecastService');
 const audit = require('../utils/audit');
 const { uploadProjectFile } = require('../services/uploadService');
 
@@ -76,7 +77,8 @@ const get = async (req, res) => {
 const create = async (req, res) => {
   const {
     name, description, customer_id, contract_value, currency, budget_lines,
-    retention_pct, start_date, planned_end_date, manager_id, team, site_address, status,
+    retention_pct, payment_terms_days, defects_liability_days,
+    start_date, planned_end_date, manager_id, team, site_address, status,
   } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'A project name is required.' });
 
@@ -99,6 +101,8 @@ const create = async (req, res) => {
     currency: currency || 'GHS',
     budget_lines: Array.isArray(budget_lines) ? budget_lines : [],
     retention_pct: Number(retention_pct) || 0,
+    payment_terms_days: payment_terms_days !== undefined ? Number(payment_terms_days) : 30,
+    defects_liability_days: Number(defects_liability_days) || 0,
     start_date: start_date || null,
     planned_end_date: planned_end_date || null,
     manager_id: manager_id || null,
@@ -118,6 +122,7 @@ const update = async (req, res) => {
 
   const fields = [
     'name', 'description', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
+    'payment_terms_days', 'defects_liability_days',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
   ];
   for (const f of fields) if (req.body[f] !== undefined) project[f] = req.body[f];
@@ -576,6 +581,73 @@ const releaseRetention = async (req, res) => {
     { invoice_number: invoice.invoice_number, amount: value });
 };
 
+/* ── Baseline programme ───────────────────────────────────────────────────── */
+
+/**
+ * Freeze the current programme.
+ *
+ * Refused on a project with no milestones — a baseline of nothing gives every
+ * variance figure a denominator of zero and reads as "on programme" forever,
+ * which is worse than having no baseline at all.
+ */
+const setBaseline = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const count = await ProjectMilestone.countDocuments({ project_id: project._id, tenant_id: req.tenant_id });
+  if (!count) {
+    return res.status(400).json({
+      success: false,
+      message: 'Add the stages of work before freezing a programme — there is nothing to measure against yet.',
+    });
+  }
+  if (!project.planned_end_date) {
+    return res.status(400).json({
+      success: false,
+      message: 'Set a planned completion date before freezing a programme.',
+    });
+  }
+
+  const baseline = await forecastService.setBaseline(project._id, req.tenant_id, {
+    name: req.body.name,
+    reason: req.body.reason,
+    userId: req.user._id,
+  });
+
+  res.status(201).json({ success: true, data: baseline });
+  await audit(req, 'SET_PROJECT_BASELINE', 'projects',
+    `${req.user.name} froze programme v${baseline.version} on ${project.code}`,
+    { version: baseline.version, name: baseline.name });
+};
+
+const listBaselines = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const baselines = await ProjectBaseline.find({ project_id: project._id, tenant_id: req.tenant_id })
+    .select('version name reason start_date planned_end_date contract_value is_current createdAt')
+    .populate('set_by', 'name')
+    .sort({ version: -1 })
+    .lean();
+  res.json({ success: true, data: withIds(baselines) });
+};
+
+const schedule = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const data = await forecastService.getScheduleVariance(project._id, req.tenant_id);
+  res.json({ success: true, data });
+};
+
+/* ── Cash flow ────────────────────────────────────────────────────────────── */
+
+const cashflow = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const months = Math.min(36, Math.max(3, parseInt(req.query.months, 10) || 12));
+  const data = await forecastService.getCashFlowForecast(project._id, req.tenant_id, { months });
+  res.json({ success: true, data });
+};
+
 /* ── Site diary ───────────────────────────────────────────────────────────── */
 
 const listDiary = async (req, res) => {
@@ -707,6 +779,7 @@ module.exports = {
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
   billing, createProgressInvoice, releaseRetention,
+  setBaseline, listBaselines, schedule, cashflow,
   listDiary, saveDiary, removeDiary,
   listDocuments, uploadDocument, removeDocument,
 };

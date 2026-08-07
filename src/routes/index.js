@@ -605,6 +605,11 @@ router.post('/projects/:id/variations',                    authenticate, require
 router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
 router.delete('/projects/:id/variations/:variationId',     authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeVariation);
 
+router.get('/projects/:id/baseline',         authenticate, requireTenant, requireFeature('projects'), projects.listBaselines);
+router.post('/projects/:id/baseline',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.setBaseline);
+router.get('/projects/:id/schedule',         authenticate, requireTenant, requireFeature('projects'), projects.schedule);
+router.get('/projects/:id/cashflow',         authenticate, requireTenant, requireFeature('projects'), projects.cashflow);
+
 router.get('/projects/:id/billing',          authenticate, requireTenant, requireFeature('projects'), projects.billing);
 router.post('/projects/:id/invoices',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createProgressInvoice);
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);
