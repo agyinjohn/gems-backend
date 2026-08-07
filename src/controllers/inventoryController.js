@@ -83,8 +83,18 @@ const createProduct = async (req, res) => {
     name, sku, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, images, attributes,
     item_type, unit_type, duration, revenue_account_code, bundle_items,
+    pricing_mode, min_price, max_price,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
+
+  // Open pricing means the amount is quoted when the item is sold, so the
+  // catalog price is only a suggestion and the bounds are what constrain it.
+  const priceMode = pricing_mode === 'open' ? 'open' : 'fixed';
+  const minPrice = Number(min_price) || 0;
+  const maxPrice = Number(max_price) || 0;
+  if (priceMode === 'open' && minPrice > 0 && maxPrice > 0 && minPrice > maxPrice) {
+    return res.status(400).json({ success: false, message: 'Minimum price cannot be above the maximum price.' });
+  }
 
   const catalogType = ['product', 'service', 'bundle'].includes(item_type) ? item_type : 'product';
   const isService = catalogType === 'service';
@@ -109,6 +119,9 @@ const createProduct = async (req, res) => {
     unit_type:    unit_type || 'fixed',
     duration:     duration != null ? Number(duration) : null,
     revenue_account_code: revenue_account_code?.trim() || null,
+    pricing_mode: priceMode,
+    min_price:    priceMode === 'open' ? minPrice : 0,
+    max_price:    priceMode === 'open' ? maxPrice : 0,
     price,
     cost_price:          cost_price || 0,
     // Services have no physical stock
@@ -146,6 +159,7 @@ const updateProduct = async (req, res) => {
     name, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, is_active, images,
     unit_type, duration, revenue_account_code,
+    pricing_mode, min_price, max_price,
   } = req.body;
 
   const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
@@ -170,6 +184,23 @@ const updateProduct = async (req, res) => {
   if (unit_type !== undefined)           update.unit_type           = unit_type;
   if (duration !== undefined)            update.duration            = duration != null ? Number(duration) : null;
   if (revenue_account_code !== undefined) update.revenue_account_code = revenue_account_code?.trim() || null;
+  // Pricing mode and its bounds. Validate against the mode that will be in
+  // force after this update, not the one stored before it.
+  if (pricing_mode !== undefined) update.pricing_mode = pricing_mode === 'open' ? 'open' : 'fixed';
+  if (min_price !== undefined) update.min_price = Number(min_price) || 0;
+  if (max_price !== undefined) update.max_price = Number(max_price) || 0;
+  const effectiveMode = update.pricing_mode ?? existing.pricing_mode ?? 'fixed';
+  if (effectiveMode === 'open') {
+    const lo = update.min_price ?? existing.min_price ?? 0;
+    const hi = update.max_price ?? existing.max_price ?? 0;
+    if (lo > 0 && hi > 0 && lo > hi) {
+      return res.status(400).json({ success: false, message: 'Minimum price cannot be above the maximum price.' });
+    }
+  } else {
+    // Bounds only mean anything for open pricing — clear them on the way back.
+    update.min_price = 0;
+    update.max_price = 0;
+  }
   // Stock fields only apply to physical products (not services or bundles)
   if (!isService && !isBundle) {
     if (stock_qty !== undefined)           update.stock_qty           = stock_qty;

@@ -4,6 +4,7 @@ const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
 const { verifyPaystackTransaction } = require('./paymentService');
 const { clearCustomerDisplayByOrderId, setPaidDisplayFlash } = require('./posDisplayService');
+const { resolveUnitPrice } = require('./pricingService');
 
 async function getOpenShift(tenantId, userId, branchId) {
   const filter = { tenant_id: tenantId, opened_by: userId, status: 'open' };
@@ -81,10 +82,13 @@ async function completePosSale({
         throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
       }
     }
-    const total = p.price * item.quantity;
+    // Open-price items are quoted at the till; everything else is priced from
+    // the catalog and any price sent by the client is ignored.
+    const { unit_price } = resolveUnitPrice({ product: p, proposed: item.unit_price });
+    const total = Math.round(unit_price * item.quantity * 100) / 100;
     subtotal += total;
     cogsTotal += (p.cost_price || 0) * item.quantity;
-    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total, item_type: p.item_type || 'product' });
+    enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price, total, item_type: p.item_type || 'product' });
   }
 
   const orderNumber = `POS-${Date.now()}-${Math.floor(Math.random() * 100)}`;

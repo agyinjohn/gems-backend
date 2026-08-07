@@ -171,6 +171,16 @@ const productSchema = new Schema({
   // products and 4010 (Service Revenue) for services when not set.
   revenue_account_code: { type: String, default: null },
   // --- pricing ---
+  // 'fixed'  — the catalog price is what is charged, always.
+  // 'open'   — no set price; whoever rings it up enters the amount (repairs,
+  //            quotes, bespoke jobs). The server only honours a price sent by
+  //            the client for items marked this way — everything else is priced
+  //            server-side, so a tampered client cannot change what is charged.
+  pricing_mode:        { type: String, enum: ['fixed', 'open'], default: 'fixed' },
+  // Optional bounds for open pricing, so a mistyped amount can't ring up as
+  // GHS 5 instead of GHS 500. Zero means unbounded.
+  min_price:           { type: Number, default: 0 },
+  max_price:           { type: Number, default: 0 },
   price:               { type: Number, required: true, default: 0 },
   compare_price:       { type: Number, default: 0 },
   cost_price:          { type: Number, default: 0 },
