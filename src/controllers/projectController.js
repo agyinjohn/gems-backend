@@ -1,10 +1,12 @@
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
+  ProjectDiary, ProjectDocument,
   Customer, Employee, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const projectService = require('../services/projectService');
 const audit = require('../utils/audit');
+const { uploadProjectFile } = require('../services/uploadService');
 
 const scope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) });
 
@@ -553,6 +555,130 @@ const releaseRetention = async (req, res) => {
     { invoice_number: invoice.invoice_number, amount: value });
 };
 
+/* ── Site diary ───────────────────────────────────────────────────────────── */
+
+const listDiary = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const { from, to } = req.query;
+  const filter = { project_id: project._id, tenant_id: req.tenant_id };
+  if (from || to) {
+    filter.entry_date = {};
+    if (from) filter.entry_date.$gte = new Date(from);
+    if (to) filter.entry_date.$lte = new Date(to);
+  }
+
+  const [entries, summary] = await Promise.all([
+    ProjectDiary.find(filter).populate('recorded_by', 'name').sort({ entry_date: -1 }).limit(200).lean(),
+    projectService.getDiarySummary(project._id, req.tenant_id),
+  ]);
+
+  res.json({ success: true, data: { entries, summary } });
+};
+
+/**
+ * Record a day on site.
+ *
+ * One entry per date — a duplicate would double count lost hours in anything
+ * built from these, so a repeat submission updates that day rather than adding
+ * a second record.
+ */
+const saveDiary = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const {
+    entry_date, weather, temperature, worked, labour_count, labour_notes,
+    plant_notes, work_done, materials_received, delays, visitors, instructions,
+  } = req.body;
+  if (!entry_date) return res.status(400).json({ success: false, message: 'A date is required.' });
+
+  const cleanDelays = (Array.isArray(delays) ? delays : [])
+    .filter((d) => d?.cause)
+    .map((d) => ({
+      cause: d.cause,
+      hours_lost: Math.max(0, Number(d.hours_lost) || 0),
+      description: d.description || '',
+    }));
+
+  // Normalised to midnight so entries for the same day collide on the unique
+  // index regardless of what time they were filed.
+  const day = new Date(entry_date);
+  day.setHours(0, 0, 0, 0);
+
+  const entry = await ProjectDiary.findOneAndUpdate(
+    { project_id: project._id, tenant_id: req.tenant_id, entry_date: day },
+    {
+      $set: {
+        weather: weather || 'fine',
+        temperature: temperature !== undefined ? Number(temperature) : undefined,
+        worked: worked !== undefined ? !!worked : true,
+        labour_count: Number(labour_count) || 0,
+        labour_notes, plant_notes, work_done, materials_received,
+        delays: cleanDelays,
+        visitors, instructions,
+        recorded_by: req.user._id,
+      },
+      $setOnInsert: { project_id: project._id, tenant_id: req.tenant_id, entry_date: day },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.status(201).json({ success: true, data: entry });
+};
+
+const removeDiary = async (req, res) => {
+  const entry = await ProjectDiary.findOne({ _id: req.params.entryId, tenant_id: req.tenant_id });
+  if (!entry) return res.status(404).json({ success: false, message: 'Diary entry not found.' });
+  await entry.deleteOne();
+  res.json({ success: true });
+};
+
+/* ── Documents ────────────────────────────────────────────────────────────── */
+
+const listDocuments = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const filter = { project_id: project._id, tenant_id: req.tenant_id };
+  if (req.query.category) filter.category = req.query.category;
+  const docs = await ProjectDocument.find(filter).populate('uploaded_by', 'name').sort({ createdAt: -1 }).lean();
+  res.json({ success: true, data: docs });
+};
+
+const uploadDocument = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (!req.file) return res.status(400).json({ success: false, message: 'Choose a file to upload.' });
+
+  const { url, public_id, size } = await uploadProjectFile(req.tenant_id, project._id, req.file);
+
+  const doc = await ProjectDocument.create({
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+    name: req.body.name?.trim() || req.file.originalname,
+    category: req.body.category || 'other',
+    url,
+    public_id,
+    mime_type: req.file.mimetype,
+    size: size || req.file.size,
+    notes: req.body.notes,
+    diary_id: req.body.diary_id || null,
+    uploaded_by: req.user._id,
+  });
+
+  res.status(201).json({ success: true, data: doc });
+  await audit(req, 'UPLOAD_PROJECT_DOCUMENT', 'projects',
+    `${req.user.name} uploaded ${doc.name} to ${project.code}`, { name: doc.name, category: doc.category });
+};
+
+const removeDocument = async (req, res) => {
+  const doc = await ProjectDocument.findOne({ _id: req.params.documentId, tenant_id: req.tenant_id });
+  if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
+  await doc.deleteOne();
+  res.json({ success: true });
+};
+
 module.exports = {
   list, get, create, update, remove, financials,
   addMilestone, updateMilestone, removeMilestone,
@@ -560,4 +686,6 @@ module.exports = {
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
   billing, createProgressInvoice, releaseRetention,
+  listDiary, saveDiary, removeDiary,
+  listDocuments, uploadDocument, removeDocument,
 };

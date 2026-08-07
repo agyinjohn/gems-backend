@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
-  Expense, PurchaseOrder, Invoice,
+  ProjectDiary, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 
 /**
@@ -269,6 +269,55 @@ async function getBillingPosition(projectId, tenantId) {
   };
 }
 
+/* ── Site records ─────────────────────────────────────────────────────────── */
+
+/**
+ * Totals across the site diary.
+ *
+ * Lost time is broken down by cause because that is the form an
+ * extension-of-time claim takes: it is not enough to show a job ran late, it
+ * has to be attributable. Weather is separated out since it is usually the
+ * ground for an extension without additional cost, while client instructions
+ * and access typically carry cost too.
+ */
+async function getDiarySummary(projectId, tenantId) {
+  const match = { project_id: oid(projectId), tenant_id: oid(tenantId) };
+
+  const [totals, byCause, weatherDays] = await Promise.all([
+    ProjectDiary.aggregate([
+      { $match: match },
+      { $group: {
+        _id: null,
+        entries: { $sum: 1 },
+        non_working: { $sum: { $cond: [{ $eq: ['$worked', false] }, 1, 0] } },
+        labour_days: { $sum: '$labour_count' },
+      } },
+    ]),
+    ProjectDiary.aggregate([
+      { $match: match },
+      { $unwind: '$delays' },
+      { $group: { _id: '$delays.cause', hours: { $sum: '$delays.hours_lost' }, occurrences: { $sum: 1 } } },
+      { $sort: { hours: -1 } },
+    ]),
+    ProjectDiary.aggregate([
+      { $match: { ...match, weather: { $in: ['heavy_rain', 'storm'] } } },
+      { $count: 'days' },
+    ]),
+  ]);
+
+  const causes = byCause.map((c) => ({ cause: c._id, hours: round2(c.hours), occurrences: c.occurrences }));
+
+  return {
+    entries: totals?.[0]?.entries || 0,
+    non_working_days: totals?.[0]?.non_working || 0,
+    labour_days: totals?.[0]?.labour_days || 0,
+    severe_weather_days: weatherDays?.[0]?.days || 0,
+    hours_lost: round2(causes.reduce((sum, c) => sum + c.hours, 0)),
+    hours_lost_by_cause: causes,
+    weather_hours_lost: round2(causes.find((c) => c.cause === 'weather')?.hours || 0),
+  };
+}
+
 /** Next project code for a tenant, e.g. PRJ-0007. */
 async function nextCode(tenantId) {
   const last = await Project.findOne({ tenant_id: tenantId }).sort({ createdAt: -1 }).select('code').lean();
@@ -279,6 +328,7 @@ async function nextCode(tenantId) {
 module.exports = {
   round2,
   getBillingPosition,
+  getDiarySummary,
   milestoneProgress,
   recalculate,
   getFinancials,
