@@ -130,7 +130,13 @@ async function getFinancials(projectId, tenantId) {
     ]),
     Invoice.aggregate([
       { $match: { ...match, status: { $ne: 'void' } } },
-      { $group: { _id: null, invoiced: { $sum: '$total' }, paid: { $sum: '$amount_paid' } } },
+      { $group: {
+        _id: null,
+        invoiced: { $sum: '$total' },
+        paid: { $sum: '$amount_paid' },
+        work_value: { $sum: '$work_value' },
+        retention: { $sum: '$retention_amount' },
+      } },
     ]),
   ]);
 
@@ -150,11 +156,14 @@ async function getFinancials(projectId, tenantId) {
 
   const invoiced = round2(invoiceRow?.[0]?.invoiced || 0);
   const received = round2(invoiceRow?.[0]?.paid || 0);
+  // Gross work certified across applications, and the retention actually
+  // withheld on them.
+  const certified = round2(invoiceRow?.[0]?.work_value || 0);
+  const retentionHeld = round2(invoiceRow?.[0]?.retention || 0);
 
   const progress = round2(project.progress_pct || 0);
   // Value of the work done so far, at contract rates.
   const earned = round2(effectiveContract * (progress / 100));
-  const retentionHeld = round2(invoiced * ((project.retention_pct || 0) / 100));
 
   return {
     currency: project.currency || 'GHS',
@@ -182,9 +191,81 @@ async function getFinancials(projectId, tenantId) {
     invoiced,
     received,
     retention_pct: project.retention_pct || 0,
+    // Summed from what was actually withheld, not estimated from the invoiced
+    // total — otherwise this and the billing position would disagree.
     retention_held: retentionHeld,
-    // Certified work not yet billed.
-    unbilled: round2(Math.max(earned - invoiced, 0)),
+    certified_to_date: certified,
+    // Work done but not yet certified on an application.
+    unbilled: round2(Math.max(earned - certified, 0)),
+  };
+}
+
+/* ── Progress billing ─────────────────────────────────────────────────────── */
+
+/**
+ * The billing position for a project.
+ *
+ * Construction valuations are cumulative: each application states the gross
+ * value of work certified to date, and what falls due is that figure less what
+ * has already been certified, less the client's retention. Working cumulatively
+ * means a later revaluation corrects itself instead of compounding an error.
+ *
+ * Retention is tracked in two directions — withheld on each application, and
+ * released by separate invoices once the job reaches completion — so the amount
+ * still being held by the client is always visible.
+ */
+async function getBillingPosition(projectId, tenantId) {
+  const project = await Project.findOne({ _id: projectId, tenant_id: tenantId }).lean();
+  if (!project) return null;
+
+  const match = { project_id: oid(projectId), tenant_id: oid(tenantId), status: { $ne: 'void' } };
+
+  const [rows] = await Promise.all([
+    Invoice.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$is_retention_release',
+          work_value: { $sum: '$work_value' },
+          retention: { $sum: '$retention_amount' },
+          total: { $sum: '$total' },
+          paid: { $sum: '$amount_paid' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
+  const progressRow = rows.find((r) => r._id !== true) || {};
+  const releaseRow = rows.find((r) => r._id === true) || {};
+
+  const financials = await getFinancials(projectId, tenantId);
+  const effectiveContract = financials?.effective_contract || 0;
+
+  const certifiedToDate = round2(progressRow.work_value || 0);
+  const retentionHeld = round2(progressRow.retention || 0);
+  const retentionReleased = round2(releaseRow.total || 0);
+
+  return {
+    currency: project.currency || 'GHS',
+    effective_contract: effectiveContract,
+    earned_value: financials?.earned_value || 0,
+    // Gross work certified across every application so far.
+    certified_to_date: certifiedToDate,
+    // Can never bill past the contract, variations included.
+    remaining_to_certify: round2(Math.max(effectiveContract - certifiedToDate, 0)),
+    // Work done but not yet put on an application.
+    uncertified_earned: round2(Math.max((financials?.earned_value || 0) - certifiedToDate, 0)),
+
+    retention_pct: project.retention_pct || 0,
+    retention_withheld: retentionHeld,
+    retention_released: retentionReleased,
+    // What the client is still holding.
+    retention_outstanding: round2(Math.max(retentionHeld - retentionReleased, 0)),
+
+    invoiced_net: round2((progressRow.total || 0) + (releaseRow.total || 0)),
+    received: round2((progressRow.paid || 0) + (releaseRow.paid || 0)),
+    applications: progressRow.count || 0,
   };
 }
 
@@ -197,6 +278,7 @@ async function nextCode(tenantId) {
 
 module.exports = {
   round2,
+  getBillingPosition,
   milestoneProgress,
   recalculate,
   getFinancials,
