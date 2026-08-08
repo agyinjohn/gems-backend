@@ -659,6 +659,18 @@ const releaseRetention = async (req, res) => {
   });
 };
 
+/** The formal certificate behind one application, ready to print or send. */
+const certificate = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const data = await projectService.getPaymentCertificate(project._id, req.tenant_id, req.params.invoiceId);
+  if (!data) return res.status(404).json({ success: false, message: 'Invoice not found on this project.' });
+  if (data.error) return res.status(400).json({ success: false, message: data.error });
+
+  res.json({ success: true, data });
+};
+
 /* ── Baseline programme ───────────────────────────────────────────────────── */
 
 /**
@@ -1146,7 +1158,7 @@ module.exports = {
   addTask, updateTask, removeTask,
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
-  billing, createProgressInvoice, releaseRetention,
+  billing, createProgressInvoice, releaseRetention, certificate,
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,

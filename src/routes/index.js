@@ -622,6 +622,7 @@ router.delete('/projects/:id/eot/:claimId',  authenticate, requireTenant, requir
 router.get('/projects/:id/billing',          authenticate, requireTenant, requireFeature('projects'), projects.billing);
 router.post('/projects/:id/invoices',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createProgressInvoice);
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);
+router.get('/projects/:id/invoices/:invoiceId/certificate', authenticate, requireTenant, requireFeature('projects'), projects.certificate);
 
 router.get('/projects/:id/diary',              authenticate, requireTenant, requireFeature('projects'), projects.listDiary);
 router.post('/projects/:id/diary',             authenticate, requireTenant, requireFeature('projects'), projects.saveDiary);
