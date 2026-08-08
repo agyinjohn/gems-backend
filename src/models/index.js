@@ -32,6 +32,11 @@ const tenantSchema = new Schema({
   },
   attendance_settings: {
     standard_hours_per_day: { type: Number, default: 8 },
+    // Used to turn a monthly salary into an hourly cost when allocating
+    // attended time to projects. 26 is the common Ghanaian convention.
+    working_days_per_month: { type: Number, default: 26 },
+    // What an overtime hour costs relative to a normal one.
+    overtime_multiplier:    { type: Number, default: 1.5 },
   },
   storefront_settings: {
     delivery_fee:              { type: Number, default: 30 },
@@ -443,6 +448,11 @@ const employeeSchema = new Schema({
   department_id: { type: Schema.Types.ObjectId, ref: 'Department' },
   job_title:     String,
   gross_salary:  { type: Number, required: true, default: 0 },
+  // What an hour of this person's time costs a project. Left at zero it is
+  // derived from the monthly salary, which is right for salaried staff; set it
+  // directly for day labour and subcontracted trades, whose cost has nothing
+  // to do with a monthly figure.
+  hourly_rate:   { type: Number, default: 0, min: 0 },
   start_date:    Date,
   end_date:      Date,
   termination_reason: String,
@@ -1324,13 +1334,24 @@ const projectTimeLogSchema = new Schema({
   employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   work_date:   { type: Date, required: true },
   hours:       { type: Number, required: true, min: 0 },
-  // Snapshot, so historic cost doesn't move when a rate is revised.
+  // Snapshot, so historic cost doesn't move when a rate is revised. Where the
+  // day carried overtime this is the blended rate for that day, not the base.
   hourly_rate: { type: Number, default: 0 },
   cost:        { type: Number, default: 0 },
+  // 'attendance' — split out of a day the person was recorded as present, and
+  //                so replaceable as a block when that day is re-allocated.
+  // 'manual'     — booked directly against a project by someone who knew what
+  //                was worked on, and never overwritten by an allocation.
+  source:        { type: String, enum: ['manual', 'attendance'], default: 'manual' },
+  attendance_id: { type: Schema.Types.ObjectId, ref: 'Attendance' },
   notes:       String,
   created_by:  { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 projectTimeLogSchema.index({ tenant_id: 1, project_id: 1, work_date: -1 });
+// Reading a person's day back across every project they touched — the query
+// behind both the allocation board and the guard against booking more hours
+// than were actually worked.
+projectTimeLogSchema.index({ tenant_id: 1, employee_id: 1, work_date: 1 });
 
 // A day on site. Beyond being a record of what happened, this is the evidence
 // base for an extension-of-time claim — which is why weather and delays are

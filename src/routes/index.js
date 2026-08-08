@@ -22,6 +22,7 @@ const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
+const labour = require('../controllers/labourController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -629,6 +630,10 @@ router.delete('/projects/:id/diary/:entryId',  authenticate, requireTenant, requ
 router.get('/projects/:id/documents',                   authenticate, requireTenant, requireFeature('projects'), projects.listDocuments);
 router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
 router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
+
+router.get('/labour/board',      authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.board);
+router.get('/labour/by-project', authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.byProject);
+router.post('/labour/allocate',  authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.allocate);
 
 router.get('/projects/:id/time',           authenticate, requireTenant, requireFeature('projects'), projects.listTime);
 router.post('/projects/:id/time',          authenticate, requireTenant, requireFeature('projects'), projects.logTime);
