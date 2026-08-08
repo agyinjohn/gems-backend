@@ -610,6 +610,14 @@ router.post('/projects/:id/baseline',        authenticate, requireTenant, requir
 router.get('/projects/:id/schedule',         authenticate, requireTenant, requireFeature('projects'), projects.schedule);
 router.get('/projects/:id/cashflow',         authenticate, requireTenant, requireFeature('projects'), projects.cashflow);
 
+router.get('/projects/:id/eot',              authenticate, requireTenant, requireFeature('projects'), projects.listEot);
+router.get('/projects/:id/eot/analysis',     authenticate, requireTenant, requireFeature('projects'), projects.eotAnalysis);
+router.post('/projects/:id/eot',             authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createEot);
+router.patch('/projects/:id/eot/:claimId',   authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.updateEot);
+// Deciding a claim moves the completion date, so it sits with the owner.
+router.patch('/projects/:id/eot/:claimId/decision', authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideEot);
+router.delete('/projects/:id/eot/:claimId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeEot);
+
 router.get('/projects/:id/billing',          authenticate, requireTenant, requireFeature('projects'), projects.billing);
 router.post('/projects/:id/invoices',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createProgressInvoice);
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);

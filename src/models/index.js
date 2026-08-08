@@ -1243,6 +1243,8 @@ const projectSchema = new Schema({
   // Gap between completion and retention being released. Typically the
   // defects liability period, six or twelve months on most contracts.
   defects_liability_days: { type: Number, default: 0 },
+  // Used to turn hours lost on site into days of extension claimed.
+  working_hours_per_day: { type: Number, default: 8 },
   start_date:     Date,
   planned_end_date: Date,
   actual_end_date:  Date,
@@ -1424,6 +1426,78 @@ projectBaselineSchema.index(
   { unique: true, partialFilterExpression: { is_current: true } },
 );
 
+// A claim for more time.
+//
+// Running late is not by itself a claim. What matters is whether the delay was
+// the contractor's own risk or the client's: rain and a late client
+// instruction both stop work, but only one of them earns an extension, and
+// only some of those also earn the cost of standing around. The diary already
+// records lost hours against a cause, which is the hard part — this is the
+// claim built from them, and the decision made on it.
+//
+// The snapshot matters as much as the claim. Diary entries can be edited after
+// the fact, so what was argued has to be frozen at submission or the record of
+// the claim quietly drifts away from the claim that was actually made.
+const projectEotCauseSchema = new Schema({
+  cause:           String,
+  hours_lost:      { type: Number, default: 0 },
+  days_equivalent: { type: Number, default: 0 },
+  // 'time_and_cost' — client's risk, earns an extension and prolongation cost
+  // 'time_only'     — neutral event, earns an extension but no money
+  // 'no_entitlement'— contractor's own risk
+  // 'unclassified'  — needs a human to decide which of the above it is
+  entitlement:     String,
+}, { _id: false });
+
+const projectEotClaimSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  reference:   { type: String, required: true },
+  title:       { type: String, required: true },
+  description: String,
+  // The window of the diary the claim is argued from.
+  period_from: { type: Date, required: true },
+  period_to:   { type: Date, required: true },
+
+  // Frozen at submission, from the diary as it read that day.
+  causes:            { type: [projectEotCauseSchema], default: [] },
+  hours_lost_total:  { type: Number, default: 0 },
+  claimable_hours:   { type: Number, default: 0 },
+  working_hours_per_day: { type: Number, default: 8 },
+  // The diary entries relied on. Cited entries are what stops two claims
+  // being argued from the same lost afternoon.
+  diary_entry_ids:   [{ type: Schema.Types.ObjectId, ref: 'ProjectDiary' }],
+  document_ids:      [{ type: Schema.Types.ObjectId, ref: 'ProjectDocument' }],
+
+  days_claimed: { type: Number, required: true, min: 0 },
+  // Prolongation cost, claimable only where the delay was the client's risk.
+  cost_claimed: { type: Number, default: 0 },
+
+  status: {
+    type: String,
+    enum: ['draft', 'submitted', 'granted', 'partially_granted', 'rejected', 'withdrawn'],
+    default: 'draft',
+  },
+  submitted_on:   Date,
+  decided_on:     Date,
+  decided_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+  days_granted:   { type: Number, default: 0 },
+  cost_granted:   { type: Number, default: 0 },
+  decision_notes: String,
+
+  // What the completion date was before this claim moved it, so a decision can
+  // be undone without guessing.
+  previous_end_date: Date,
+  new_end_date:      Date,
+  // The programme the claim was assessed against, and the one cut afterwards.
+  baseline_id:    { type: Schema.Types.ObjectId, ref: 'ProjectBaseline' },
+  rebaselined_to: { type: Schema.Types.ObjectId, ref: 'ProjectBaseline' },
+
+  created_by: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectEotClaimSchema.index({ tenant_id: 1, project_id: 1, createdAt: -1 });
+projectEotClaimSchema.index({ tenant_id: 1, project_id: 1, reference: 1 }, { unique: true });
+
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
   tenant_id:        { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -1525,7 +1599,7 @@ const allSchemas = [
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
-  projectDiarySchema, projectDocumentSchema, projectBaselineSchema,
+  projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1604,4 +1678,5 @@ module.exports = {
   ProjectDiary:          mongoose.model('ProjectDiary', projectDiarySchema),
   ProjectDocument:       mongoose.model('ProjectDocument', projectDocumentSchema),
   ProjectBaseline:       mongoose.model('ProjectBaseline', projectBaselineSchema),
+  ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
 };
