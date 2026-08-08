@@ -23,6 +23,36 @@ async function findScoped(req) {
 }
 
 /**
+ * Load one of a project's records — a milestone, a task, a diary entry — but
+ * only through a project the caller can actually reach.
+ *
+ * Looking a child up by its own id and the tenant alone gets two things wrong.
+ * The obvious one is branch scope: a manager at one branch could reach into
+ * another branch's job knowing nothing but an id. The quieter one is that the
+ * project in the URL was never checked against the record, so a milestone
+ * belonging to one project could be edited down another project's path — and
+ * the recalculation afterwards would then quietly correct the wrong job.
+ *
+ * Both close by going through the project first and matching on it.
+ */
+async function findChild(req, Model, idParam) {
+  const project = await findScoped(req);
+  if (!project) return { project: null, doc: null };
+  const doc = await Model.findOne({
+    _id: req.params[idParam],
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+  });
+  return { project, doc };
+}
+
+/** The 404 that fits — a project the caller can't see, or a missing record. */
+const notFound = (res, project, what) => res.status(404).json({
+  success: false,
+  message: project ? `${what} not found.` : 'Project not found.',
+});
+
+/**
  * Lean reads skip the schema's toJSON transform, so they come back carrying
  * `_id` and no `id`. Clients key rows and build URLs off `id`, so put it back
  * here rather than dropping .lean() and paying for hydrated documents on every
@@ -209,8 +239,8 @@ const addMilestone = async (req, res) => {
 };
 
 const updateMilestone = async (req, res) => {
-  const milestone = await ProjectMilestone.findOne({ _id: req.params.milestoneId, tenant_id: req.tenant_id });
-  if (!milestone) return res.status(404).json({ success: false, message: 'Milestone not found.' });
+  const { project, doc: milestone } = await findChild(req, ProjectMilestone, 'milestoneId');
+  if (!milestone) return notFound(res, project, 'Milestone');
 
   const wasCompleted = milestone.status === 'completed';
 
@@ -233,8 +263,6 @@ const updateMilestone = async (req, res) => {
   res.json({ success: true, data: milestone, project_progress: progress });
 
   if (justCompleted) {
-    const project = await Project.findOne({ _id: milestone.project_id, tenant_id: req.tenant_id })
-      .select('name code customer_id customer_name client_sms_enabled client_phone').lean();
     await notify.sendProjectNotification({
       tenantId: req.tenant_id,
       project,
@@ -246,8 +274,8 @@ const updateMilestone = async (req, res) => {
 };
 
 const removeMilestone = async (req, res) => {
-  const milestone = await ProjectMilestone.findOne({ _id: req.params.milestoneId, tenant_id: req.tenant_id });
-  if (!milestone) return res.status(404).json({ success: false, message: 'Milestone not found.' });
+  const { project, doc: milestone } = await findChild(req, ProjectMilestone, 'milestoneId');
+  if (!milestone) return notFound(res, project, 'Milestone');
   // Tasks outlive their milestone rather than being destroyed with it; they
   // simply stop counting toward a stage.
   await ProjectTask.updateMany({ milestone_id: milestone._id, tenant_id: req.tenant_id }, { $unset: { milestone_id: '' } });
@@ -281,8 +309,8 @@ const addTask = async (req, res) => {
 };
 
 const updateTask = async (req, res) => {
-  const task = await ProjectTask.findOne({ _id: req.params.taskId, tenant_id: req.tenant_id });
-  if (!task) return res.status(404).json({ success: false, message: 'Task not found.' });
+  const { project, doc: task } = await findChild(req, ProjectTask, 'taskId');
+  if (!task) return notFound(res, project, 'Task');
 
   for (const f of ['name', 'description', 'milestone_id', 'weight', 'assignee_id', 'due_date', 'status']) {
     if (req.body[f] !== undefined) task[f] = req.body[f];
@@ -295,8 +323,8 @@ const updateTask = async (req, res) => {
 };
 
 const removeTask = async (req, res) => {
-  const task = await ProjectTask.findOne({ _id: req.params.taskId, tenant_id: req.tenant_id });
-  if (!task) return res.status(404).json({ success: false, message: 'Task not found.' });
+  const { project, doc: task } = await findChild(req, ProjectTask, 'taskId');
+  if (!task) return notFound(res, project, 'Task');
   await task.deleteOne();
   const progress = await projectService.recalculate(task.project_id, req.tenant_id);
   res.json({ success: true, project_progress: progress });
@@ -339,8 +367,8 @@ const decideVariation = async (req, res) => {
   if (!['approved', 'rejected'].includes(decision)) {
     return res.status(400).json({ success: false, message: 'Decision must be approved or rejected.' });
   }
-  const variation = await ProjectVariation.findOne({ _id: req.params.variationId, tenant_id: req.tenant_id });
-  if (!variation) return res.status(404).json({ success: false, message: 'Variation not found.' });
+  const { project, doc: variation } = await findChild(req, ProjectVariation, 'variationId');
+  if (!variation) return notFound(res, project, 'Variation');
 
   variation.status = decision;
   variation.decided_on = new Date();
@@ -352,8 +380,8 @@ const decideVariation = async (req, res) => {
 };
 
 const removeVariation = async (req, res) => {
-  const variation = await ProjectVariation.findOne({ _id: req.params.variationId, tenant_id: req.tenant_id });
-  if (!variation) return res.status(404).json({ success: false, message: 'Variation not found.' });
+  const { project, doc: variation } = await findChild(req, ProjectVariation, 'variationId');
+  if (!variation) return notFound(res, project, 'Variation');
   await variation.deleteOne();
   res.json({ success: true });
 };
@@ -406,8 +434,8 @@ const logTime = async (req, res) => {
 };
 
 const removeTime = async (req, res) => {
-  const log = await ProjectTimeLog.findOne({ _id: req.params.logId, tenant_id: req.tenant_id });
-  if (!log) return res.status(404).json({ success: false, message: 'Time entry not found.' });
+  const { project, doc: log } = await findChild(req, ProjectTimeLog, 'logId');
+  if (!log) return notFound(res, project, 'Time entry');
   await log.deleteOne();
   res.json({ success: true });
 };
@@ -1062,8 +1090,8 @@ const saveDiary = async (req, res) => {
 };
 
 const removeDiary = async (req, res) => {
-  const entry = await ProjectDiary.findOne({ _id: req.params.entryId, tenant_id: req.tenant_id });
-  if (!entry) return res.status(404).json({ success: false, message: 'Diary entry not found.' });
+  const { project, doc: entry } = await findChild(req, ProjectDiary, 'entryId');
+  if (!entry) return notFound(res, project, 'Diary entry');
   await entry.deleteOne();
   res.json({ success: true });
 };
@@ -1106,8 +1134,8 @@ const uploadDocument = async (req, res) => {
 };
 
 const removeDocument = async (req, res) => {
-  const doc = await ProjectDocument.findOne({ _id: req.params.documentId, tenant_id: req.tenant_id });
-  if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
+  const { project, doc } = await findChild(req, ProjectDocument, 'documentId');
+  if (!doc) return notFound(res, project, 'Document');
   await doc.deleteOne();
   res.json({ success: true });
 };
