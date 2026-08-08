@@ -60,4 +60,55 @@ async function sendOrderConfirmation({ tenantId, order, customerEmail, customerP
   return sendOrderNotification({ tenantId, order, key: 'order_confirmed', customerEmail, customerPhone, channel });
 }
 
-module.exports = { sendOrderConfirmation, sendOrderNotification, sendViaEmail, sendViaSms };
+/**
+ * Text the client who awarded a contract.
+ *
+ * Silent by default and silent on every failure. These fire from inside
+ * invoicing and progress updates, so anything thrown here would take down the
+ * thing the user was actually doing — raising an application must not fail
+ * because a phone number was mistyped.
+ *
+ * Three gates, all of which have to open: client updates switched on for this
+ * particular job, a number to send to, and the tenant not having turned the
+ * template off. Nothing here spends a credit that somebody didn't ask to spend.
+ */
+async function sendProjectNotification({ tenantId, project, key, vars = {}, userId }) {
+  try {
+    if (!project?.client_sms_enabled) return { sent: false, reason: 'client_sms_off' };
+
+    let phone = project.client_phone;
+    if (!phone && project.customer_id) {
+      const { Customer } = require('../models');
+      const customer = await Customer.findOne({ _id: project.customer_id, tenant_id: tenantId })
+        .select('phone').lean();
+      phone = customer?.phone;
+    }
+    if (!phone) return { sent: false, reason: 'no_recipient' };
+
+    const { sendTemplated } = require('./smsService');
+    return sendTemplated({
+      tenantId,
+      to: phone,
+      key,
+      userId,
+      vars: {
+        customer_name: project.customer_name || 'there',
+        project_name: project.name,
+        project_code: project.code,
+        ...vars,
+      },
+    });
+  } catch (err) {
+    // Logged rather than raised — see above.
+    console.error('[Notification:project]', key, err.message);
+    return { sent: false, reason: err.message };
+  }
+}
+
+module.exports = {
+  sendOrderConfirmation,
+  sendOrderNotification,
+  sendProjectNotification,
+  sendViaEmail,
+  sendViaSms,
+};

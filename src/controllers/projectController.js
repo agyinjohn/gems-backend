@@ -7,6 +7,11 @@ const { resolveWriteBranchId } = require('../middleware/branchScope');
 const projectService = require('../services/projectService');
 const forecastService = require('../services/projectForecastService');
 const eotService = require('../services/projectEotService');
+const notify = require('../services/notificationService');
+
+/** Dates in a text are read at a glance, so keep them short and unambiguous. */
+const shortDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+const amount = (n) => Number(n || 0).toFixed(2);
 const audit = require('../utils/audit');
 const { uploadProjectFile } = require('../services/uploadService');
 
@@ -16,6 +21,36 @@ const scope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) 
 async function findScoped(req) {
   return Project.findOne({ _id: req.params.id, ...scope(req) });
 }
+
+/**
+ * Load one of a project's records — a milestone, a task, a diary entry — but
+ * only through a project the caller can actually reach.
+ *
+ * Looking a child up by its own id and the tenant alone gets two things wrong.
+ * The obvious one is branch scope: a manager at one branch could reach into
+ * another branch's job knowing nothing but an id. The quieter one is that the
+ * project in the URL was never checked against the record, so a milestone
+ * belonging to one project could be edited down another project's path — and
+ * the recalculation afterwards would then quietly correct the wrong job.
+ *
+ * Both close by going through the project first and matching on it.
+ */
+async function findChild(req, Model, idParam) {
+  const project = await findScoped(req);
+  if (!project) return { project: null, doc: null };
+  const doc = await Model.findOne({
+    _id: req.params[idParam],
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+  });
+  return { project, doc };
+}
+
+/** The 404 that fits — a project the caller can't see, or a missing record. */
+const notFound = (res, project, what) => res.status(404).json({
+  success: false,
+  message: project ? `${what} not found.` : 'Project not found.',
+});
 
 /**
  * Lean reads skip the schema's toJSON transform, so they come back carrying
@@ -123,7 +158,8 @@ const update = async (req, res) => {
 
   const fields = [
     'name', 'description', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
-    'payment_terms_days', 'defects_liability_days',
+    'payment_terms_days', 'defects_liability_days', 'working_hours_per_day',
+    'client_sms_enabled', 'client_phone',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
   ];
   for (const f of fields) if (req.body[f] !== undefined) project[f] = req.body[f];
@@ -203,8 +239,10 @@ const addMilestone = async (req, res) => {
 };
 
 const updateMilestone = async (req, res) => {
-  const milestone = await ProjectMilestone.findOne({ _id: req.params.milestoneId, tenant_id: req.tenant_id });
-  if (!milestone) return res.status(404).json({ success: false, message: 'Milestone not found.' });
+  const { project, doc: milestone } = await findChild(req, ProjectMilestone, 'milestoneId');
+  if (!milestone) return notFound(res, project, 'Milestone');
+
+  const wasCompleted = milestone.status === 'completed';
 
   for (const f of ['name', 'description', 'weight', 'sequence', 'planned_start', 'planned_end', 'billable_amount', 'progress_pct', 'status']) {
     if (req.body[f] !== undefined) milestone[f] = req.body[f];
@@ -215,14 +253,29 @@ const updateMilestone = async (req, res) => {
   }
   if (req.body.status === 'in_progress') milestone.actual_start ||= new Date();
 
+  // Whether this update is what completed the stage, rather than whether the
+  // stage happens to be complete — re-saving a finished milestone must not
+  // text the client the same news again.
+  const justCompleted = wasCompleted !== true && milestone.status === 'completed';
+
   await milestone.save();
   const progress = await projectService.recalculate(milestone.project_id, req.tenant_id);
   res.json({ success: true, data: milestone, project_progress: progress });
+
+  if (justCompleted) {
+    await notify.sendProjectNotification({
+      tenantId: req.tenant_id,
+      project,
+      key: 'project_milestone_completed',
+      userId: req.user._id,
+      vars: { milestone_name: milestone.name, progress: Math.round(progress) },
+    });
+  }
 };
 
 const removeMilestone = async (req, res) => {
-  const milestone = await ProjectMilestone.findOne({ _id: req.params.milestoneId, tenant_id: req.tenant_id });
-  if (!milestone) return res.status(404).json({ success: false, message: 'Milestone not found.' });
+  const { project, doc: milestone } = await findChild(req, ProjectMilestone, 'milestoneId');
+  if (!milestone) return notFound(res, project, 'Milestone');
   // Tasks outlive their milestone rather than being destroyed with it; they
   // simply stop counting toward a stage.
   await ProjectTask.updateMany({ milestone_id: milestone._id, tenant_id: req.tenant_id }, { $unset: { milestone_id: '' } });
@@ -256,8 +309,8 @@ const addTask = async (req, res) => {
 };
 
 const updateTask = async (req, res) => {
-  const task = await ProjectTask.findOne({ _id: req.params.taskId, tenant_id: req.tenant_id });
-  if (!task) return res.status(404).json({ success: false, message: 'Task not found.' });
+  const { project, doc: task } = await findChild(req, ProjectTask, 'taskId');
+  if (!task) return notFound(res, project, 'Task');
 
   for (const f of ['name', 'description', 'milestone_id', 'weight', 'assignee_id', 'due_date', 'status']) {
     if (req.body[f] !== undefined) task[f] = req.body[f];
@@ -270,8 +323,8 @@ const updateTask = async (req, res) => {
 };
 
 const removeTask = async (req, res) => {
-  const task = await ProjectTask.findOne({ _id: req.params.taskId, tenant_id: req.tenant_id });
-  if (!task) return res.status(404).json({ success: false, message: 'Task not found.' });
+  const { project, doc: task } = await findChild(req, ProjectTask, 'taskId');
+  if (!task) return notFound(res, project, 'Task');
   await task.deleteOne();
   const progress = await projectService.recalculate(task.project_id, req.tenant_id);
   res.json({ success: true, project_progress: progress });
@@ -314,8 +367,8 @@ const decideVariation = async (req, res) => {
   if (!['approved', 'rejected'].includes(decision)) {
     return res.status(400).json({ success: false, message: 'Decision must be approved or rejected.' });
   }
-  const variation = await ProjectVariation.findOne({ _id: req.params.variationId, tenant_id: req.tenant_id });
-  if (!variation) return res.status(404).json({ success: false, message: 'Variation not found.' });
+  const { project, doc: variation } = await findChild(req, ProjectVariation, 'variationId');
+  if (!variation) return notFound(res, project, 'Variation');
 
   variation.status = decision;
   variation.decided_on = new Date();
@@ -327,8 +380,8 @@ const decideVariation = async (req, res) => {
 };
 
 const removeVariation = async (req, res) => {
-  const variation = await ProjectVariation.findOne({ _id: req.params.variationId, tenant_id: req.tenant_id });
-  if (!variation) return res.status(404).json({ success: false, message: 'Variation not found.' });
+  const { project, doc: variation } = await findChild(req, ProjectVariation, 'variationId');
+  if (!variation) return notFound(res, project, 'Variation');
   await variation.deleteOne();
   res.json({ success: true });
 };
@@ -381,8 +434,8 @@ const logTime = async (req, res) => {
 };
 
 const removeTime = async (req, res) => {
-  const log = await ProjectTimeLog.findOne({ _id: req.params.logId, tenant_id: req.tenant_id });
-  if (!log) return res.status(404).json({ success: false, message: 'Time entry not found.' });
+  const { project, doc: log } = await findChild(req, ProjectTimeLog, 'logId');
+  if (!log) return notFound(res, project, 'Time entry');
   await log.deleteOne();
   res.json({ success: true });
 };
@@ -521,6 +574,19 @@ const createProgressInvoice = async (req, res) => {
   await audit(req, 'PROJECT_PROGRESS_INVOICE', 'projects',
     `${req.user.name} raised ${invoice.invoice_number} on ${project.code} for ${project.currency} ${total.toFixed(2)}`,
     { invoice_number: invoice.invoice_number, work_value: workValue, retention });
+  await notify.sendProjectNotification({
+    tenantId: req.tenant_id,
+    project,
+    key: 'project_application_raised',
+    userId: req.user._id,
+    vars: {
+      invoice_number: invoice.invoice_number,
+      // What actually falls due, not the gross certified — the client cares
+      // about the figure they have to pay.
+      amount: amount(total),
+      due_date: shortDate(invoice.due_date),
+    },
+  });
 };
 
 /**
@@ -580,6 +646,17 @@ const releaseRetention = async (req, res) => {
   await audit(req, 'PROJECT_RETENTION_RELEASE', 'projects',
     `${req.user.name} released ${project.currency} ${value.toFixed(2)} retention on ${project.code}`,
     { invoice_number: invoice.invoice_number, amount: value });
+  await notify.sendProjectNotification({
+    tenantId: req.tenant_id,
+    project,
+    key: 'project_retention_release',
+    userId: req.user._id,
+    vars: {
+      invoice_number: invoice.invoice_number,
+      amount: amount(value),
+      due_date: shortDate(invoice.due_date),
+    },
+  });
 };
 
 /* ── Baseline programme ───────────────────────────────────────────────────── */
@@ -1013,8 +1090,8 @@ const saveDiary = async (req, res) => {
 };
 
 const removeDiary = async (req, res) => {
-  const entry = await ProjectDiary.findOne({ _id: req.params.entryId, tenant_id: req.tenant_id });
-  if (!entry) return res.status(404).json({ success: false, message: 'Diary entry not found.' });
+  const { project, doc: entry } = await findChild(req, ProjectDiary, 'entryId');
+  if (!entry) return notFound(res, project, 'Diary entry');
   await entry.deleteOne();
   res.json({ success: true });
 };
@@ -1057,8 +1134,8 @@ const uploadDocument = async (req, res) => {
 };
 
 const removeDocument = async (req, res) => {
-  const doc = await ProjectDocument.findOne({ _id: req.params.documentId, tenant_id: req.tenant_id });
-  if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
+  const { project, doc } = await findChild(req, ProjectDocument, 'documentId');
+  if (!doc) return notFound(res, project, 'Document');
   await doc.deleteOne();
   res.json({ success: true });
 };
