@@ -1,4 +1,9 @@
 const mongoose = require('mongoose');
+const {
+  TYPE_KEYS: PROJECT_TYPE_KEYS,
+  ALL_DELAY_CAUSES,
+  ALL_DOCUMENT_CATEGORIES,
+} = require('../config/projectTypes');
 const { Schema } = mongoose;
 
 // TENANT
@@ -1235,6 +1240,11 @@ const projectSchema = new Schema({
   code:           { type: String, required: true },
   name:           { type: String, required: true },
   description:    String,
+  // What kind of job this is. Decides which tabs exist, what things are called
+  // on screen, and which pick-lists are offered — never any arithmetic.
+  // See src/config/projectTypes.js. Absent on projects predating types, which
+  // are read as construction.
+  project_type:   { type: String, enum: PROJECT_TYPE_KEYS, default: 'construction' },
   // The client who awarded the contract.
   customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
   customer_name:  String,
@@ -1366,7 +1376,9 @@ projectTimeLogSchema.index({ tenant_id: 1, employee_id: 1, work_date: 1 });
 // A claim argued from "it rained a lot in March" goes nowhere; one argued from
 // dated entries with hours attributed to a cause is answerable.
 const projectDelaySchema = new Schema({
-  cause:       { type: String, enum: ['weather', 'materials', 'labour', 'plant', 'client_instruction', 'access', 'other'], required: true },
+  // The union across every project type — which of them a given project may
+  // actually use is enforced against its type when the entry is saved.
+  cause:       { type: String, enum: ALL_DELAY_CAUSES, required: true },
   hours_lost:  { type: Number, default: 0, min: 0 },
   description: String,
 }, { _id: true });
@@ -1399,7 +1411,7 @@ const projectDocumentSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
   name:        { type: String, required: true },
-  category:    { type: String, enum: ['contract', 'drawing', 'permit', 'certificate', 'photo', 'correspondence', 'other'], default: 'other' },
+  category:    { type: String, enum: ALL_DOCUMENT_CATEGORIES, default: 'other' },
   url:         { type: String, required: true },
   public_id:   String,
   mime_type:   String,

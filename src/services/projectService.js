@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const types = require('../config/projectTypes');
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
   ProjectDiary, Expense, PurchaseOrder, Invoice, Tenant, Customer,
@@ -317,7 +318,9 @@ async function getPaymentCertificate(projectId, tenantId, invoiceId) {
   const header = {
     certificate_no: position >= 0 ? position + 1 : sameKind.length,
     type: isRelease ? 'retention_release' : 'interim',
-    title: isRelease ? 'Certificate for Release of Retention' : 'Interim Payment Certificate',
+    title: isRelease
+      ? 'Certificate for Release of Retention'
+      : types.profileFor(project.project_type).terms.certificate_title,
     issued_on: invoice.issue_date,
     due_on: invoice.due_date,
     invoice_number: invoice.invoice_number,
