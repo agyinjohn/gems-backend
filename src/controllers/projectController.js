@@ -7,6 +7,11 @@ const { resolveWriteBranchId } = require('../middleware/branchScope');
 const projectService = require('../services/projectService');
 const forecastService = require('../services/projectForecastService');
 const eotService = require('../services/projectEotService');
+const notify = require('../services/notificationService');
+
+/** Dates in a text are read at a glance, so keep them short and unambiguous. */
+const shortDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+const amount = (n) => Number(n || 0).toFixed(2);
 const audit = require('../utils/audit');
 const { uploadProjectFile } = require('../services/uploadService');
 
@@ -123,7 +128,8 @@ const update = async (req, res) => {
 
   const fields = [
     'name', 'description', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
-    'payment_terms_days', 'defects_liability_days',
+    'payment_terms_days', 'defects_liability_days', 'working_hours_per_day',
+    'client_sms_enabled', 'client_phone',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
   ];
   for (const f of fields) if (req.body[f] !== undefined) project[f] = req.body[f];
@@ -206,6 +212,8 @@ const updateMilestone = async (req, res) => {
   const milestone = await ProjectMilestone.findOne({ _id: req.params.milestoneId, tenant_id: req.tenant_id });
   if (!milestone) return res.status(404).json({ success: false, message: 'Milestone not found.' });
 
+  const wasCompleted = milestone.status === 'completed';
+
   for (const f of ['name', 'description', 'weight', 'sequence', 'planned_start', 'planned_end', 'billable_amount', 'progress_pct', 'status']) {
     if (req.body[f] !== undefined) milestone[f] = req.body[f];
   }
@@ -215,9 +223,26 @@ const updateMilestone = async (req, res) => {
   }
   if (req.body.status === 'in_progress') milestone.actual_start ||= new Date();
 
+  // Whether this update is what completed the stage, rather than whether the
+  // stage happens to be complete — re-saving a finished milestone must not
+  // text the client the same news again.
+  const justCompleted = wasCompleted !== true && milestone.status === 'completed';
+
   await milestone.save();
   const progress = await projectService.recalculate(milestone.project_id, req.tenant_id);
   res.json({ success: true, data: milestone, project_progress: progress });
+
+  if (justCompleted) {
+    const project = await Project.findOne({ _id: milestone.project_id, tenant_id: req.tenant_id })
+      .select('name code customer_id customer_name client_sms_enabled client_phone').lean();
+    await notify.sendProjectNotification({
+      tenantId: req.tenant_id,
+      project,
+      key: 'project_milestone_completed',
+      userId: req.user._id,
+      vars: { milestone_name: milestone.name, progress: Math.round(progress) },
+    });
+  }
 };
 
 const removeMilestone = async (req, res) => {
@@ -521,6 +546,19 @@ const createProgressInvoice = async (req, res) => {
   await audit(req, 'PROJECT_PROGRESS_INVOICE', 'projects',
     `${req.user.name} raised ${invoice.invoice_number} on ${project.code} for ${project.currency} ${total.toFixed(2)}`,
     { invoice_number: invoice.invoice_number, work_value: workValue, retention });
+  await notify.sendProjectNotification({
+    tenantId: req.tenant_id,
+    project,
+    key: 'project_application_raised',
+    userId: req.user._id,
+    vars: {
+      invoice_number: invoice.invoice_number,
+      // What actually falls due, not the gross certified — the client cares
+      // about the figure they have to pay.
+      amount: amount(total),
+      due_date: shortDate(invoice.due_date),
+    },
+  });
 };
 
 /**
@@ -580,6 +618,17 @@ const releaseRetention = async (req, res) => {
   await audit(req, 'PROJECT_RETENTION_RELEASE', 'projects',
     `${req.user.name} released ${project.currency} ${value.toFixed(2)} retention on ${project.code}`,
     { invoice_number: invoice.invoice_number, amount: value });
+  await notify.sendProjectNotification({
+    tenantId: req.tenant_id,
+    project,
+    key: 'project_retention_release',
+    userId: req.user._id,
+    vars: {
+      invoice_number: invoice.invoice_number,
+      amount: amount(value),
+      due_date: shortDate(invoice.due_date),
+    },
+  });
 };
 
 /* ── Baseline programme ───────────────────────────────────────────────────── */

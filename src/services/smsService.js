@@ -21,32 +21,82 @@ const { Tenant, SmsTemplate, SmsMessage, PlatformSettings } = require('../models
  * character switches the whole message to UCS-2, which cuts the segment from
  * 160 characters to 70 and so doubles or triples what the tenant is charged.
  */
+const ORDER_VARIABLES = [
+  '{{customer_name}}', '{{order_number}}', '{{total}}', '{{business_name}}', '{{status}}',
+];
+const PROJECT_VARIABLES = [
+  '{{customer_name}}', '{{project_name}}', '{{project_code}}', '{{business_name}}',
+];
+
 const DEFAULT_TEMPLATES = {
   order_confirmed: {
+    group: 'Orders',
     label: 'Order confirmed',
     description: 'Sent when a customer\'s payment succeeds.',
+    variables: ORDER_VARIABLES,
     body: 'Hi {{customer_name}}, your order {{order_number}} of GHS {{total}} is confirmed. Thank you for shopping with {{business_name}}.',
   },
   order_shipped: {
+    group: 'Orders',
     label: 'Order shipped',
     description: 'Sent when an order is marked shipped.',
+    variables: ORDER_VARIABLES,
     body: 'Hi {{customer_name}}, your order {{order_number}} is on its way. Thank you for shopping with {{business_name}}.',
   },
   order_delivered: {
+    group: 'Orders',
     label: 'Order delivered',
     description: 'Sent when an order is marked delivered.',
+    variables: ORDER_VARIABLES,
     body: 'Hi {{customer_name}}, your order {{order_number}} has been delivered. Thank you for shopping with {{business_name}}.',
   },
   order_cancelled: {
+    group: 'Orders',
     label: 'Order cancelled',
     description: 'Sent when an order is cancelled.',
+    variables: ORDER_VARIABLES,
     body: 'Hi {{customer_name}}, your order {{order_number}} has been cancelled. Contact {{business_name}} if this is unexpected.',
+  },
+
+  /* Project templates go to the client who awarded the contract, and only on
+   * jobs where somebody has switched client updates on. They are deliberately
+   * terse: the money and the dates live on the application itself, and a text
+   * that tries to be the document instead of pointing at it just costs more
+   * segments to say the same thing. */
+  project_application_raised: {
+    group: 'Projects',
+    label: 'Application raised',
+    description: 'Sent when a progress application is raised on a project.',
+    variables: [...PROJECT_VARIABLES, '{{invoice_number}}', '{{amount}}', '{{due_date}}'],
+    body: 'Hi {{customer_name}}, application {{invoice_number}} for GHS {{amount}} on {{project_name}} is now due {{due_date}}. {{business_name}}',
+  },
+  project_payment_received: {
+    group: 'Projects',
+    label: 'Payment received',
+    description: 'Sent when a payment is recorded against a project invoice.',
+    variables: [...PROJECT_VARIABLES, '{{invoice_number}}', '{{amount}}', '{{balance}}'],
+    body: 'Hi {{customer_name}}, we have received GHS {{amount}} on {{project_name}}. Balance on {{invoice_number}} is GHS {{balance}}. Thank you. {{business_name}}',
+  },
+  project_milestone_completed: {
+    group: 'Projects',
+    label: 'Stage completed',
+    description: 'Sent when a milestone on a project is marked complete.',
+    variables: [...PROJECT_VARIABLES, '{{milestone_name}}', '{{progress}}'],
+    body: 'Hi {{customer_name}}, {{milestone_name}} on {{project_name}} is complete. The job is now {{progress}} percent done. {{business_name}}',
+  },
+  project_retention_release: {
+    group: 'Projects',
+    label: 'Retention released',
+    description: 'Sent when an invoice releasing retention is raised.',
+    variables: [...PROJECT_VARIABLES, '{{invoice_number}}', '{{amount}}', '{{due_date}}'],
+    body: 'Hi {{customer_name}}, invoice {{invoice_number}} releasing GHS {{amount}} retention on {{project_name}} is now due {{due_date}}. {{business_name}}',
   },
 };
 
-const TEMPLATE_VARIABLES = [
-  '{{customer_name}}', '{{order_number}}', '{{total}}', '{{business_name}}', '{{status}}',
-];
+/** Every variable any template understands. Kept for callers that want one list. */
+const TEMPLATE_VARIABLES = [...new Set(
+  Object.values(DEFAULT_TEMPLATES).flatMap((t) => t.variables),
+)];
 
 /* ── Segment counting ─────────────────────────────────────────────────────── */
 
@@ -103,8 +153,12 @@ async function listTemplates(tenantId) {
     const custom = byKey[key];
     return {
       key,
+      group: def.group || 'Orders',
       label: def.label,
       description: def.description,
+      // Only the variables this template actually understands — an order
+      // placeholder in a project message renders as nothing at all.
+      variables: def.variables || TEMPLATE_VARIABLES,
       body: custom?.body ?? def.body,
       default_body: def.body,
       enabled: custom?.enabled ?? true,

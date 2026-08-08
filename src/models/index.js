@@ -1255,6 +1255,13 @@ const projectSchema = new Schema({
   defects_liability_days: { type: Number, default: 0 },
   // Used to turn hours lost on site into days of extension claimed.
   working_hours_per_day: { type: Number, default: 8 },
+  // Texting a client who never asked to be texted is a good way to lose one,
+  // and every message spends the tenant's credits — so this stays off until
+  // somebody turns it on for this particular job.
+  client_sms_enabled: { type: Boolean, default: false },
+  // Who to text. Falls back to the client record's number; set here when the
+  // day-to-day contact on site isn't whoever the account was opened with.
+  client_phone:       { type: String, default: '' },
   start_date:     Date,
   planned_end_date: Date,
   actual_end_date:  Date,

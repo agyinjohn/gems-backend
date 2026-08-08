@@ -764,6 +764,26 @@ router.post('/invoices/:id/payments', authorize('business_owner', 'accountant'),
   }).catch(() => {});
 
   res.json({ success: true, data: inv });
+
+  // Acknowledge the money on a contract job, where the client asked to hear
+  // about it. Ordinary sales invoices carry no project and say nothing.
+  if (inv.project_id) {
+    const { Project } = require('../models');
+    const notify = require('../services/notificationService');
+    const project = await Project.findOne({ _id: inv.project_id, tenant_id: req.tenant_id })
+      .select('name code customer_id customer_name client_sms_enabled client_phone').lean();
+    await notify.sendProjectNotification({
+      tenantId: req.tenant_id,
+      project,
+      key: 'project_payment_received',
+      userId: req.user._id,
+      vars: {
+        invoice_number: inv.invoice_number,
+        amount: paying.toFixed(2),
+        balance: inv.amount_due.toFixed(2),
+      },
+    });
+  }
 });
 
 router.patch('/invoices/:id/void', authorize('business_owner', 'accountant'), async (req, res) => {
