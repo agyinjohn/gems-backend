@@ -252,7 +252,7 @@ async function listLinkableUsers(tenantId, employeeId = null) {
 
 async function createEmployee(tenantId, body) {
   const {
-    name, email, phone, department_id, job_title, gross_salary, start_date, employee_code,
+    name, email, phone, department_id, job_title, gross_salary, hourly_rate, start_date, employee_code,
     photo, date_of_birth, gender, nationality, marital_status, national_id, address, employment_type,
     emergency_name, emergency_phone, emergency_relation, user_id, manager_id, branch_id,
     annual_leave_entitlement, sick_leave_entitlement,
@@ -273,6 +273,7 @@ async function createEmployee(tenantId, body) {
     department_id: normalizeRefId(department_id),
     job_title,
     gross_salary,
+    hourly_rate: Number(hourly_rate) || 0,
     start_date: start_date || null,
     photo,
     date_of_birth: date_of_birth || null,
@@ -305,7 +306,7 @@ async function updateEmployee(tenantId, id, body) {
   if (!emp) throw httpError('Employee not found.', 404);
 
   const allowed = [
-    'name', 'email', 'phone', 'department_id', 'job_title', 'gross_salary', 'start_date', 'status',
+    'name', 'email', 'phone', 'department_id', 'job_title', 'gross_salary', 'hourly_rate', 'start_date', 'status',
     'photo', 'date_of_birth', 'gender', 'nationality', 'marital_status', 'national_id', 'address', 'employment_type',
     'emergency_name', 'emergency_phone', 'emergency_relation', 'manager_id', 'branch_id',
     'annual_leave_entitlement', 'sick_leave_entitlement',

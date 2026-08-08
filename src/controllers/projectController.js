@@ -1,10 +1,12 @@
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
-  ProjectDiary, ProjectDocument,
+  ProjectDiary, ProjectDocument, ProjectBaseline, ProjectEotClaim,
   Customer, Employee, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const projectService = require('../services/projectService');
+const forecastService = require('../services/projectForecastService');
+const eotService = require('../services/projectEotService');
 const audit = require('../utils/audit');
 const { uploadProjectFile } = require('../services/uploadService');
 
@@ -15,6 +17,15 @@ async function findScoped(req) {
   return Project.findOne({ _id: req.params.id, ...scope(req) });
 }
 
+/**
+ * Lean reads skip the schema's toJSON transform, so they come back carrying
+ * `_id` and no `id`. Clients key rows and build URLs off `id`, so put it back
+ * here rather than dropping .lean() and paying for hydrated documents on every
+ * list read.
+ */
+const withId = (doc) => (doc ? { ...doc, id: String(doc._id) } : doc);
+const withIds = (docs) => (docs || []).map(withId);
+
 /* ── Projects ─────────────────────────────────────────────────────────────── */
 
 const list = async (req, res) => {
@@ -24,7 +35,7 @@ const list = async (req, res) => {
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { code: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];
 
   const projects = await Project.find(filter)
-    .populate('manager_id', 'first_name last_name')
+    .populate('manager_id', 'name')
     .sort({ createdAt: -1 })
     .lean();
 
@@ -33,7 +44,7 @@ const list = async (req, res) => {
   res.json({
     success: true,
     data: projects.map((p) => ({
-      ...p,
+      ...withId(p),
       is_overdue: !!p.planned_end_date
         && !['completed', 'cancelled'].includes(p.status)
         && new Date(p.planned_end_date).getTime() < now,
@@ -47,18 +58,28 @@ const get = async (req, res) => {
 
   const [milestones, tasks, variations, financials] = await Promise.all([
     ProjectMilestone.find({ project_id: project._id, tenant_id: req.tenant_id }).sort({ sequence: 1, createdAt: 1 }).lean(),
-    ProjectTask.find({ project_id: project._id, tenant_id: req.tenant_id }).populate('assignee_id', 'first_name last_name').sort({ createdAt: 1 }).lean(),
+    ProjectTask.find({ project_id: project._id, tenant_id: req.tenant_id }).populate('assignee_id', 'name').sort({ createdAt: 1 }).lean(),
     ProjectVariation.find({ project_id: project._id, tenant_id: req.tenant_id }).sort({ createdAt: -1 }).lean(),
     projectService.getFinancials(project._id, req.tenant_id),
   ]);
 
-  res.json({ success: true, data: { project, milestones, tasks, variations, financials } });
+  res.json({
+    success: true,
+    data: {
+      project,
+      milestones: withIds(milestones),
+      tasks: withIds(tasks),
+      variations: withIds(variations),
+      financials,
+    },
+  });
 };
 
 const create = async (req, res) => {
   const {
     name, description, customer_id, contract_value, currency, budget_lines,
-    retention_pct, start_date, planned_end_date, manager_id, team, site_address, status,
+    retention_pct, payment_terms_days, defects_liability_days,
+    start_date, planned_end_date, manager_id, team, site_address, status,
   } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'A project name is required.' });
 
@@ -81,6 +102,8 @@ const create = async (req, res) => {
     currency: currency || 'GHS',
     budget_lines: Array.isArray(budget_lines) ? budget_lines : [],
     retention_pct: Number(retention_pct) || 0,
+    payment_terms_days: payment_terms_days !== undefined ? Number(payment_terms_days) : 30,
+    defects_liability_days: Number(defects_liability_days) || 0,
     start_date: start_date || null,
     planned_end_date: planned_end_date || null,
     manager_id: manager_id || null,
@@ -100,6 +123,7 @@ const update = async (req, res) => {
 
   const fields = [
     'name', 'description', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
+    'payment_terms_days', 'defects_liability_days',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
   ];
   for (const f of fields) if (req.body[f] !== undefined) project[f] = req.body[f];
@@ -315,11 +339,11 @@ const listTime = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
   const logs = await ProjectTimeLog.find({ project_id: project._id, tenant_id: req.tenant_id })
-    .populate('employee_id', 'first_name last_name')
+    .populate('employee_id', 'name')
     .sort({ work_date: -1 })
     .limit(200)
     .lean();
-  res.json({ success: true, data: logs });
+  res.json({ success: true, data: withIds(logs) });
 };
 
 const logTime = async (req, res) => {
@@ -386,7 +410,10 @@ const billing = async (req, res) => {
     }).select('name billable_amount actual_end').sort({ sequence: 1 }).lean(),
   ]);
 
-  res.json({ success: true, data: { position, invoices, billable_milestones: billable } });
+  res.json({
+    success: true,
+    data: { position, invoices: withIds(invoices), billable_milestones: withIds(billable) },
+  });
 };
 
 /**
@@ -555,6 +582,363 @@ const releaseRetention = async (req, res) => {
     { invoice_number: invoice.invoice_number, amount: value });
 };
 
+/* ── Baseline programme ───────────────────────────────────────────────────── */
+
+/**
+ * Freeze the current programme.
+ *
+ * Refused on a project with no milestones — a baseline of nothing gives every
+ * variance figure a denominator of zero and reads as "on programme" forever,
+ * which is worse than having no baseline at all.
+ */
+const setBaseline = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const count = await ProjectMilestone.countDocuments({ project_id: project._id, tenant_id: req.tenant_id });
+  if (!count) {
+    return res.status(400).json({
+      success: false,
+      message: 'Add the stages of work before freezing a programme — there is nothing to measure against yet.',
+    });
+  }
+  if (!project.planned_end_date) {
+    return res.status(400).json({
+      success: false,
+      message: 'Set a planned completion date before freezing a programme.',
+    });
+  }
+
+  const baseline = await forecastService.setBaseline(project._id, req.tenant_id, {
+    name: req.body.name,
+    reason: req.body.reason,
+    userId: req.user._id,
+  });
+
+  res.status(201).json({ success: true, data: baseline });
+  await audit(req, 'SET_PROJECT_BASELINE', 'projects',
+    `${req.user.name} froze programme v${baseline.version} on ${project.code}`,
+    { version: baseline.version, name: baseline.name });
+};
+
+const listBaselines = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const baselines = await ProjectBaseline.find({ project_id: project._id, tenant_id: req.tenant_id })
+    .select('version name reason start_date planned_end_date contract_value is_current createdAt')
+    .populate('set_by', 'name')
+    .sort({ version: -1 })
+    .lean();
+  res.json({ success: true, data: withIds(baselines) });
+};
+
+const schedule = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const data = await forecastService.getScheduleVariance(project._id, req.tenant_id);
+  res.json({ success: true, data });
+};
+
+/* ── Extensions of time ───────────────────────────────────────────────────── */
+
+const round1 = (n) => Math.round((n || 0) * 10) / 10;
+
+/** What the diary supports over a window, before anything is claimed from it. */
+const eotAnalysis = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const data = await eotService.analysePeriod(project._id, req.tenant_id, {
+    from: req.query.from,
+    to: req.query.to,
+    excludeClaimId: req.query.exclude,
+  });
+  res.json({ success: true, data });
+};
+
+const listEot = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const [claims, position] = await Promise.all([
+    ProjectEotClaim.find({ project_id: project._id, tenant_id: req.tenant_id })
+      .populate('decided_by', 'name')
+      .populate('created_by', 'name')
+      .sort({ createdAt: -1 })
+      .lean(),
+    eotService.getClaimPosition(project._id, req.tenant_id),
+  ]);
+  res.json({ success: true, data: { claims: withIds(claims), position } });
+};
+
+/**
+ * Raise a claim.
+ *
+ * The evidence is frozen onto the claim rather than referenced live. Diary
+ * entries stay editable — they have to be, since a day gets written up badly
+ * and corrected — but a claim that silently restates itself every time an entry
+ * is touched is not a record of anything.
+ */
+const createEot = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const { title, description, period_from, period_to, days_claimed, cost_claimed, submit } = req.body;
+  if (!title?.trim()) return res.status(400).json({ success: false, message: 'Give the claim a title.' });
+  if (!period_from || !period_to) {
+    return res.status(400).json({ success: false, message: 'Set the period the claim covers.' });
+  }
+  if (new Date(period_from) > new Date(period_to)) {
+    return res.status(400).json({ success: false, message: 'The period ends before it starts.' });
+  }
+
+  const analysis = await eotService.analysePeriod(project._id, req.tenant_id, {
+    from: period_from, to: period_to,
+  });
+  if (!analysis.claimable_entry_ids.length) {
+    return res.status(400).json({
+      success: false,
+      message: analysis.already_claimed_hours > 0
+        ? 'Every delay in that period is already cited on another claim.'
+        : 'No lost time is recorded in the diary for that period.',
+    });
+  }
+
+  // The days claimed stay the claimant's call — entitlement turns on the
+  // contract, not on a default table — but a claim for more time than the
+  // diary can account for is one the client will simply take apart.
+  const days = Number(days_claimed);
+  if (!Number.isFinite(days) || days <= 0) {
+    return res.status(400).json({ success: false, message: 'Enter the number of days being claimed.' });
+  }
+  const supported = round1(analysis.hours_lost_total / analysis.working_hours_per_day);
+  if (days > supported) {
+    return res.status(400).json({
+      success: false,
+      message: `The diary records ${supported} days of lost time in that period, so ${days} cannot be evidenced from it.`,
+    });
+  }
+
+  const baseline = await ProjectBaseline.findOne({
+    project_id: project._id, tenant_id: req.tenant_id, is_current: true,
+  }).select('_id').lean();
+
+  const claim = await ProjectEotClaim.create({
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+    reference: await eotService.nextReference(project._id, req.tenant_id),
+    title: title.trim(),
+    description,
+    period_from: new Date(period_from),
+    period_to: new Date(period_to),
+    causes: analysis.causes.map((c) => ({
+      cause: c.cause,
+      hours_lost: c.hours_lost,
+      days_equivalent: c.days_equivalent,
+      entitlement: c.entitlement,
+    })),
+    hours_lost_total: analysis.hours_lost_total,
+    claimable_hours: analysis.claimable_hours,
+    working_hours_per_day: analysis.working_hours_per_day,
+    diary_entry_ids: analysis.claimable_entry_ids,
+    days_claimed: days,
+    cost_claimed: Number(cost_claimed) || 0,
+    status: submit ? 'submitted' : 'draft',
+    submitted_on: submit ? new Date() : null,
+    baseline_id: baseline?._id || null,
+    created_by: req.user._id,
+  });
+
+  res.status(201).json({ success: true, data: claim });
+  await audit(req, 'RAISE_EOT_CLAIM', 'projects',
+    `${req.user.name} raised ${claim.reference} on ${project.code} for ${days} days`,
+    { reference: claim.reference, days_claimed: days });
+};
+
+/**
+ * Move a claim along without deciding it — submitting it to the client, or
+ * taking it back. The contractor's own side of the exchange.
+ */
+const updateEot = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const claim = await ProjectEotClaim.findOne({ _id: req.params.claimId, tenant_id: req.tenant_id, project_id: project._id });
+  if (!claim) return res.status(404).json({ success: false, message: 'Claim not found.' });
+
+  const { action } = req.body;
+
+  if (action === 'submit') {
+    if (claim.status !== 'draft') {
+      return res.status(400).json({ success: false, message: 'Only a draft can be submitted.' });
+    }
+    claim.status = 'submitted';
+    claim.submitted_on = new Date();
+    await claim.save();
+    return res.json({ success: true, data: claim });
+  }
+
+  if (action === 'withdraw') {
+    if (['granted', 'partially_granted'].includes(claim.status)) {
+      return res.status(400).json({ success: false, message: 'A granted claim cannot be withdrawn — it has to be reopened first.' });
+    }
+    claim.status = 'withdrawn';
+    await claim.save();
+    return res.json({ success: true, data: claim });
+  }
+
+  if (['title', 'description', 'days_claimed', 'cost_claimed'].some((f) => req.body[f] !== undefined)) {
+    if (claim.status !== 'draft') {
+      return res.status(400).json({ success: false, message: 'Only a draft can be edited. Withdraw it and raise a new one.' });
+    }
+    if (req.body.title !== undefined) claim.title = req.body.title;
+    if (req.body.description !== undefined) claim.description = req.body.description;
+    if (req.body.cost_claimed !== undefined) claim.cost_claimed = Number(req.body.cost_claimed) || 0;
+    if (req.body.days_claimed !== undefined) {
+      const days = Number(req.body.days_claimed);
+      const supported = round1(claim.hours_lost_total / (claim.working_hours_per_day || 8));
+      if (!Number.isFinite(days) || days <= 0) {
+        return res.status(400).json({ success: false, message: 'Enter the number of days being claimed.' });
+      }
+      if (days > supported) {
+        return res.status(400).json({ success: false, message: `The evidence on this claim supports ${supported} days.` });
+      }
+      claim.days_claimed = days;
+    }
+    await claim.save();
+    return res.json({ success: true, data: claim });
+  }
+
+  return res.status(400).json({ success: false, message: 'Nothing to do.' });
+};
+
+/**
+ * Record the client's decision, and move the completion date with it.
+ *
+ * Granting time that never reaches the programme is the whole failure this is
+ * meant to prevent: the date the job is measured against has to move, or every
+ * schedule figure afterwards still shows a delay the client has already
+ * accepted. The old date is kept so a decision entered wrongly can be undone.
+ */
+const decideEot = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const claim = await ProjectEotClaim.findOne({ _id: req.params.claimId, tenant_id: req.tenant_id, project_id: project._id });
+  if (!claim) return res.status(404).json({ success: false, message: 'Claim not found.' });
+
+  const { decision, days_granted, cost_granted, decision_notes, rebaseline } = req.body;
+
+  // Undo. Only safe while the date is still the one this claim set — if
+  // something else has moved it since, putting the old value back would
+  // silently discard that change.
+  if (decision === 'reopen') {
+    if (!['granted', 'partially_granted', 'rejected'].includes(claim.status)) {
+      return res.status(400).json({ success: false, message: 'Only a decided claim can be reopened.' });
+    }
+    if (claim.days_granted > 0) {
+      const current = project.planned_end_date ? new Date(project.planned_end_date).getTime() : null;
+      const expected = claim.new_end_date ? new Date(claim.new_end_date).getTime() : null;
+      if (current !== expected) {
+        return res.status(400).json({
+          success: false,
+          message: 'The completion date has changed since this was granted, so reopening it would undo that change. Adjust the date directly instead.',
+        });
+      }
+      project.planned_end_date = claim.previous_end_date || null;
+      await project.save();
+    }
+    claim.status = 'submitted';
+    claim.days_granted = 0;
+    claim.cost_granted = 0;
+    claim.decided_on = null;
+    claim.decided_by = null;
+    claim.new_end_date = null;
+    claim.previous_end_date = null;
+    await claim.save();
+    res.json({ success: true, data: claim });
+    return;
+  }
+
+  if (decision !== 'decide') {
+    return res.status(400).json({ success: false, message: 'Unknown decision.' });
+  }
+  if (!['draft', 'submitted'].includes(claim.status)) {
+    return res.status(400).json({ success: false, message: 'This claim has already been decided. Reopen it to change the outcome.' });
+  }
+
+  const granted = Number(days_granted);
+  if (!Number.isFinite(granted) || granted < 0) {
+    return res.status(400).json({ success: false, message: 'Enter the days granted — zero if the claim was refused.' });
+  }
+  if (granted > claim.days_claimed) {
+    return res.status(400).json({ success: false, message: `More days cannot be granted than the ${claim.days_claimed} claimed.` });
+  }
+
+  claim.days_granted = granted;
+  claim.cost_granted = Number(cost_granted) || 0;
+  claim.decision_notes = decision_notes;
+  claim.decided_on = new Date();
+  claim.decided_by = req.user._id;
+  claim.status = granted === 0 ? 'rejected'
+    : granted >= claim.days_claimed ? 'granted'
+    : 'partially_granted';
+
+  if (granted > 0 && project.planned_end_date) {
+    claim.previous_end_date = project.planned_end_date;
+    const moved = new Date(project.planned_end_date);
+    // UTC arithmetic — a local-time shift would move the date by a day either
+    // way depending on the server's zone.
+    moved.setUTCDate(moved.getUTCDate() + granted);
+    claim.new_end_date = moved;
+    project.planned_end_date = moved;
+    await project.save();
+  }
+
+  await claim.save();
+
+  // An extension changes what the job is measured against, so the programme is
+  // normally re-frozen on the back of one. Offered rather than automatic —
+  // re-baselining also resets stage-level slip, which is not always wanted.
+  if (rebaseline && granted > 0) {
+    const fresh = await forecastService.setBaseline(project._id, req.tenant_id, {
+      name: `After ${claim.reference}`,
+      reason: `${granted} day extension granted on ${claim.reference}`,
+      userId: req.user._id,
+    });
+    claim.rebaselined_to = fresh._id;
+    await claim.save();
+  }
+
+  res.json({ success: true, data: claim });
+  await audit(req, 'DECIDE_EOT_CLAIM', 'projects',
+    `${req.user.name} recorded ${granted} of ${claim.days_claimed} days granted on ${claim.reference}`,
+    { reference: claim.reference, days_granted: granted, days_claimed: claim.days_claimed });
+};
+
+const removeEot = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const claim = await ProjectEotClaim.findOne({ _id: req.params.claimId, tenant_id: req.tenant_id, project_id: project._id });
+  if (!claim) return res.status(404).json({ success: false, message: 'Claim not found.' });
+  if (['granted', 'partially_granted'].includes(claim.status)) {
+    return res.status(400).json({
+      success: false,
+      message: 'This claim moved the completion date. Reopen it first so the date goes back, then delete it.',
+    });
+  }
+  await claim.deleteOne();
+  res.json({ success: true });
+};
+
+/* ── Cash flow ────────────────────────────────────────────────────────────── */
+
+const cashflow = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const months = Math.min(36, Math.max(3, parseInt(req.query.months, 10) || 12));
+  const data = await forecastService.getCashFlowForecast(project._id, req.tenant_id, { months });
+  res.json({ success: true, data });
+};
+
 /* ── Site diary ───────────────────────────────────────────────────────────── */
 
 const listDiary = async (req, res) => {
@@ -574,7 +958,7 @@ const listDiary = async (req, res) => {
     projectService.getDiarySummary(project._id, req.tenant_id),
   ]);
 
-  res.json({ success: true, data: { entries, summary } });
+  res.json({ success: true, data: { entries: withIds(entries), summary } });
 };
 
 /**
@@ -643,7 +1027,7 @@ const listDocuments = async (req, res) => {
   const filter = { project_id: project._id, tenant_id: req.tenant_id };
   if (req.query.category) filter.category = req.query.category;
   const docs = await ProjectDocument.find(filter).populate('uploaded_by', 'name').sort({ createdAt: -1 }).lean();
-  res.json({ success: true, data: docs });
+  res.json({ success: true, data: withIds(docs) });
 };
 
 const uploadDocument = async (req, res) => {
@@ -686,6 +1070,8 @@ module.exports = {
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
   billing, createProgressInvoice, releaseRetention,
+  setBaseline, listBaselines, schedule, cashflow,
+  eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,
   listDocuments, uploadDocument, removeDocument,
 };

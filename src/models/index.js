@@ -32,6 +32,11 @@ const tenantSchema = new Schema({
   },
   attendance_settings: {
     standard_hours_per_day: { type: Number, default: 8 },
+    // Used to turn a monthly salary into an hourly cost when allocating
+    // attended time to projects. 26 is the common Ghanaian convention.
+    working_days_per_month: { type: Number, default: 26 },
+    // What an overtime hour costs relative to a normal one.
+    overtime_multiplier:    { type: Number, default: 1.5 },
   },
   storefront_settings: {
     delivery_fee:              { type: Number, default: 30 },
@@ -443,6 +448,11 @@ const employeeSchema = new Schema({
   department_id: { type: Schema.Types.ObjectId, ref: 'Department' },
   job_title:     String,
   gross_salary:  { type: Number, required: true, default: 0 },
+  // What an hour of this person's time costs a project. Left at zero it is
+  // derived from the monthly salary, which is right for salaried staff; set it
+  // directly for day labour and subcontracted trades, whose cost has nothing
+  // to do with a monthly figure.
+  hourly_rate:   { type: Number, default: 0, min: 0 },
   start_date:    Date,
   end_date:      Date,
   termination_reason: String,
@@ -1236,6 +1246,15 @@ const projectSchema = new Schema({
   // Percentage the client withholds until completion — standard on
   // construction contracts, zero for most service work.
   retention_pct:  { type: Number, default: 0 },
+  // How long the client takes to pay a certified application. The single
+  // biggest driver of a contractor's cash position — work certified in March
+  // on 60-day terms is May's money, and the wages in between still fall due.
+  payment_terms_days: { type: Number, default: 30 },
+  // Gap between completion and retention being released. Typically the
+  // defects liability period, six or twelve months on most contracts.
+  defects_liability_days: { type: Number, default: 0 },
+  // Used to turn hours lost on site into days of extension claimed.
+  working_hours_per_day: { type: Number, default: 8 },
   start_date:     Date,
   planned_end_date: Date,
   actual_end_date:  Date,
@@ -1315,13 +1334,24 @@ const projectTimeLogSchema = new Schema({
   employee_id: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   work_date:   { type: Date, required: true },
   hours:       { type: Number, required: true, min: 0 },
-  // Snapshot, so historic cost doesn't move when a rate is revised.
+  // Snapshot, so historic cost doesn't move when a rate is revised. Where the
+  // day carried overtime this is the blended rate for that day, not the base.
   hourly_rate: { type: Number, default: 0 },
   cost:        { type: Number, default: 0 },
+  // 'attendance' — split out of a day the person was recorded as present, and
+  //                so replaceable as a block when that day is re-allocated.
+  // 'manual'     — booked directly against a project by someone who knew what
+  //                was worked on, and never overwritten by an allocation.
+  source:        { type: String, enum: ['manual', 'attendance'], default: 'manual' },
+  attendance_id: { type: Schema.Types.ObjectId, ref: 'Attendance' },
   notes:       String,
   created_by:  { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 projectTimeLogSchema.index({ tenant_id: 1, project_id: 1, work_date: -1 });
+// Reading a person's day back across every project they touched — the query
+// behind both the allocation board and the guard against booking more hours
+// than were actually worked.
+projectTimeLogSchema.index({ tenant_id: 1, employee_id: 1, work_date: 1 });
 
 // A day on site. Beyond being a record of what happened, this is the evidence
 // base for an extension-of-time claim — which is why weather and delays are
@@ -1373,6 +1403,121 @@ const projectDocumentSchema = new Schema({
   uploaded_by: { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 projectDocumentSchema.index({ tenant_id: 1, project_id: 1, category: 1 });
+
+// A frozen copy of the programme as it stood when it was agreed.
+//
+// Dates on the live milestones get edited as a job moves — that is what they
+// are for. The cost of editing them in place is that the original commitment
+// disappears, and "we are three weeks behind the award programme" becomes
+// unanswerable. Freezing a copy is what makes slip measurable at all, and it
+// is also the only thing that turns progress into a schedule metric: without a
+// baseline there is no planned-to-date figure to compare actual progress with.
+const projectBaselineMilestoneSchema = new Schema({
+  milestone_id:    { type: Schema.Types.ObjectId, ref: 'ProjectMilestone' },
+  name:            String,
+  weight:          { type: Number, default: 1 },
+  planned_start:   Date,
+  planned_end:     Date,
+  billable_amount: { type: Number, default: 0 },
+}, { _id: false });
+
+const projectBaselineSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  // Rises with each re-baseline. Superseded versions are kept rather than
+  // overwritten — a programme revised three times is itself the evidence, and
+  // an extension of time is argued from the version it was granted against.
+  version:    { type: Number, required: true },
+  name:       { type: String, required: true },
+  reason:     String,
+  start_date:       Date,
+  planned_end_date: Date,
+  // The contract sum at the moment of freezing, so planned value is measured
+  // against what was agreed then rather than what it has since become.
+  contract_value:   { type: Number, default: 0 },
+  milestones: { type: [projectBaselineMilestoneSchema], default: [] },
+  is_current: { type: Boolean, default: true },
+  set_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectBaselineSchema.index({ tenant_id: 1, project_id: 1, version: -1 });
+// Exactly one live baseline per project — two would make every variance figure
+// depend on which one happened to be read.
+projectBaselineSchema.index(
+  { tenant_id: 1, project_id: 1, is_current: 1 },
+  { unique: true, partialFilterExpression: { is_current: true } },
+);
+
+// A claim for more time.
+//
+// Running late is not by itself a claim. What matters is whether the delay was
+// the contractor's own risk or the client's: rain and a late client
+// instruction both stop work, but only one of them earns an extension, and
+// only some of those also earn the cost of standing around. The diary already
+// records lost hours against a cause, which is the hard part — this is the
+// claim built from them, and the decision made on it.
+//
+// The snapshot matters as much as the claim. Diary entries can be edited after
+// the fact, so what was argued has to be frozen at submission or the record of
+// the claim quietly drifts away from the claim that was actually made.
+const projectEotCauseSchema = new Schema({
+  cause:           String,
+  hours_lost:      { type: Number, default: 0 },
+  days_equivalent: { type: Number, default: 0 },
+  // 'time_and_cost' — client's risk, earns an extension and prolongation cost
+  // 'time_only'     — neutral event, earns an extension but no money
+  // 'no_entitlement'— contractor's own risk
+  // 'unclassified'  — needs a human to decide which of the above it is
+  entitlement:     String,
+}, { _id: false });
+
+const projectEotClaimSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  reference:   { type: String, required: true },
+  title:       { type: String, required: true },
+  description: String,
+  // The window of the diary the claim is argued from.
+  period_from: { type: Date, required: true },
+  period_to:   { type: Date, required: true },
+
+  // Frozen at submission, from the diary as it read that day.
+  causes:            { type: [projectEotCauseSchema], default: [] },
+  hours_lost_total:  { type: Number, default: 0 },
+  claimable_hours:   { type: Number, default: 0 },
+  working_hours_per_day: { type: Number, default: 8 },
+  // The diary entries relied on. Cited entries are what stops two claims
+  // being argued from the same lost afternoon.
+  diary_entry_ids:   [{ type: Schema.Types.ObjectId, ref: 'ProjectDiary' }],
+  document_ids:      [{ type: Schema.Types.ObjectId, ref: 'ProjectDocument' }],
+
+  days_claimed: { type: Number, required: true, min: 0 },
+  // Prolongation cost, claimable only where the delay was the client's risk.
+  cost_claimed: { type: Number, default: 0 },
+
+  status: {
+    type: String,
+    enum: ['draft', 'submitted', 'granted', 'partially_granted', 'rejected', 'withdrawn'],
+    default: 'draft',
+  },
+  submitted_on:   Date,
+  decided_on:     Date,
+  decided_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+  days_granted:   { type: Number, default: 0 },
+  cost_granted:   { type: Number, default: 0 },
+  decision_notes: String,
+
+  // What the completion date was before this claim moved it, so a decision can
+  // be undone without guessing.
+  previous_end_date: Date,
+  new_end_date:      Date,
+  // The programme the claim was assessed against, and the one cut afterwards.
+  baseline_id:    { type: Schema.Types.ObjectId, ref: 'ProjectBaseline' },
+  rebaselined_to: { type: Schema.Types.ObjectId, ref: 'ProjectBaseline' },
+
+  created_by: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+projectEotClaimSchema.index({ tenant_id: 1, project_id: 1, createdAt: -1 });
+projectEotClaimSchema.index({ tenant_id: 1, project_id: 1, reference: 1 }, { unique: true });
 
 // PAYOUT METHOD
 const payoutMethodSchema = new Schema({
@@ -1475,7 +1620,7 @@ const allSchemas = [
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
-  projectDiarySchema, projectDocumentSchema,
+  projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1553,4 +1698,6 @@ module.exports = {
   ProjectTimeLog:        mongoose.model('ProjectTimeLog', projectTimeLogSchema),
   ProjectDiary:          mongoose.model('ProjectDiary', projectDiarySchema),
   ProjectDocument:       mongoose.model('ProjectDocument', projectDocumentSchema),
+  ProjectBaseline:       mongoose.model('ProjectBaseline', projectBaselineSchema),
+  ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
 };

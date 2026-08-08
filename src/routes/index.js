@@ -22,6 +22,7 @@ const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
+const labour = require('../controllers/labourController');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -605,6 +606,19 @@ router.post('/projects/:id/variations',                    authenticate, require
 router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
 router.delete('/projects/:id/variations/:variationId',     authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeVariation);
 
+router.get('/projects/:id/baseline',         authenticate, requireTenant, requireFeature('projects'), projects.listBaselines);
+router.post('/projects/:id/baseline',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.setBaseline);
+router.get('/projects/:id/schedule',         authenticate, requireTenant, requireFeature('projects'), projects.schedule);
+router.get('/projects/:id/cashflow',         authenticate, requireTenant, requireFeature('projects'), projects.cashflow);
+
+router.get('/projects/:id/eot',              authenticate, requireTenant, requireFeature('projects'), projects.listEot);
+router.get('/projects/:id/eot/analysis',     authenticate, requireTenant, requireFeature('projects'), projects.eotAnalysis);
+router.post('/projects/:id/eot',             authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createEot);
+router.patch('/projects/:id/eot/:claimId',   authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.updateEot);
+// Deciding a claim moves the completion date, so it sits with the owner.
+router.patch('/projects/:id/eot/:claimId/decision', authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideEot);
+router.delete('/projects/:id/eot/:claimId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeEot);
+
 router.get('/projects/:id/billing',          authenticate, requireTenant, requireFeature('projects'), projects.billing);
 router.post('/projects/:id/invoices',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.createProgressInvoice);
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);
@@ -616,6 +630,10 @@ router.delete('/projects/:id/diary/:entryId',  authenticate, requireTenant, requ
 router.get('/projects/:id/documents',                   authenticate, requireTenant, requireFeature('projects'), projects.listDocuments);
 router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
 router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
+
+router.get('/labour/board',      authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.board);
+router.get('/labour/by-project', authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.byProject);
+router.post('/labour/allocate',  authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.allocate);
 
 router.get('/projects/:id/time',           authenticate, requireTenant, requireFeature('projects'), projects.listTime);
 router.post('/projects/:id/time',          authenticate, requireTenant, requireFeature('projects'), projects.logTime);
