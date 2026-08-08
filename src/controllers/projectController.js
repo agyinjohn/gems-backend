@@ -8,6 +8,7 @@ const projectService = require('../services/projectService');
 const forecastService = require('../services/projectForecastService');
 const eotService = require('../services/projectEotService');
 const notify = require('../services/notificationService');
+const types = require('../config/projectTypes');
 
 /** Dates in a text are read at a glance, so keep them short and unambiguous. */
 const shortDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -46,6 +47,22 @@ async function findChild(req, Model, idParam) {
   return { project, doc };
 }
 
+/**
+ * Refuse something the project's type doesn't do.
+ *
+ * A print job has no extension-of-time claims and a software phase has no site
+ * diary. The UI hides both, but the routes are still reachable, and a hidden
+ * feature is not a disabled one.
+ */
+function lacks(res, project, capability, what) {
+  if (types.can(project.project_type, capability)) return false;
+  res.status(400).json({
+    success: false,
+    message: `${what} is not part of a ${types.profileFor(project.project_type).label.toLowerCase()} project.`,
+  });
+  return true;
+}
+
 /** The 404 that fits — a project the caller can't see, or a missing record. */
 const notFound = (res, project, what) => res.status(404).json({
   success: false,
@@ -60,6 +77,11 @@ const notFound = (res, project, what) => res.status(404).json({
  */
 const withId = (doc) => (doc ? { ...doc, id: String(doc._id) } : doc);
 const withIds = (docs) => (docs || []).map(withId);
+
+/** The project types and what each one does, for building the UI from. */
+const listTypes = async (req, res) => {
+  res.json({ success: true, data: Object.values(types.TYPES), default: types.DEFAULT_TYPE });
+};
 
 /* ── Projects ─────────────────────────────────────────────────────────────── */
 
@@ -114,7 +136,7 @@ const create = async (req, res) => {
   const {
     name, description, customer_id, contract_value, currency, budget_lines,
     retention_pct, payment_terms_days, defects_liability_days,
-    start_date, planned_end_date, manager_id, team, site_address, status,
+    start_date, planned_end_date, manager_id, team, site_address, status, project_type,
   } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'A project name is required.' });
 
@@ -129,6 +151,7 @@ const create = async (req, res) => {
     tenant_id: req.tenant_id,
     branch_id: await resolveWriteBranchId(req),
     code: await projectService.nextCode(req.tenant_id),
+    project_type: types.TYPE_KEYS.includes(project_type) ? project_type : types.DEFAULT_TYPE,
     name,
     description,
     customer_id: customer_id || null,
@@ -157,7 +180,7 @@ const update = async (req, res) => {
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
   const fields = [
-    'name', 'description', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
+    'name', 'description', 'project_type', 'contract_value', 'currency', 'budget_lines', 'retention_pct',
     'payment_terms_days', 'defects_liability_days', 'working_hours_per_day',
     'client_sms_enabled', 'client_phone',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
@@ -536,7 +559,10 @@ const createProgressInvoice = async (req, res) => {
     });
   }
 
-  const retention = projectService.round2(workValue * ((project.retention_pct || 0) / 100));
+  // Guarded rather than trusted: a type without retention must never withhold,
+  // even if a percentage is still sitting on the project from an earlier type.
+  const retentionPct = types.can(project.project_type, 'retention') ? (project.retention_pct || 0) : 0;
+  const retention = projectService.round2(workValue * (retentionPct / 100));
   const total = projectService.round2(workValue - retention);
 
   const count = await Invoice.countDocuments({ tenant_id: req.tenant_id });
@@ -598,6 +624,7 @@ const createProgressInvoice = async (req, res) => {
 const releaseRetention = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (lacks(res, project, 'retention', 'Retention')) return;
   if (!project.customer_id) {
     return res.status(400).json({ success: false, message: 'Link a client to the project before invoicing.' });
   }
@@ -663,6 +690,8 @@ const releaseRetention = async (req, res) => {
 const certificate = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  if (lacks(res, project, 'certificate', 'Payment certificates')) return;
 
   const data = await projectService.getPaymentCertificate(project._id, req.tenant_id, req.params.invoiceId);
   if (!data) return res.status(404).json({ success: false, message: 'Invoice not found on this project.' });
@@ -736,6 +765,7 @@ const round1 = (n) => Math.round((n || 0) * 10) / 10;
 const eotAnalysis = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (lacks(res, project, 'time_claims', 'Extension of time claims')) return;
   const data = await eotService.analysePeriod(project._id, req.tenant_id, {
     from: req.query.from,
     to: req.query.to,
@@ -747,6 +777,7 @@ const eotAnalysis = async (req, res) => {
 const listEot = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (lacks(res, project, 'time_claims', 'Extension of time claims')) return;
   const [claims, position] = await Promise.all([
     ProjectEotClaim.find({ project_id: project._id, tenant_id: req.tenant_id })
       .populate('decided_by', 'name')
@@ -769,6 +800,8 @@ const listEot = async (req, res) => {
 const createEot = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  if (lacks(res, project, 'time_claims', 'Extension of time claims')) return;
 
   const { title, description, period_from, period_to, days_claimed, cost_claimed, submit } = req.body;
   if (!title?.trim()) return res.status(400).json({ success: false, message: 'Give the claim a title.' });
@@ -1033,6 +1066,7 @@ const cashflow = async (req, res) => {
 const listDiary = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (lacks(res, project, 'site_diary', 'A daily log')) return;
 
   const { from, to } = req.query;
   const filter = { project_id: project._id, tenant_id: req.tenant_id };
@@ -1061,11 +1095,25 @@ const saveDiary = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
+  if (lacks(res, project, 'site_diary', 'A daily log')) return;
+
   const {
     entry_date, weather, temperature, worked, labour_count, labour_notes,
     plant_notes, work_done, materials_received, delays, visitors, instructions,
   } = req.body;
   if (!entry_date) return res.status(400).json({ success: false, message: 'A date is required.' });
+
+  // A cause from another trade's list would be stored happily by the schema and
+  // then offered nowhere, so it is rejected rather than quietly kept.
+  const allowedCauses = types.profileFor(project.project_type).delay_causes;
+  const wrongCause = (Array.isArray(delays) ? delays : [])
+    .find((d) => d?.cause && !allowedCauses.includes(d.cause));
+  if (wrongCause) {
+    return res.status(400).json({
+      success: false,
+      message: `"${wrongCause.cause}" is not a delay cause on a ${types.profileFor(project.project_type).label.toLowerCase()} project.`,
+    });
+  }
 
   const cleanDelays = (Array.isArray(delays) ? delays : [])
     .filter((d) => d?.cause)
@@ -1124,13 +1172,22 @@ const uploadDocument = async (req, res) => {
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
   if (!req.file) return res.status(400).json({ success: false, message: 'Choose a file to upload.' });
 
+  const allowedCategories = types.profileFor(project.project_type).document_categories;
+  const category = req.body.category || 'other';
+  if (!allowedCategories.includes(category)) {
+    return res.status(400).json({
+      success: false,
+      message: `"${category}" is not a document kind on a ${types.profileFor(project.project_type).label.toLowerCase()} project.`,
+    });
+  }
+
   const { url, public_id, size } = await uploadProjectFile(req.tenant_id, project._id, req.file);
 
   const doc = await ProjectDocument.create({
     tenant_id: req.tenant_id,
     project_id: project._id,
     name: req.body.name?.trim() || req.file.originalname,
-    category: req.body.category || 'other',
+    category,
     url,
     public_id,
     mime_type: req.file.mimetype,
@@ -1158,7 +1215,7 @@ module.exports = {
   addTask, updateTask, removeTask,
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
-  billing, createProgressInvoice, releaseRetention, certificate,
+  billing, createProgressInvoice, releaseRetention, certificate, listTypes,
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,

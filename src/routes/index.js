@@ -587,6 +587,7 @@ router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req,
 // PROJECTS — contract work, weighted progress and cost against budget.
 const projectManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
 
+router.get('/projects/types',              authenticate, requireTenant, requireFeature('projects'), projects.listTypes);
 router.get('/projects',                    authenticate, requireTenant, requireFeature('projects'), projects.list);
 router.post('/projects',                   authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.create);
 router.get('/projects/:id',                authenticate, requireTenant, requireFeature('projects'), projects.get);
