@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "db:seed": "node src/config/seed.js",
     "db:migrate": "node src/config/migrate.js",
-    "db:backfill-branches": "node src/config/backfillBranches.js"
+    "db:backfill-branches": "node src/config/backfillBranches.js",
+    "db:fix-orphans": "node src/config/fixOrphanedHr.js"
   },
   "keywords": [],
   "author": "",
