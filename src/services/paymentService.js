@@ -194,21 +194,33 @@ async function fetchPaystackTransaction(reference) {
 async function fulfillStorefrontOrders({ reference, orderIds }) {
   let ids = orderIds;
   if (!ids?.length && reference) {
-    const pending = await Order.find({ payment_ref: reference, payment_status: { $in: ['pending', 'failed'] }, source: 'storefront' });
+    const pending = await Order.find({
+      payment_ref: reference,
+      payment_status: { $in: ['pending', 'failed'] },
+      source: { $in: ['storefront', 'print_request'] },
+    });
     ids = pending.map((o) => o._id);
   }
   if (!ids?.length) return { order_numbers: [], fulfilled: 0 };
 
   const orderNumbers = [];
   for (const order_id of ids) {
-    const order = await Order.findOne({ _id: order_id, payment_status: { $in: ['pending', 'failed'] }, source: 'storefront' });
+    const order = await Order.findOne({
+      _id: order_id,
+      payment_status: { $in: ['pending', 'failed'] },
+      source: { $in: ['storefront', 'print_request'] },
+    });
     if (!order) continue;
+    const isPrint = order.source === 'print_request';
 
     order.payment_status = 'paid';
     order.payment_ref = reference || order.payment_ref;
     order.payment_method = 'paystack';
     order.paystack_settled = true;
-    order.status = 'processing';
+    // A print job's position on the shop floor is tracked separately and must
+    // not be reset by payment landing — a job can be paid for while it is
+    // already on the press.
+    if (!isPrint) order.status = 'processing';
     // Split-settled orders had their commission taken at the gateway and
     // stamped on the order at checkout — don't recompute it here.
     if (order.via_marketplace && !order.split_settled) {
@@ -229,7 +241,7 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       status: 'success',
       payer_name: order.customer_name,
       payer_email: order.customer_email,
-      description: `Storefront order ${order.order_number}`,
+      description: `${isPrint ? 'Print job' : 'Storefront order'} ${order.order_number}`,
       source_id: order._id,
     });
 
