@@ -1459,8 +1459,42 @@ const projectDocumentSchema = new Schema({
   // Site photographs belong to the day they were taken.
   diary_id:    { type: Schema.Types.ObjectId, ref: 'ProjectDiary' },
   uploaded_by: { type: Schema.Types.ObjectId, ref: 'User' },
+  // Everything here is internal until somebody says otherwise. A project's
+  // documents include subcontractor quotes and marked-up drawings the client
+  // has no business seeing, so sharing is a decision taken per document rather
+  // than a category being trusted to be safe.
+  shared_with_client: { type: Boolean, default: false },
+  // Sent in by the client rather than filed by the office. Always visible to
+  // both sides — it is theirs, and hiding it from them would be absurd.
+  from_client:  { type: Boolean, default: false },
+  client_name:  String,
 }, { timestamps: true });
 projectDocumentSchema.index({ tenant_id: 1, project_id: 1, category: 1 });
+
+// A conversation about the job, kept with the job.
+//
+// Not a chat feature. It is the record of what was asked and answered on a
+// contract — the thing people currently keep in WhatsApp, where it is lost the
+// moment somebody changes phone, and cannot be produced when a dispute turns
+// on who approved what.
+const projectMessageSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  body:       { type: String, required: true, maxlength: 4000 },
+  // Which side of the table it came from. The client has no user account, so
+  // authorship is a name captured at the time rather than a reference.
+  from:       { type: String, enum: ['client', 'staff'], required: true },
+  author_id:  { type: Schema.Types.ObjectId, ref: 'User' },
+  author_name: String,
+  attachments: [{
+    name: String, url: String, public_id: String, mime_type: String, size: Number,
+  }],
+  // Unread counts on each side, so neither has to scroll to find out whether
+  // anything happened.
+  read_by_staff:  { type: Boolean, default: false },
+  read_by_client: { type: Boolean, default: false },
+}, { timestamps: true });
+projectMessageSchema.index({ tenant_id: 1, project_id: 1, createdAt: -1 });
 
 // A frozen copy of the programme as it stood when it was agreed.
 //
@@ -1679,6 +1713,7 @@ const allSchemas = [
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
+  projectMessageSchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1758,4 +1793,5 @@ module.exports = {
   ProjectDocument:       mongoose.model('ProjectDocument', projectDocumentSchema),
   ProjectBaseline:       mongoose.model('ProjectBaseline', projectBaselineSchema),
   ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
+  ProjectMessage:        mongoose.model('ProjectMessage', projectMessageSchema),
 };

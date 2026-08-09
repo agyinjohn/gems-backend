@@ -1,6 +1,6 @@
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
-  ProjectDiary, ProjectDocument, ProjectBaseline, ProjectEotClaim,
+  ProjectDiary, ProjectDocument, ProjectBaseline, ProjectEotClaim, ProjectMessage,
   Customer, Employee, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
@@ -748,6 +748,85 @@ const certificate = async (req, res) => {
   res.json({ success: true, data });
 };
 
+/* ── Talking to the client ────────────────────────────────────────────────── */
+
+/**
+ * Share a document with the client, or take it back.
+ *
+ * Per document rather than per category, because a category is not a safety
+ * boundary — "correspondence" holds both the letter you sent them and the one
+ * you sent your subcontractor about them.
+ */
+const shareDocument = async (req, res) => {
+  const { project, doc } = await findChild(req, ProjectDocument, 'documentId');
+  if (!doc) return notFound(res, project, 'Document');
+
+  if (doc.from_client) {
+    return res.status(400).json({
+      success: false,
+      message: 'The client sent this in, so they can already see it.',
+    });
+  }
+
+  doc.shared_with_client = req.body.shared !== false;
+  await doc.save();
+  res.json({ success: true, data: withId(doc.toObject()) });
+};
+
+const listMessages = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const messages = await ProjectMessage.find({ project_id: project._id, tenant_id: req.tenant_id })
+    .sort({ createdAt: 1 }).limit(500).lean();
+
+  await ProjectMessage.updateMany(
+    { project_id: project._id, tenant_id: req.tenant_id, from: 'client', read_by_staff: false },
+    { $set: { read_by_staff: true } },
+  );
+
+  res.json({ success: true, data: withIds(messages) });
+};
+
+const postMessage = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+
+  const body = String(req.body.body || '').trim();
+  if (!body) return res.status(400).json({ success: false, message: 'Write something first.' });
+
+  // Worth saying plainly: this reaches the client, and the office should know
+  // that before it types rather than after.
+  if (!project.track_token) {
+    return res.status(400).json({
+      success: false,
+      message: 'Create the client link first — there is nobody to send this to yet.',
+    });
+  }
+
+  const message = await ProjectMessage.create({
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+    body,
+    from: 'staff',
+    author_id: req.user._id,
+    author_name: req.user.name,
+    read_by_staff: true,
+  });
+
+  res.status(201).json({ success: true, data: withId(message.toObject()) });
+
+  // A message nobody knows about is a message nobody reads. Texted where the
+  // client asked to be texted, and silent otherwise.
+  await notify.sendProjectNotification({
+    tenantId: req.tenant_id,
+    project,
+    key: 'project_message',
+    userId: req.user._id,
+    vars: { sender: req.user.name },
+  });
+};
+
 /* ── Baseline programme ───────────────────────────────────────────────────── */
 
 /**
@@ -1264,7 +1343,7 @@ module.exports = {
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
   billing, createProgressInvoice, releaseRetention, certificate, listTypes,
-  trackLink, revokeTrackLink,
+  trackLink, revokeTrackLink, shareDocument, listMessages, postMessage,
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,

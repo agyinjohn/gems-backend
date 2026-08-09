@@ -84,6 +84,13 @@ const DEFAULT_TEMPLATES = {
     variables: [...PROJECT_VARIABLES, '{{milestone_name}}', '{{progress}}'],
     body: 'Hi {{customer_name}}, {{milestone_name}} on {{project_name}} is complete. The job is now {{progress}} percent done. {{business_name}}',
   },
+  project_message: {
+    group: 'Projects',
+    label: 'Message sent',
+    description: 'Sent when your team writes to the client on a project.',
+    variables: [...PROJECT_VARIABLES, '{{sender}}'],
+    body: 'Hi {{customer_name}}, {{sender}} has sent you a message about {{project_name}}. Open your project link to read and reply. {{business_name}}',
+  },
   project_retention_release: {
     group: 'Projects',
     label: 'Retention released',
