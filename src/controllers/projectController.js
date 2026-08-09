@@ -217,19 +217,43 @@ const remove = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
+  // A job that has been billed cannot be deleted. The invoices are real
+  // accounting records that outlive it, and the certificates raised against
+  // them state a value of work to date — figures that stop meaning anything the
+  // moment the contract they were measured against disappears. Cancelling keeps
+  // the trail intact and is almost always what was actually wanted.
+  const billed = await Invoice.countDocuments({
+    project_id: project._id, tenant_id: req.tenant_id, status: { $ne: 'void' },
+  });
+  if (billed) {
+    return res.status(400).json({
+      success: false,
+      message: `This project has ${billed} invoice${billed === 1 ? '' : 's'} raised against it and can't be deleted. Set it to cancelled instead — that keeps the billing history.`,
+    });
+  }
+
   const filter = { project_id: project._id, tenant_id: req.tenant_id };
   await Promise.all([
     ProjectMilestone.deleteMany(filter),
     ProjectTask.deleteMany(filter),
     ProjectVariation.deleteMany(filter),
     ProjectTimeLog.deleteMany(filter),
+    // Everything else the project owns. Left behind these become rows keyed to
+    // an id nothing resolves — invisible, and quietly counted by any aggregate
+    // that doesn't join back to the project.
+    ProjectBaseline.deleteMany(filter),
+    ProjectEotClaim.deleteMany(filter),
+    ProjectDiary.deleteMany(filter),
+    ProjectDocument.deleteMany(filter),
+    // Expenses and purchase orders are accounting records in their own right
+    // and outlive the project. They are untagged, not destroyed.
     Expense.updateMany(filter, { $unset: { project_id: '' } }),
     PurchaseOrder.updateMany(filter, { $unset: { project_id: '' } }),
   ]);
   await project.deleteOne();
 
   res.json({ success: true });
-  await audit(req, 'DELETE_PROJECT', 'projects', `${req.user.name} deleted project ${project.code}`, { code: project.code });
+  await audit(req, 'DELETE_PROJECT', 'projects', `${req.user.name} deleted project ${project.code} — ${project.name}`, { code: project.code, name: project.name });
 };
 
 const financials = async (req, res) => {
