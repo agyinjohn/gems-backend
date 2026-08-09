@@ -13,7 +13,7 @@ const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
 const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
-const { imageUpload, hrDocUpload } = require('../middleware/uploadMiddleware');
+const { imageUpload, hrDocUpload, printUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
@@ -23,6 +23,8 @@ const paystackSubaccount = require('../controllers/paystackSubaccountController'
 const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
 const labour = require('../controllers/labourController');
+const printRequests = require('../controllers/printRequestController');
+const tracking = require('../services/trackingService');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
@@ -586,6 +588,7 @@ router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req,
 
 // PROJECTS — contract work, weighted progress and cost against budget.
 const projectManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
+const printManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'sales_staff');
 
 router.get('/projects/types',              authenticate, requireTenant, requireFeature('projects'), projects.listTypes);
 router.get('/projects',                    authenticate, requireTenant, requireFeature('projects'), projects.list);
@@ -606,6 +609,9 @@ router.delete('/projects/:id/tasks/:taskId', authenticate, requireTenant, requir
 router.post('/projects/:id/variations',                    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.addVariation);
 router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
 router.delete('/projects/:id/variations/:variationId',     authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeVariation);
+
+router.post('/projects/:id/track-link',      authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.trackLink);
+router.delete('/projects/:id/track-link',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.revokeTrackLink);
 
 router.get('/projects/:id/baseline',         authenticate, requireTenant, requireFeature('projects'), projects.listBaselines);
 router.post('/projects/:id/baseline',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.setBaseline);
@@ -632,6 +638,11 @@ router.delete('/projects/:id/diary/:entryId',  authenticate, requireTenant, requ
 router.get('/projects/:id/documents',                   authenticate, requireTenant, requireFeature('projects'), projects.listDocuments);
 router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
 router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
+
+router.get('/print-requests',                authenticate, requireTenant, printManagers, printRequests.list);
+router.get('/print-requests/:id',            authenticate, requireTenant, printManagers, printRequests.get);
+router.post('/print-requests/:id/quote',     authenticate, requireTenant, printManagers, printRequests.quote);
+router.patch('/print-requests/:id/stage',    authenticate, requireTenant, printManagers, printRequests.setStage);
 
 router.get('/labour/board',      authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.board);
 router.get('/labour/by-project', authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.byProject);
@@ -667,6 +678,22 @@ router.put('/payouts/settings', authenticate, requireTenant, businessOwnerOnly, 
 router.get('/payouts', authenticate, requireTenant, payoutManagers, payout.listPayouts);
 router.post('/payouts', authenticate, requireTenant, payoutManagers, payout.requestPayout);
 router.get('/storefront/resolve-domain', storefront.resolveDomain);
+
+/* ── Public: tracking a job, and sending one in ──────────────────────────────
+ *
+ * No authentication. The token in the URL is the authority — it is unguessable
+ * and was handed to the person entitled to see what it points at. Everything
+ * these return is built by trackingService as a whitelist, never a trimmed
+ * internal record. */
+router.get('/track/:token', async (req, res) => {
+  const data = await tracking.resolve(req.params.token);
+  if (!data) return res.status(404).json({ success: false, message: 'That link is not valid, or has been withdrawn.' });
+  res.json({ success: true, data });
+});
+
+router.get('/print-requests/:tenantSlug/services', printRequests.publicServices);
+router.post('/print-requests/:tenantSlug', printUpload.array('files', 10), printRequests.submitRequest);
+router.post('/track/:token/quote-response', printRequests.respondToQuote);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
 router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);

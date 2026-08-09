@@ -274,6 +274,10 @@ const orderItemSchema = new Schema({
   // For services: the GL revenue account code to post to (e.g. '4010').
   // Null means fall back to the default for the item_type.
   revenue_account_code: { type: String, default: null },
+  // What was asked for on a print line — paper, sides, colour, finishing.
+  // Free-form rather than an enum: every shop words these differently, and a
+  // fixed list would need editing before a shop could sell a new finish.
+  print_spec:   { type: String, default: '' },
 });
 
 const orderSchema = new Schema({
@@ -298,7 +302,36 @@ const orderSchema = new Schema({
   // Service orders:  pending → in_progress → completed
   // Either type:     → cancelled
   status:           { type: String, enum: ['pending','processing','in_progress','shipped','delivered','completed','cancelled'], default: 'pending' },
-  source:           { type: String, enum: ['storefront','internal','pos'], default: 'storefront' },
+  source:           { type: String, enum: ['storefront','internal','pos','print_request'], default: 'storefront' },
+  // The same read-only key projects use, so one public page serves both.
+  track_token:      { type: String, default: null },
+  // What the client sent us to print. Held on the order rather than a separate
+  // upload record because the files are the job — an order without them is not
+  // actionable, and they should go when it does.
+  files: [{
+    name:        String,
+    url:         String,
+    public_id:   String,
+    mime_type:   String,
+    size:        Number,
+    uploaded_at: { type: Date, default: Date.now },
+  }],
+  // A print request arrives without an agreed price. It is quoted, the client
+  // agrees, and only then is it work. Separate from payment_status because a
+  // job can be accepted and produced before the money arrives.
+  quote_status:     { type: String, enum: ['awaiting_quote', 'quoted', 'accepted', 'declined'], default: null },
+  quote_note:       { type: String, default: '' },
+  quoted_at:        Date,
+  quoted_by:        { type: Schema.Types.ObjectId, ref: 'User' },
+  accepted_at:      Date,
+  // Where the job is on the shop floor. Distinct from `status`, which is the
+  // retail lifecycle every order shares — "shipped" says nothing useful about
+  // a job sitting on the guillotine.
+  production_stage: {
+    type: String,
+    enum: ['awaiting_quote', 'quoted', 'queued', 'preparing', 'printing', 'finishing', 'ready', 'collected', 'cancelled'],
+    default: null,
+  },
   // Order was placed via the cross-tenant marketplace directory rather than
   // a direct visit to the tenant's own storefront URL — the platform takes
   // a commission (platform_fee) out of the payout for these.
@@ -323,6 +356,7 @@ const orderSchema = new Schema({
   created_by:       { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 orderSchema.index({ tenant_id: 1, order_number: 1 }, { unique: true });
+orderSchema.index({ track_token: 1 }, { unique: true, sparse: true });
 
 // SUPPLIER
 const supplierSchema = new Schema({
@@ -1265,6 +1299,10 @@ const projectSchema = new Schema({
   defects_liability_days: { type: Number, default: 0 },
   // Used to turn hours lost on site into days of extension claimed.
   working_hours_per_day: { type: Number, default: 8 },
+  // Unguessable key for the read-only page a client is given. Minted only when
+  // somebody asks for the link, so a job nobody shares never carries one, and
+  // sparse so the unique index ignores the ones that don't.
+  track_token:    { type: String, default: null },
   // Texting a client who never asked to be texted is a good way to lose one,
   // and every message spends the tenant's credits — so this stays off until
   // somebody turns it on for this particular job.
@@ -1286,6 +1324,7 @@ const projectSchema = new Schema({
 }, { timestamps: true });
 projectSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
 projectSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
+projectSchema.index({ track_token: 1 }, { unique: true, sparse: true });
 
 // A stage of work. Weight is its share of the whole job, so overall progress
 // is the weighted average rather than a figure somebody felt like typing.
