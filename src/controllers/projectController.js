@@ -9,6 +9,7 @@ const forecastService = require('../services/projectForecastService');
 const eotService = require('../services/projectEotService');
 const notify = require('../services/notificationService');
 const types = require('../config/projectTypes');
+const tracking = require('../services/trackingService');
 
 /** Dates in a text are read at a glance, so keep them short and unambiguous. */
 const shortDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -710,6 +711,29 @@ const releaseRetention = async (req, res) => {
   });
 };
 
+/**
+ * The link a client is given to watch their job.
+ *
+ * Minted on first request rather than at creation, so a project nobody shares
+ * never carries a token at all.
+ */
+const trackLink = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const token = await tracking.ensureToken(Project, project._id, req.tenant_id);
+  res.json({ success: true, data: { token, path: `/track/${token}` } });
+};
+
+/** Pull a shared link back. Anyone still holding it gets nothing. */
+const revokeTrackLink = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  await tracking.revokeToken(Project, project._id, req.tenant_id);
+  res.json({ success: true });
+  await audit(req, 'REVOKE_TRACK_LINK', 'projects',
+    `${req.user.name} revoked the client link for ${project.code}`, { code: project.code });
+};
+
 /** The formal certificate behind one application, ready to print or send. */
 const certificate = async (req, res) => {
   const project = await findScoped(req);
@@ -1240,6 +1264,7 @@ module.exports = {
   addVariation, decideVariation, removeVariation,
   listTime, logTime, removeTime,
   billing, createProgressInvoice, releaseRetention, certificate, listTypes,
+  trackLink, revokeTrackLink,
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,
