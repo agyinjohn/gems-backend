@@ -23,14 +23,21 @@ const seed = async () => {
   await connectDB();
   console.log('Seeding database...');
 
-  // Wipe all demo tenant data so re-seeding is always clean
+  // Wipe the demo tenant's transactional data so re-seeding is always clean.
+  //
+  // Employees and departments are deliberately NOT wiped. Both are upserted
+  // below on a natural key — (tenant_id, employee_code) and (tenant_id, name) —
+  // so deleting them first changes nothing about the seeded result except the
+  // _id, and that _id is exactly what everything else holds. Payroll runs,
+  // loans, appraisals, assets, project teams and labour time logs all resolve
+  // the employee's name by populating that reference, and none of them are
+  // wiped here. Delete the employee and those rows survive pointing at nobody:
+  // the row still lists, the name comes back blank. Attendance and leave stay
+  // for the same reason — labour allocations are booked against attendance.
   const existingTenant = await Tenant.findOne({ slug: 'gems-store' });
   if (existingTenant) {
     const tid = existingTenant._id;
     await Promise.all([
-      Employee.deleteMany({ tenant_id: tid }),
-      Attendance.deleteMany({ tenant_id: tid }),
-      LeaveRequest.deleteMany({ tenant_id: tid }),
       Order.deleteMany({ tenant_id: tid }),
       PurchaseOrder.deleteMany({ tenant_id: tid }),
       Expense.deleteMany({ tenant_id: tid }),
@@ -39,7 +46,6 @@ const seed = async () => {
       StockMovement.deleteMany({ tenant_id: tid }),
       Product.deleteMany({ tenant_id: tid }),
       Category.deleteMany({ tenant_id: tid }),
-      Department.deleteMany({ tenant_id: tid }),
       Supplier.deleteMany({ tenant_id: tid }),
       Customer.deleteMany({ tenant_id: tid }),
       Lead.deleteMany({ tenant_id: tid }),
@@ -440,7 +446,7 @@ const seed = async () => {
   }
 
   // ── Attendance (last 14 working days) ──────────────────────────────────────
-  const allEmployees = await Employee.find();
+  const allEmployees = await Employee.find({ tenant_id: tenant._id });
   const attStatuses = ['present','present','present','present','present','absent','half_day'];
   for (let d = 13; d >= 0; d--) {
     const date = daysAgo(d);
@@ -465,7 +471,7 @@ const seed = async () => {
     { emp: 'EMP-007', type: 'unpaid',    start: 15, end: 12, reason: 'Personal reasons',    status: 'rejected' },
   ];
   for (const l of leaveDefs) {
-    const emp = await Employee.findOne({ employee_code: l.emp });
+    const emp = await Employee.findOne({ tenant_id: tenant._id, employee_code: l.emp });
     if (!emp) continue;
     const exists = await LeaveRequest.findOne({ employee_id: emp._id, leave_type: l.type, start_date: daysAgo(l.start) });
     if (exists) continue;
