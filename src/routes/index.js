@@ -24,6 +24,7 @@ const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
 const labour = require('../controllers/labourController');
 const printRequests = require('../controllers/printRequestController');
+const clientPortal = require('../controllers/clientPortalController');
 const tracking = require('../services/trackingService');
 const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
@@ -610,6 +611,10 @@ router.post('/projects/:id/variations',                    authenticate, require
 router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
 router.delete('/projects/:id/variations/:variationId',     authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeVariation);
 
+router.patch('/projects/:id/documents/:documentId/share', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.shareDocument);
+router.get('/projects/:id/messages',         authenticate, requireTenant, requireFeature('projects'), projects.listMessages);
+router.post('/projects/:id/messages',        authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.postMessage);
+
 router.post('/projects/:id/track-link',      authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.trackLink);
 router.delete('/projects/:id/track-link',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.revokeTrackLink);
 
@@ -696,6 +701,11 @@ router.post('/print-requests/:tenantSlug', printUpload.array('files', 10), print
 router.post('/track/:token/quote-response', printRequests.respondToQuote);
 router.post('/track/:token/pay',            printRequests.startPayment);
 router.post('/track/:token/confirm-payment', printRequests.confirmPayment);
+
+router.get('/track/:token/documents',       clientPortal.listDocuments);
+router.post('/track/:token/documents',      hrDocUpload.single('file'), clientPortal.uploadDocument);
+router.get('/track/:token/messages',        clientPortal.listMessages);
+router.post('/track/:token/messages',       clientPortal.postMessage);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
 router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);

@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const {
-  Project, ProjectMilestone, Order, Tenant, Invoice,
+  Project, ProjectMilestone, Order, Tenant, Invoice, ProjectDocument, ProjectMessage,
 } = require('../models');
 const projectService = require('./projectService');
 const types = require('../config/projectTypes');
@@ -59,7 +59,7 @@ async function revokeToken(Model, id, tenantId) {
 /* ── The client's view of a project ───────────────────────────────────────── */
 
 async function trackedProject(project) {
-  const [tenant, milestones, invoices] = await Promise.all([
+  const [tenant, milestones, invoices, documents, unread] = await Promise.all([
     Tenant.findById(project.tenant_id).select('business_name phone email logo').lean(),
     ProjectMilestone.find({ project_id: project._id, tenant_id: project.tenant_id })
       .select('name status progress_pct planned_end actual_end weight sequence')
@@ -67,6 +67,16 @@ async function trackedProject(project) {
     Invoice.find({ project_id: project._id, tenant_id: project.tenant_id, status: { $ne: 'void' } })
       .select('invoice_number issue_date due_date total amount_paid status is_retention_release')
       .sort({ issue_date: 1 }).lean(),
+    // Only what the office deliberately shared, plus whatever the client sent
+    // in themselves. Never the rest of the filing cabinet.
+    ProjectDocument.find({
+      project_id: project._id,
+      tenant_id: project.tenant_id,
+      $or: [{ shared_with_client: true }, { from_client: true }],
+    }).select('name category url size from_client createdAt').sort({ createdAt: -1 }).lean(),
+    ProjectMessage.countDocuments({
+      project_id: project._id, tenant_id: project.tenant_id, from: 'staff', read_by_client: false,
+    }),
   ]);
 
   const profile = types.profileFor(project.project_type);
@@ -119,6 +129,20 @@ async function trackedProject(project) {
         is_retention_release: !!i.is_retention_release,
       })),
     },
+    // Shared both ways. The client can add to this from their own page.
+    documents: documents.map((d) => ({
+      id: String(d._id),
+      name: d.name,
+      category: d.category,
+      url: d.url,
+      size: d.size,
+      from_client: !!d.from_client,
+      uploaded_at: d.createdAt,
+    })),
+    unread_messages: unread,
+    can_message: true,
+    can_upload: true,
+
     updated_at: project.updatedAt,
   };
 }
