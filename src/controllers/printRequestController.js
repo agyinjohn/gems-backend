@@ -1,4 +1,10 @@
+const crypto = require('crypto');
 const { Tenant, Product, Order, Customer } = require('../models');
+const {
+  initializePaystackTransaction, fetchPaystackTransaction,
+  isPaystackTransactionPaid, fulfillStorefrontOrders, resolvePaystackEmail,
+} = require('../services/paymentService');
+const { buildSplitForCheckout } = require('../services/splitService');
 const tracking = require('../services/trackingService');
 const { uploadPrintFile } = require('../services/uploadService');
 const audit = require('../utils/audit');
@@ -302,9 +308,120 @@ const respondToQuote = async (req, res) => {
   res.json({ success: true, data: { quote_status: order.quote_status, production_stage: order.production_stage } });
 };
 
+/* ── Public: paying for the job ───────────────────────────────────────────── */
+
+/**
+ * Start a payment from the tracking link.
+ *
+ * Initialised server-side rather than handing the browser a public key and an
+ * amount. This page is reachable by anyone holding the link, and an amount set
+ * in the browser is an amount the payer chooses — Paystack is given the figure
+ * from the order and returns a code the client can only pay as issued.
+ */
+const startPayment = async (req, res) => {
+  const order = await Order.findOne({ track_token: req.params.token, source: 'print_request' });
+  if (!order) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+  if (order.payment_status === 'paid') {
+    return res.status(400).json({ success: false, message: 'This job has already been paid for.' });
+  }
+  // Paying for a price nobody agreed to is how a dispute starts.
+  if (order.quote_status !== 'accepted') {
+    return res.status(400).json({ success: false, message: 'Accept the quote before paying.' });
+  }
+  if (!(order.total > 0)) {
+    return res.status(400).json({ success: false, message: 'This job has no amount to pay yet.' });
+  }
+
+  const tenant = await Tenant.findById(order.tenant_id).select('business_name email').lean();
+  const reference = `PRQ-${crypto.randomBytes(6).toString('hex')}`;
+
+  // Where the shop has a subaccount, their share settles straight to it and the
+  // platform's cut is taken at the gateway — the same arrangement storefront
+  // checkout uses, so payouts behave identically whichever way a sale arrived.
+  const split = await buildSplitForCheckout({
+    tenantId: order.tenant_id,
+    amount: order.total,
+    viaMarketplace: false,
+  });
+
+  const email = await resolvePaystackEmail({
+    customerEmail: order.customer_email,
+    tenantEmail: tenant?.email,
+    reference,
+  });
+
+  let tx;
+  try {
+    tx = await initializePaystackTransaction({
+      email,
+      amount: order.total,
+      reference,
+      metadata: { pos_order_id: String(order._id), order_number: order.order_number },
+      ...(split && { subaccount: split.subaccount, transaction_charge: split.transaction_charge }),
+    });
+  } catch (err) {
+    return res.status(502).json({ success: false, message: err.message || 'Could not start the payment.' });
+  }
+
+  order.payment_ref = reference;
+  if (split) {
+    order.subaccount_code = split.subaccount;
+    order.platform_fee = split.commission;
+    order.split_settled = true;
+  }
+  await order.save();
+
+  res.json({
+    success: true,
+    data: {
+      access_code: tx.access_code,
+      authorization_url: tx.authorization_url,
+      reference,
+      amount: order.total,
+      business: tenant?.business_name || '',
+    },
+  });
+};
+
+/**
+ * Confirm it landed.
+ *
+ * The gateway is asked, not the browser. Amount and order are both checked
+ * against what Paystack actually took, so a reference from a different or
+ * cheaper transaction is refused. Fulfilment is idempotent, so a client
+ * refreshing the page cannot be credited twice.
+ */
+const confirmPayment = async (req, res) => {
+  const order = await Order.findOne({ track_token: req.params.token, source: 'print_request' });
+  if (!order) return res.status(404).json({ success: false, message: 'Job not found.' });
+  if (order.payment_status === 'paid') {
+    return res.json({ success: true, data: { already_paid: true } });
+  }
+
+  const reference = req.body.reference || order.payment_ref;
+  if (!reference) return res.status(400).json({ success: false, message: 'No payment to confirm.' });
+
+  let tx;
+  try {
+    tx = await fetchPaystackTransaction(reference);
+  } catch (err) {
+    return res.status(502).json({ success: false, message: err.message || 'Could not reach the payment gateway.' });
+  }
+
+  if (!isPaystackTransactionPaid(tx, order.total, order._id)) {
+    return res.status(400).json({ success: false, message: 'That payment has not gone through.' });
+  }
+
+  await fulfillStorefrontOrders({ reference, orderIds: [order._id] });
+  res.json({ success: true, data: { paid: true } });
+};
+
 module.exports = {
   publicServices,
   submitRequest,
+  startPayment,
+  confirmPayment,
   list,
   get,
   quote,

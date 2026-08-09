@@ -694,6 +694,8 @@ router.get('/track/:token', async (req, res) => {
 router.get('/print-requests/:tenantSlug/services', printRequests.publicServices);
 router.post('/print-requests/:tenantSlug', printUpload.array('files', 10), printRequests.submitRequest);
 router.post('/track/:token/quote-response', printRequests.respondToQuote);
+router.post('/track/:token/pay',            printRequests.startPayment);
+router.post('/track/:token/confirm-payment', printRequests.confirmPayment);
 router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
 router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
 router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);
