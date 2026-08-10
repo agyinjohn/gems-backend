@@ -716,7 +716,9 @@ const payrollRunSchema = new Schema({
   year:         { type: Number, required: true },
   gross_salary: { type: Number, required: true },
   allowances:   { type: Number, default: 0 },
-  allowance_lines: [{ name: String, amount: Number }],
+  // `pensionable` marks an allowance the employer treats as attracting pension.
+  // Most do not — SSNIT is on basic salary — so it is off unless said otherwise.
+  allowance_lines: [{ name: String, amount: Number, pensionable: { type: Boolean, default: false } }],
   deductions:   { type: Number, default: 0 },
   deduction_lines: [{ name: String, amount: Number, loan_id: { type: Schema.Types.ObjectId, ref: 'EmployeeLoan' } }],
   // Set only when this run covers a partial period (mid-month joiner/leaver).
@@ -734,6 +736,10 @@ const payrollRunSchema = new Schema({
   // change and a payslip must keep meaning what it meant when it was issued.
   ssnit_tier1:  { type: Number, default: 0 },
   ssnit_tier2:  { type: Number, default: 0 },
+  // What pension was charged on: basic pay plus any pensionable allowance.
+  // Stored so a payslip can show it and nobody has to reconstruct it from a
+  // rate that may since have changed.
+  pensionable_base: { type: Number, default: 0 },
   net_salary:   { type: Number, required: true },
   status:       { type: String, enum: ['draft','submitted','approved','paid'], default: 'submitted' },
   approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },
