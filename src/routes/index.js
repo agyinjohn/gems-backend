@@ -973,6 +973,7 @@ async function resolveEssEmployee(req) {
 
 router.get('/ess/me', authenticate, async (req, res) => {
   const hrService = require('../services/hrService');
+const payrollRates = require('../config/payrollRates');
   const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: null });
   await employee.populate('department_id', 'name');
@@ -1269,7 +1270,28 @@ const hrService = require('../services/hrService');
 
 router.get('/hr/payroll-settings', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const data = await hrService.getPayrollSettings(req.tenant_id);
-  res.json({ success: true, data: { apply_ssnit: data.applySsnit, apply_paye: data.applyPaye } });
+  const now = new Date();
+  res.json({
+    success: true,
+    data: {
+      apply_ssnit: data.applySsnit,
+      apply_paye: data.applyPaye,
+      // The tenant's own dated schedules, empty when they follow the national one.
+      paye_bands: data.payeSchedule,
+      pension_rates: data.pensionSchedule,
+      // And what those resolve to today, so the page can show the figures in
+      // force without repeating the resolution rules in the browser.
+      in_force: {
+        paye_bands: payrollRates.payeBandsFor(now, data.payeSchedule),
+        pension_rates: payrollRates.pensionRatesFor(now, data.pensionSchedule),
+        following_national: !data.payeSchedule.length && !data.pensionSchedule.length,
+      },
+      national: {
+        paye_bands: payrollRates.PAYE_SCHEDULE[payrollRates.PAYE_SCHEDULE.length - 1],
+        pension_rates: payrollRates.PENSION_SCHEDULE[payrollRates.PENSION_SCHEDULE.length - 1],
+      },
+    },
+  });
 });
 router.patch('/hr/payroll-settings', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
   const data = await hrService.updatePayrollSettings(req.tenant_id, req.body);

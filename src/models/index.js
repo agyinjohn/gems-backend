@@ -39,6 +39,30 @@ const tenantSchema = new Schema({
   payroll_settings: {
     apply_ssnit: { type: Boolean, default: true },
     apply_paye:  { type: Boolean, default: true },
+    // Statutory figures, dated, overriding the national schedule in
+    // config/payrollRates.js. Empty means "use the national one", which is what
+    // almost every business wants — this exists so a change to the law can be
+    // applied on the day it takes effect rather than on the day of the next
+    // release. Payroll for a period uses whichever entry was in force then.
+    paye_bands: [{
+      effective_from: { type: Date, required: true },
+      label:          String,
+      // Ceiling of each slice; the last must be null, meaning everything above.
+      bands: [{
+        up_to: { type: Number, default: null },
+        rate:  { type: Number, required: true, min: 0, max: 1 },
+      }],
+    }],
+    pension_rates: [{
+      effective_from: { type: Date, required: true },
+      label:          String,
+      // What is contributed…
+      employee_rate:  { type: Number, required: true, min: 0, max: 1 },
+      employer_rate:  { type: Number, required: true, min: 0, max: 1 },
+      // …and where it goes. The two pairs must total the same.
+      tier1_rate:     { type: Number, required: true, min: 0, max: 1 },
+      tier2_rate:     { type: Number, required: true, min: 0, max: 1 },
+    }],
   },
   attendance_settings: {
     standard_hours_per_day: { type: Number, default: 8 },
@@ -704,6 +728,12 @@ const payrollRunSchema = new Schema({
   paye:         { type: Number, default: 0 },
   ssnit_employee: { type: Number, default: 0 },
   ssnit_employer: { type: Number, default: 0 },
+  // The same pension money seen as remittances rather than as contributions:
+  // Tier 1 goes to SSNIT, Tier 2 to the employer's private trustee. Stored per
+  // payslip rather than derived later, because the rates that produced them can
+  // change and a payslip must keep meaning what it meant when it was issued.
+  ssnit_tier1:  { type: Number, default: 0 },
+  ssnit_tier2:  { type: Number, default: 0 },
   net_salary:   { type: Number, required: true },
   status:       { type: String, enum: ['draft','submitted','approved','paid'], default: 'submitted' },
   approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },
@@ -726,6 +756,9 @@ const payrollBatchSchema = new Schema({
   total_paye:           { type: Number, default: 0 },
   total_ssnit_employee: { type: Number, default: 0 },
   total_ssnit_employer: { type: Number, default: 0 },
+  // What has to be paid to each institution for this period.
+  total_ssnit_tier1:    { type: Number, default: 0 },
+  total_ssnit_tier2:    { type: Number, default: 0 },
   total_net:            { type: Number, default: 0 },
   created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
   approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },
