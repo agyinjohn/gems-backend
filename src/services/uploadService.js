@@ -67,6 +67,16 @@ async function uploadProjectFile(tenantId, projectId, file) {
   };
 }
 
+async function uploadContractFile(tenantId, contractId, file) {
+  if (!isCloudinaryConfigured()) {
+    throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
+  }
+  const folder = `gems/${tenantId}/contracts/${contractId}`;
+  const resourceType = file.mimetype?.startsWith('image/') ? 'image' : 'raw';
+  const result = await uploadBuffer(file.buffer, folder, resourceType);
+  return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
+}
+
 /**
  * A file a client sent in with a service request — artwork, a document, a
  * photo of what needs fixing.
@@ -84,4 +94,4 @@ async function uploadServiceFile(tenantId, file) {
   return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, uploadServiceFile, isCloudinaryConfigured };
+module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };

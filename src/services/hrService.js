@@ -794,18 +794,65 @@ async function acknowledgeAppraisal(tenantId, id, employeeId, employeeComments) 
 
 async function getAttendanceSettings(tenantId) {
   const tenant = await Tenant.findById(tenantId).select('attendance_settings');
-  return { standardHoursPerDay: tenant?.attendance_settings?.standard_hours_per_day ?? 8 };
+  return {
+    standardHoursPerDay: tenant?.attendance_settings?.standard_hours_per_day ?? 8,
+    overtimeMultiplier:  tenant?.attendance_settings?.overtime_multiplier ?? 1.5,
+  };
 }
 
-async function updateAttendanceSettings(tenantId, { standard_hours_per_day }) {
+async function updateAttendanceSettings(tenantId, { standard_hours_per_day, overtime_multiplier }) {
   const hours = parseFloat(standard_hours_per_day);
   if (!hours || hours <= 0) throw httpError('standard_hours_per_day must be greater than zero.');
-  const tenant = await Tenant.findByIdAndUpdate(
-    tenantId,
-    { $set: { 'attendance_settings.standard_hours_per_day': hours } },
-    { new: true },
-  ).select('attendance_settings');
-  return { standard_hours_per_day: tenant.attendance_settings.standard_hours_per_day };
+  const update = { 'attendance_settings.standard_hours_per_day': hours };
+  if (overtime_multiplier !== undefined) {
+    const mult = parseFloat(overtime_multiplier);
+    if (!mult || mult < 1) throw httpError('overtime_multiplier must be 1 or greater.');
+    update['attendance_settings.overtime_multiplier'] = mult;
+  }
+  const tenant = await Tenant.findByIdAndUpdate(tenantId, { $set: update }, { new: true }).select('attendance_settings');
+  return {
+    standard_hours_per_day: tenant.attendance_settings.standard_hours_per_day,
+    overtime_multiplier:    tenant.attendance_settings.overtime_multiplier ?? 1.5,
+  };
+}
+
+async function getHrSettings(tenantId) {
+  const tenant = await Tenant.findById(tenantId).select('hr_settings');
+  const s = tenant?.hr_settings || {};
+  return {
+    default_annual_leave:    s.default_annual_leave    ?? 21,
+    default_sick_leave:      s.default_sick_leave      ?? 10,
+    tier3_enabled:           s.tier3_enabled           ?? false,
+    tier3_employee_rate:     s.tier3_employee_rate     ?? 0.05,
+    tier3_employer_rate:     s.tier3_employer_rate     ?? 0.05,
+    payslip_address:         s.payslip_address         ?? '',
+    payslip_signatory_name:  s.payslip_signatory_name  ?? '',
+    payslip_signatory_title: s.payslip_signatory_title ?? '',
+    payslip_footer:          s.payslip_footer          ?? '',
+  };
+}
+
+async function updateHrSettings(tenantId, body) {
+  const allowed = [
+    'default_annual_leave', 'default_sick_leave',
+    'tier3_enabled', 'tier3_employee_rate', 'tier3_employer_rate',
+    'payslip_address', 'payslip_signatory_name', 'payslip_signatory_title', 'payslip_footer',
+  ];
+  const update = {};
+  for (const key of allowed) {
+    if (body[key] !== undefined) update[`hr_settings.${key}`] = body[key];
+  }
+  if (body.default_annual_leave !== undefined && (isNaN(body.default_annual_leave) || body.default_annual_leave < 0))
+    throw httpError('default_annual_leave must be 0 or more.');
+  if (body.default_sick_leave !== undefined && (isNaN(body.default_sick_leave) || body.default_sick_leave < 0))
+    throw httpError('default_sick_leave must be 0 or more.');
+  if (body.tier3_employee_rate !== undefined || body.tier3_employer_rate !== undefined) {
+    const er = parseFloat(body.tier3_employee_rate ?? 0);
+    const or = parseFloat(body.tier3_employer_rate ?? 0);
+    if (er < 0 || er > 1 || or < 0 || or > 1) throw httpError('Tier 3 rates must be between 0 and 1.');
+  }
+  await Tenant.findByIdAndUpdate(tenantId, { $set: update });
+  return getHrSettings(tenantId);
 }
 
 function todayBounds() {
@@ -1334,6 +1381,8 @@ module.exports = {
   listHolidays,
   getAttendanceSettings,
   updateAttendanceSettings,
+  getHrSettings,
+  updateHrSettings,
   clockIn,
   clockOut,
 };

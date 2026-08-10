@@ -72,6 +72,20 @@ const tenantSchema = new Schema({
     // What an overtime hour costs relative to a normal one.
     overtime_multiplier:    { type: Number, default: 1.5 },
   },
+  hr_settings: {
+    // Default leave entitlements applied to every new employee.
+    default_annual_leave:  { type: Number, default: 21 },
+    default_sick_leave:    { type: Number, default: 10 },
+    // Tier 3 voluntary pension (provident fund).
+    tier3_enabled:         { type: Boolean, default: false },
+    tier3_employee_rate:   { type: Number, default: 0.05 },  // 5% employee
+    tier3_employer_rate:   { type: Number, default: 0.05 },  // 5% employer
+    // Payslip branding — printed on every payslip.
+    payslip_address:       { type: String, default: '' },
+    payslip_signatory_name:  { type: String, default: '' },
+    payslip_signatory_title: { type: String, default: '' },
+    payslip_footer:        { type: String, default: '' },
+  },
   storefront_settings: {
     delivery_fee:              { type: Number, default: 30 },
     free_delivery_threshold:   { type: Number, default: 500 },
@@ -1339,6 +1353,8 @@ const projectSchema = new Schema({
   // See src/config/projectTypes.js. Absent on projects predating types, which
   // are read as construction.
   project_type:   { type: String, enum: PROJECT_TYPE_KEYS, default: 'construction' },
+  // The contract this project was awarded under, if any.
+  contract_id:    { type: Schema.Types.ObjectId, ref: 'Contract' },
   // The client who awarded the contract.
   customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
   customer_name:  String,
@@ -1756,6 +1772,122 @@ const promotionSchema = new Schema({
 }, { timestamps: true });
 promotionSchema.index({ tenant_id: 1, is_active: 1 });
 
+// DAILY JOB
+// A small, fast-turnaround piece of work assigned internally — no quote cycle,
+// no client approval needed. Staff create it, price it on the spot, do it,
+// then raise an invoice when it is done.
+const jobItemSchema = new Schema({
+  description: { type: String, required: true },
+  quantity:    { type: Number, default: 1 },
+  unit_price:  { type: Number, default: 0 },
+  total:       { type: Number, default: 0 },
+}, { _id: true });
+
+const jobSchema = new Schema({
+  tenant_id:      { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:      { type: Schema.Types.ObjectId, ref: 'Branch' },
+  code:           { type: String, required: true },
+  title:          { type: String, required: true },
+  description:    String,
+  customer_id:    { type: Schema.Types.ObjectId, ref: 'Customer' },
+  customer_name:  String,
+  job_type:       { type: String, enum: SERVICE_TYPE_KEYS, default: DEFAULT_SERVICE_TYPE },
+  items:          { type: [jobItemSchema], default: [] },
+  // Who is doing the work.
+  assigned_to:    { type: Schema.Types.ObjectId, ref: 'Employee' },
+  assigned_name:  String,
+  // Walk-in customers who are not in the CRM. When set, these take precedence
+  // over customer_id for display and invoicing.
+  walk_in_name:   String,
+  walk_in_phone:  String,
+  status:         { type: String, enum: ['open', 'in_progress', 'done', 'invoiced'], default: 'open' },
+  due_date:       Date,
+  completed_date: Date,
+  notes:          String,
+  // Set once the job is invoiced — links back to the accounting record.
+  invoice_id:     { type: Schema.Types.ObjectId, ref: 'Invoice' },
+  created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+jobSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
+jobSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
+
+// CONTRACT
+const contractDocumentSchema = new Schema({
+  name:        { type: String, required: true },
+  url:         { type: String, required: true },
+  public_id:   String,
+  size:        Number,
+  category:    { type: String, enum: ['contract', 'amendment', 'nda', 'sow', 'invoice', 'correspondence', 'other'], default: 'contract' },
+  uploaded_by: { type: Schema.Types.ObjectId, ref: 'User' },
+  uploaded_at: { type: Date, default: Date.now },
+});
+
+const contractNoteSchema = new Schema({
+  body:       { type: String, required: true },
+  created_by: { type: Schema.Types.ObjectId, ref: 'User' },
+  created_at: { type: Date, default: Date.now },
+});
+
+// A single milestone in the payment schedule — e.g. "30% on signing".
+// Percentage and fixed amount are both stored; the UI uses whichever the
+// contract was set up with. due_date is optional: some milestones are
+// event-driven rather than calendar-driven.
+const contractPaymentMilestoneSchema = new Schema({
+  label:       { type: String, required: true },
+  pct:         { type: Number, default: 0 },   // % of contract value
+  amount:      { type: Number, default: 0 },   // fixed override; 0 = derive from pct
+  due_date:    Date,
+  status:      { type: String, enum: ['pending', 'invoiced', 'paid'], default: 'pending' },
+  invoice_id:  { type: Schema.Types.ObjectId, ref: 'Invoice' },
+}, { _id: true });
+
+// A person at the client or GTHINK side who is named on the contract.
+const contractSignatorySchema = new Schema({
+  party:    { type: String, enum: ['client', 'internal'], required: true },
+  name:     { type: String, required: true },
+  role:     String,   // e.g. "CEO", "Project Manager"
+  email:    String,
+  phone:    String,
+  signed:   { type: Boolean, default: false },
+  signed_at: Date,
+}, { _id: true });
+
+const contractSchema = new Schema({
+  tenant_id:       { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:       { type: Schema.Types.ObjectId, ref: 'Branch' },
+  contract_number: { type: String, required: true },
+  title:           { type: String, required: true },
+  description:     String,
+  // The external party — always a Customer record.
+  customer_id:     { type: Schema.Types.ObjectId, ref: 'Customer' },
+  customer_name:   String,
+  // Financial terms.
+  value:           { type: Number, default: 0 },
+  currency:        { type: String, default: 'GHS' },
+  // Lifecycle.
+  status:          { type: String, enum: ['draft', 'active', 'on_hold', 'completed', 'terminated'], default: 'draft' },
+  signed_date:     Date,
+  start_date:      Date,
+  end_date:        Date,
+  // Retainer / recurring contracts: when the contract rolls over and whether
+  // it does so automatically. Ignored for one-off engagements.
+  renewal_date:    Date,
+  auto_renew:      { type: Boolean, default: false },
+  // What kind of engagement this is.
+  contract_type:   { type: String, enum: ['service', 'supply', 'maintenance', 'retainer', 'partnership', 'other'], default: 'service' },
+  // Internal owner.
+  owner_id:        { type: Schema.Types.ObjectId, ref: 'User' },
+  // Milestone-based payment schedule. Empty means pay on invoice as normal.
+  payment_schedule: { type: [contractPaymentMilestoneSchema], default: [] },
+  // Named people on both sides of the contract.
+  signatories:     { type: [contractSignatorySchema], default: [] },
+  documents:       { type: [contractDocumentSchema], default: [] },
+  notes:           { type: [contractNoteSchema], default: [] },
+  created_by:      { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+contractSchema.index({ tenant_id: 1, contract_number: 1 }, { unique: true });
+contractSchema.index({ tenant_id: 1, status: 1 });
+
 // toJSON aliases for all schemas
 const allSchemas = [
   tenantSchema, branchSchema, userSchema, categorySchema, productSchema,
@@ -1769,11 +1901,13 @@ const allSchemas = [
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
   posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
+  jobSchema, jobItemSchema,
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
   projectMessageSchema,
+  contractSchema, contractDocumentSchema, contractPaymentMilestoneSchema, contractSignatorySchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1854,4 +1988,6 @@ module.exports = {
   ProjectBaseline:       mongoose.model('ProjectBaseline', projectBaselineSchema),
   ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
   ProjectMessage:        mongoose.model('ProjectMessage', projectMessageSchema),
+  Job:                   mongoose.model('Job', jobSchema),
+  ContractDocument:      mongoose.model('ContractDocument', contractDocumentSchema),
 };

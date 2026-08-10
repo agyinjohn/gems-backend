@@ -22,6 +22,8 @@ const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
+const contracts = require('../controllers/contractController');
+const jobs = require('../controllers/jobController');
 const labour = require('../controllers/labourController');
 const serviceRequests = require('../controllers/serviceRequestController');
 const clientPortal = require('../controllers/clientPortalController');
@@ -589,8 +591,39 @@ router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req,
 
 // PROJECTS — contract work, weighted progress and cost against budget.
 const projectManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
+const contractManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
+
 const serviceManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'sales_staff');
 
+// ── CONTRACTS ────────────────────────────────────────────────────────────────
+router.get('/contracts',                              authenticate, requireTenant, contractManagers, contracts.list);
+// JOBS — daily internal work, no quote cycle.
+const jobManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'sales_staff', 'accountant');
+router.get('/jobs',              authenticate, requireTenant, jobManagers, jobs.list);
+router.post('/jobs',             authenticate, requireTenant, jobManagers, jobs.create);
+router.get('/jobs/:id',          authenticate, requireTenant, jobManagers, jobs.get);
+router.put('/jobs/:id',          authenticate, requireTenant, jobManagers, jobs.update);
+router.delete('/jobs/:id',       authenticate, requireTenant, businessOwnerOnly, jobs.remove);
+router.post('/jobs/:id/invoice', authenticate, requireTenant, jobManagers, jobs.invoice);
+
+router.post('/contracts',                             authenticate, requireTenant, contractManagers, contracts.create);
+router.get('/contracts/:id',                          authenticate, requireTenant, contractManagers, contracts.get);
+router.put('/contracts/:id',                          authenticate, requireTenant, contractManagers, contracts.update);
+router.delete('/contracts/:id',                       authenticate, requireTenant, businessOwnerOnly, contracts.remove);
+router.post('/contracts/:id/projects/:projectId',     authenticate, requireTenant, contractManagers, contracts.linkProject);
+router.delete('/contracts/:id/projects/:projectId',   authenticate, requireTenant, contractManagers, contracts.unlinkProject);
+router.post('/contracts/:id/documents',               authenticate, requireTenant, contractManagers, hrDocUpload.single('file'), contracts.uploadDocument);
+router.delete('/contracts/:id/documents/:docId',      authenticate, requireTenant, contractManagers, contracts.removeDocument);
+router.post('/contracts/:id/notes',                   authenticate, requireTenant, contractManagers, contracts.addNote);
+router.delete('/contracts/:id/notes/:noteId',         authenticate, requireTenant, contractManagers, contracts.removeNote);
+router.post('/contracts/:id/payment-schedule',                          authenticate, requireTenant, contractManagers, contracts.addPaymentMilestone);
+router.put('/contracts/:id/payment-schedule/:milestoneId',              authenticate, requireTenant, contractManagers, contracts.updatePaymentMilestone);
+router.delete('/contracts/:id/payment-schedule/:milestoneId',           authenticate, requireTenant, contractManagers, contracts.removePaymentMilestone);
+router.post('/contracts/:id/signatories',                               authenticate, requireTenant, contractManagers, contracts.addSignatory);
+router.put('/contracts/:id/signatories/:signatoryId',                   authenticate, requireTenant, contractManagers, contracts.updateSignatory);
+router.delete('/contracts/:id/signatories/:signatoryId',                authenticate, requireTenant, contractManagers, contracts.removeSignatory);
+
+// ── PROJECTS ──────────────────────────────────────────────────────────────────
 router.get('/projects/types',              authenticate, requireTenant, requireFeature('projects'), projects.listTypes);
 router.get('/projects',                    authenticate, requireTenant, requireFeature('projects'), projects.list);
 router.post('/projects',                   authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.create);
@@ -1171,11 +1204,23 @@ router.post('/attendance/clock-out', authenticate, requireTenant, requireModule(
 router.get('/hr/attendance-settings', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const hrService = require('../services/hrService');
   const data = await hrService.getAttendanceSettings(req.tenant_id);
-  res.json({ success: true, data: { standard_hours_per_day: data.standardHoursPerDay } });
+  res.json({ success: true, data: { standard_hours_per_day: data.standardHoursPerDay, overtime_multiplier: data.overtimeMultiplier } });
 });
 router.patch('/hr/attendance-settings', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
   const hrService = require('../services/hrService');
   const data = await hrService.updateAttendanceSettings(req.tenant_id, req.body);
+  res.json({ success: true, data });
+});
+
+// ── HR SETTINGS (leave defaults, tier 3, payslip branding) ───────────────
+router.get('/hr/settings', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.getHrSettings(req.tenant_id);
+  res.json({ success: true, data });
+});
+router.patch('/hr/settings', authenticate, requireTenant, businessOwnerOnly, async (req, res) => {
+  const hrService = require('../services/hrService');
+  const data = await hrService.updateHrSettings(req.tenant_id, req.body);
   res.json({ success: true, data });
 });
 
