@@ -575,11 +575,17 @@ async function computePayrollForEmployee(tenantId, emp, month, year, allowanceLi
  * this month's rates.
  */
 async function getPayrollSettings(tenantId) {
-  const tenant = await Tenant.findById(tenantId).select('payroll_settings');
+  const tenant = await Tenant.findById(tenantId).select('payroll_settings hr_settings');
   const stored = tenant?.payroll_settings || {};
+  // Tier 3 lives under hr_settings, where it is configured. Read here so a pay
+  // run still costs one query, and so the calculation takes one settings object.
+  const hr = tenant?.hr_settings || {};
   return {
     applySsnit: stored.apply_ssnit ?? true,
     applyPaye: stored.apply_paye ?? true,
+    tier3Enabled: !!hr.tier3_enabled,
+    tier3EmployeeRate: hr.tier3_employee_rate ?? 0,
+    tier3EmployerRate: hr.tier3_employer_rate ?? 0,
     payeSchedule: (stored.paye_bands || []).map((e) => (e.toObject ? e.toObject() : e)),
     pensionSchedule: (stored.pension_rates || []).map((e) => (e.toObject ? e.toObject() : e)),
   };
@@ -591,6 +597,9 @@ function ratesForPeriod(settings, month, year) {
   return {
     applySsnit: settings.applySsnit,
     applyPaye: settings.applyPaye,
+    tier3Enabled: settings.tier3Enabled,
+    tier3EmployeeRate: settings.tier3EmployeeRate,
+    tier3EmployerRate: settings.tier3EmployerRate,
     payeBands: rates.payeBandsFor(when, settings.payeSchedule),
     pensionRates: rates.pensionRatesFor(when, settings.pensionSchedule),
   };
@@ -916,6 +925,7 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
     // Named from the rate actually applied, not from a figure typed into a
     // string years ago — the whole point of the rates being editable.
     { name: `SSNIT (employee ${round2(statutory.employee_rate * 100)}%)`, amount: statutory.ssnit_employee },
+    { name: `Tier 3 (employee ${round2(statutory.tier3_employee_rate * 100)}%)`, amount: statutory.tier3_employee },
   ];
   const deductionLines = [
     ...statutoryDeductions,
@@ -935,6 +945,8 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
     ssnit_employer: statutory.ssnit_employer,
     ssnit_tier1: statutory.ssnit_tier1,
     ssnit_tier2: statutory.ssnit_tier2,
+    tier3_employee: statutory.tier3_employee,
+    tier3_employer: statutory.tier3_employer,
     pensionable_base: statutory.pensionable_base,
     net_salary: net,
   };
@@ -1241,8 +1253,10 @@ async function recomputeBatchTotals(tenantId, batchId) {
     total_ssnit_employer: a.total_ssnit_employer + (r.ssnit_employer || 0),
     total_ssnit_tier1:    a.total_ssnit_tier1 + (r.ssnit_tier1 || 0),
     total_ssnit_tier2:    a.total_ssnit_tier2 + (r.ssnit_tier2 || 0),
+    total_tier3_employee: a.total_tier3_employee + (r.tier3_employee || 0),
+    total_tier3_employer: a.total_tier3_employer + (r.tier3_employer || 0),
     total_net:            a.total_net + (r.net_salary || 0),
-  }), { total_gross: 0, total_allowances: 0, total_deductions: 0, total_paye: 0, total_ssnit_employee: 0, total_ssnit_employer: 0, total_ssnit_tier1: 0, total_ssnit_tier2: 0, total_net: 0 });
+  }), { total_gross: 0, total_allowances: 0, total_deductions: 0, total_paye: 0, total_ssnit_employee: 0, total_ssnit_employer: 0, total_ssnit_tier1: 0, total_ssnit_tier2: 0, total_tier3_employee: 0, total_tier3_employer: 0, total_net: 0 });
   const rounded = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, round2(v)]));
   await PayrollBatch.findByIdAndUpdate(batchId, { ...rounded, employee_count: runs.length });
 }

@@ -67,6 +67,12 @@ const PENSION_SCHEDULE = [
     employer_rate: 0.13,
     tier1_rate: 0.135,
     tier2_rate: 0.05,
+    // Tier 3 is voluntary, so it has no national rate — the employer sets one.
+    // What is national is the ceiling on relief: contributions to a registered
+    // scheme reduce taxable income only up to this share of the contributory
+    // base, counting the employee's Tier 1 contribution towards it. Worth
+    // confirming with your accountant, as the reading of this cap varies.
+    tier3_relief_cap_rate: 0.165,
   },
 ];
 
@@ -112,6 +118,7 @@ function pensionRatesFor(when, override) {
     employer_rate: numberOr(entry.employer_rate, fallback.employer_rate),
     tier1_rate: numberOr(entry.tier1_rate, fallback.tier1_rate),
     tier2_rate: numberOr(entry.tier2_rate, fallback.tier2_rate),
+    tier3_relief_cap_rate: numberOr(entry.tier3_relief_cap_rate, fallback.tier3_relief_cap_rate),
   };
 }
 
