@@ -1,4 +1,4 @@
-const { Contract, ContractDocument, Customer, Project } = require('../models');
+const { Contract, ContractDocument, Customer, Project, Job } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const audit = require('../utils/audit');
 const { uploadContractFile } = require('../services/uploadService');
@@ -16,6 +16,8 @@ async function findOne(req) {
 }
 
 const label = (s) => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // ── List ──────────────────────────────────────────────────────────────────────
 
@@ -107,10 +109,20 @@ const get = async (req, res) => {
   const contract = await findOne(req);
   if (!contract) throw httpError('Contract not found.', 404);
 
-  const projects = await Project.find({
-    contract_id: contract._id,
-    tenant_id: req.tenant_id,
-  }).select('code name status progress_pct contract_value currency project_type start_date planned_end_date').lean();
+  // Both kinds of work under this contract. A long project and a day's printing
+  // are the same question — what have we done for this client — so they are
+  // fetched together rather than leaving the smaller one invisible.
+  const [projects, jobs] = await Promise.all([
+    Project.find({ contract_id: contract._id, tenant_id: req.tenant_id })
+      .select('code name status progress_pct contract_value currency project_type start_date planned_end_date')
+      .lean(),
+    Job.find({ contract_id: contract._id, tenant_id: req.tenant_id })
+      .select('code title status job_type items due_date completed_date invoice_id createdAt')
+      .sort({ createdAt: -1 })
+      .lean(),
+  ]);
+
+  const jobValue = (job) => round2((job.items || []).reduce((sum, i) => sum + (i.total || 0), 0));
 
   res.json({
     success: true,
@@ -118,6 +130,10 @@ const get = async (req, res) => {
       ...contract.toJSON(),
       id: String(contract._id),
       projects: projects.map((p) => ({ ...p, id: String(p._id) })),
+      // Jobs carry their value on their lines rather than in a field, so it is
+      // totalled here — the client should not have to add up line items to
+      // learn what a job was worth.
+      jobs: jobs.map((j) => ({ ...j, id: String(j._id), value: jobValue(j) })),
     },
   });
 };
