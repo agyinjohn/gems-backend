@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { Employee, User, Department, LeaveRequest, Appraisal, APPRAISAL_CATEGORIES, PayrollRun, PayrollBatch, EmployeeLoan, LeaveType, PublicHoliday, Attendance, Tenant } = require('../models');
 const { calculateStatutory } = require('../utils/ghanaPayroll');
+const rates = require('../config/payrollRates');
 const { uploadHrFile } = require('./uploadService');
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -553,27 +554,95 @@ async function computePayrollForEmployee(tenantId, emp, month, year, allowanceLi
     ? round2(emp.gross_salary * (proration.workedDays / proration.totalDays))
     : emp.gross_salary;
 
-  const amounts = buildPayrollAmounts(proratedGross, allowanceLines, [...sharedDeductionLines, ...loanLines], settings);
+  const amounts = buildPayrollAmounts(
+    proratedGross,
+    allowanceLines,
+    [...sharedDeductionLines, ...loanLines],
+    ratesForPeriod(settings, month, year),
+  );
   return { amounts, proration };
 }
 
 /** Tenant's statutory payroll toggles, merged with defaults (both on). */
+/**
+ * The switches, plus the tenant's own dated schedules if they have any.
+ *
+ * Resolved to actual figures per period rather than here, because one bulk run
+ * can only ever be for one period but a re-run of an old month must not pick up
+ * this month's rates.
+ */
 async function getPayrollSettings(tenantId) {
   const tenant = await Tenant.findById(tenantId).select('payroll_settings');
+  const stored = tenant?.payroll_settings || {};
   return {
-    applySsnit: tenant?.payroll_settings?.apply_ssnit ?? true,
-    applyPaye: tenant?.payroll_settings?.apply_paye ?? true,
+    applySsnit: stored.apply_ssnit ?? true,
+    applyPaye: stored.apply_paye ?? true,
+    payeSchedule: (stored.paye_bands || []).map((e) => (e.toObject ? e.toObject() : e)),
+    pensionSchedule: (stored.pension_rates || []).map((e) => (e.toObject ? e.toObject() : e)),
   };
 }
 
-async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye }) {
+/** The figures that were in force for a given payroll month. */
+function ratesForPeriod(settings, month, year) {
+  const when = rates.periodStart(month, year);
+  return {
+    applySsnit: settings.applySsnit,
+    applyPaye: settings.applyPaye,
+    payeBands: rates.payeBandsFor(when, settings.payeSchedule),
+    pensionRates: rates.pensionRatesFor(when, settings.pensionSchedule),
+  };
+}
+
+async function updatePayrollSettings(tenantId, { apply_ssnit, apply_paye, paye_bands, pension_rates }) {
   const update = {};
   if (apply_ssnit !== undefined) update['payroll_settings.apply_ssnit'] = !!apply_ssnit;
   if (apply_paye !== undefined) update['payroll_settings.apply_paye'] = !!apply_paye;
+
+  if (paye_bands !== undefined) {
+    if (!Array.isArray(paye_bands)) throw httpError('paye_bands must be a list of dated band sets.');
+    for (const entry of paye_bands) {
+      if (!entry?.effective_from || Number.isNaN(new Date(entry.effective_from).getTime())) {
+        throw httpError('Each set of bands needs the date it takes effect.');
+      }
+      const problem = rates.validatePayeBands(entry.bands);
+      if (problem) throw httpError(problem);
+    }
+    update['payroll_settings.paye_bands'] = paye_bands;
+  }
+
+  if (pension_rates !== undefined) {
+    if (!Array.isArray(pension_rates)) throw httpError('pension_rates must be a list of dated rate sets.');
+    for (const entry of pension_rates) {
+      if (!entry?.effective_from || Number.isNaN(new Date(entry.effective_from).getTime())) {
+        throw httpError('Each set of pension rates needs the date it takes effect.');
+      }
+      for (const field of ['employee_rate', 'employer_rate', 'tier1_rate', 'tier2_rate']) {
+        const value = Number(entry[field]);
+        if (!Number.isFinite(value) || value < 0 || value > 1) {
+          throw httpError(`${field} must be between 0 and 1 — 0.055 for 5.5%.`);
+        }
+      }
+      // Contributed and remitted are the same money. Letting them disagree
+      // would mean payslips and remittance figures that cannot both be right.
+      if (!rates.pensionRatesBalance(entry)) {
+        const contributed = ((Number(entry.employee_rate) + Number(entry.employer_rate)) * 100).toFixed(2);
+        const remitted = ((Number(entry.tier1_rate) + Number(entry.tier2_rate)) * 100).toFixed(2);
+        throw httpError(
+          `Employee plus employer is ${contributed}%, but Tier 1 plus Tier 2 is ${remitted}%. `
+          + 'They have to be the same — it is one contribution, split two ways.',
+        );
+      }
+    }
+    update['payroll_settings.pension_rates'] = pension_rates;
+  }
+
   const tenant = await Tenant.findByIdAndUpdate(tenantId, { $set: update }, { new: true }).select('payroll_settings');
+  const stored = tenant?.payroll_settings || {};
   return {
-    apply_ssnit: tenant?.payroll_settings?.apply_ssnit ?? true,
-    apply_paye: tenant?.payroll_settings?.apply_paye ?? true,
+    apply_ssnit: stored.apply_ssnit ?? true,
+    apply_paye: stored.apply_paye ?? true,
+    paye_bands: stored.paye_bands || [],
+    pension_rates: stored.pension_rates || [],
   };
 }
 
@@ -787,7 +856,9 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
   const statutory = calculateStatutory(grossSalary, allowanceTotal, settings);
   const statutoryDeductions = [
     { name: 'PAYE', amount: statutory.paye },
-    { name: 'SSNIT (employee 5.5%)', amount: statutory.ssnit_employee },
+    // Named from the rate actually applied, not from a figure typed into a
+    // string years ago — the whole point of the rates being editable.
+    { name: `SSNIT (employee ${round2(statutory.employee_rate * 100)}%)`, amount: statutory.ssnit_employee },
   ];
   const deductionLines = [
     ...statutoryDeductions,
@@ -805,6 +876,8 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
     paye: statutory.paye,
     ssnit_employee: statutory.ssnit_employee,
     ssnit_employer: statutory.ssnit_employer,
+    ssnit_tier1: statutory.ssnit_tier1,
+    ssnit_tier2: statutory.ssnit_tier2,
     net_salary: net,
   };
 }
@@ -1108,9 +1181,12 @@ async function recomputeBatchTotals(tenantId, batchId) {
     total_paye:           a.total_paye + (r.paye || 0),
     total_ssnit_employee: a.total_ssnit_employee + (r.ssnit_employee || 0),
     total_ssnit_employer: a.total_ssnit_employer + (r.ssnit_employer || 0),
+    total_ssnit_tier1:    a.total_ssnit_tier1 + (r.ssnit_tier1 || 0),
+    total_ssnit_tier2:    a.total_ssnit_tier2 + (r.ssnit_tier2 || 0),
     total_net:            a.total_net + (r.net_salary || 0),
-  }), { total_gross: 0, total_allowances: 0, total_deductions: 0, total_paye: 0, total_ssnit_employee: 0, total_ssnit_employer: 0, total_net: 0 });
-  await PayrollBatch.findByIdAndUpdate(batchId, { ...t, employee_count: runs.length });
+  }), { total_gross: 0, total_allowances: 0, total_deductions: 0, total_paye: 0, total_ssnit_employee: 0, total_ssnit_employer: 0, total_ssnit_tier1: 0, total_ssnit_tier2: 0, total_net: 0 });
+  const rounded = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, round2(v)]));
+  await PayrollBatch.findByIdAndUpdate(batchId, { ...rounded, employee_count: runs.length });
 }
 
 /** Run payroll for every active employee in scope, grouped under one batch. */
