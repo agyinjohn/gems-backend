@@ -8,6 +8,7 @@ const { buildSplitForCheckout } = require('../services/splitService');
 const tracking = require('../services/trackingService');
 const { uploadServiceFile } = require('../services/uploadService');
 const types = require('../config/serviceTypes');
+const jobs = require('../services/jobService');
 const audit = require('../utils/audit');
 
 /**
@@ -221,6 +222,12 @@ const shape = (order) => ({
   id: String(order._id),
   service_type: types.profileFor(order.service_type).key,
   stages: types.workStagesFor(order.service_type),
+  // The job this became, named rather than just referenced — an id tells the
+  // office nothing, and the code is what they will go and look for.
+  job: order.job_id && order.job_id.code
+    ? { id: String(order.job_id._id), code: order.job_id.code, title: order.job_id.title }
+    : null,
+  job_id: order.job_id ? String(order.job_id._id || order.job_id) : null,
 });
 
 const list = async (req, res) => {
@@ -229,12 +236,14 @@ const list = async (req, res) => {
   if (req.query.type) filter.service_type = req.query.type;
   if (req.query.open === 'true') filter.production_stage = { $nin: CLOSED_STAGES };
 
-  const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(300).lean();
+  const orders = await Order.find(filter).sort({ createdAt: -1 })
+    .populate('job_id', 'code title').limit(300).lean();
   res.json({ success: true, data: orders.map(shape) });
 };
 
 const get = async (req, res) => {
-  const order = await Order.findOne({ _id: req.params.id, ...scope(req), source: 'service_request' }).lean();
+  const order = await Order.findOne({ _id: req.params.id, ...scope(req), source: 'service_request' })
+    .populate('job_id', 'code title').lean();
   if (!order) return res.status(404).json({ success: false, message: 'Service request not found.' });
   res.json({ success: true, data: shape(order) });
 };
@@ -367,6 +376,18 @@ const respondToQuote = async (req, res) => {
     // print job, "scheduled" for a site visit.
     order.production_stage = types.workStagesFor(order.service_type)[0].key;
     order.status = 'in_progress';
+
+    // An accepted quote is work, so the shop gets a job for it rather than
+    // somebody retyping the request. Deliberately not fatal: the client's
+    // acceptance is their decision and must stand even if this fails, and the
+    // request still lists in the queue either way. A missing job is visible —
+    // the request shows no job — and recoverable; a refused acceptance is not.
+    try {
+      const job = await jobs.createFromServiceRequest(order);
+      if (job) order.job_id = job._id;
+    } catch (err) {
+      console.error(`[ServiceRequest] Could not raise a job for ${order.order_number}:`, err.message);
+    }
   } else {
     order.production_stage = 'cancelled';
     order.status = 'cancelled';
