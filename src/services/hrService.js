@@ -403,6 +403,9 @@ function normalizePayLines(lines) {
     .map((line) => ({
       name: String(line.name || '').trim(),
       amount: round2(parseFloat(line.amount) || 0),
+      // Only meaningful on allowances. Harmless on a deduction, which never
+      // reaches the pension base, and cheaper than two near-identical helpers.
+      pensionable: !!line.pensionable,
     }))
     .filter((line) => line.name && line.amount > 0);
 }
@@ -853,7 +856,14 @@ async function clockOut(tenantId, employeeId) {
 
 function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, settings = {}) {
   const allowanceTotal = round2(allowanceLines.reduce((sum, line) => sum + line.amount, 0));
-  const statutory = calculateStatutory(grossSalary, allowanceTotal, settings);
+  // Everything is taxable; only what the employer has marked attracts pension.
+  const pensionableAllowances = round2(
+    allowanceLines.reduce((sum, line) => sum + (line.pensionable ? line.amount : 0), 0),
+  );
+  const statutory = calculateStatutory(grossSalary, allowanceTotal, {
+    ...settings,
+    pensionableAllowances,
+  });
   const statutoryDeductions = [
     { name: 'PAYE', amount: statutory.paye },
     // Named from the rate actually applied, not from a figure typed into a
@@ -878,6 +888,7 @@ function buildPayrollAmounts(grossSalary, allowanceLines, extraDeductionLines, s
     ssnit_employer: statutory.ssnit_employer,
     ssnit_tier1: statutory.ssnit_tier1,
     ssnit_tier2: statutory.ssnit_tier2,
+    pensionable_base: statutory.pensionable_base,
     net_salary: net,
   };
 }
@@ -1289,6 +1300,10 @@ module.exports = {
   getPayrollBatch,
   approvePayrollBatch,
   markPayrollBatchPaid,
+  // Pure, and the two places the pensionable split actually happens — exported
+  // so they can be checked directly rather than through a database.
+  normalizePayLines,
+  buildPayrollAmounts,
   getPayrollSettings,
   updatePayrollSettings,
   createLoan,
