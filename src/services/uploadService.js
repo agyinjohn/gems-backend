@@ -68,19 +68,20 @@ async function uploadProjectFile(tenantId, projectId, file) {
 }
 
 /**
- * A file a client sent in to be printed.
+ * A file a client sent in with a service request — artwork, a document, a
+ * photo of what needs fixing.
  *
- * Uploaded as `raw` rather than `image`, since most of these are PDFs and
+ * Uploaded as `raw` rather than `image`, since many of these are PDFs and
  * Cloudinary's image pipeline would reject or mangle them. Kept per tenant so
- * one shop's artwork never sits in another's folder.
+ * one shop's files never sit in another's folder.
  */
-async function uploadPrintFile(tenantId, file) {
+async function uploadServiceFile(tenantId, file) {
   if (!isCloudinaryConfigured()) {
     throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
   }
   if (!file?.buffer) throw httpError('No file provided.');
-  const result = await uploadBuffer(file.buffer, `gems/${tenantId}/print-requests`, 'raw');
+  const result = await uploadBuffer(file.buffer, `gems/${tenantId}/service-requests`, 'raw');
   return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, uploadPrintFile, isCloudinaryConfigured };
+module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, uploadServiceFile, isCloudinaryConfigured };

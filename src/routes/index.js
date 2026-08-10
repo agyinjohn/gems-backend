@@ -13,7 +13,7 @@ const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
 const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
-const { imageUpload, hrDocUpload, printUpload } = require('../middleware/uploadMiddleware');
+const { imageUpload, hrDocUpload, serviceUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
 const procurement = require('../controllers/procurementController');
@@ -23,7 +23,7 @@ const paystackSubaccount = require('../controllers/paystackSubaccountController'
 const sms = require('../controllers/smsController');
 const projects = require('../controllers/projectController');
 const labour = require('../controllers/labourController');
-const printRequests = require('../controllers/printRequestController');
+const serviceRequests = require('../controllers/serviceRequestController');
 const clientPortal = require('../controllers/clientPortalController');
 const tracking = require('../services/trackingService');
 const tenant = require('../controllers/tenantController');
@@ -589,7 +589,7 @@ router.get('/platform/sms/balance', authenticate, platformAdminOnly, async (req,
 
 // PROJECTS — contract work, weighted progress and cost against budget.
 const projectManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'accountant');
-const printManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'sales_staff');
+const serviceManagers = authorize('platform_admin', 'business_owner', 'branch_manager', 'sales_staff');
 
 router.get('/projects/types',              authenticate, requireTenant, requireFeature('projects'), projects.listTypes);
 router.get('/projects',                    authenticate, requireTenant, requireFeature('projects'), projects.list);
@@ -644,10 +644,11 @@ router.get('/projects/:id/documents',                   authenticate, requireTen
 router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
 router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
 
-router.get('/print-requests',                authenticate, requireTenant, printManagers, printRequests.list);
-router.get('/print-requests/:id',            authenticate, requireTenant, printManagers, printRequests.get);
-router.post('/print-requests/:id/quote',     authenticate, requireTenant, printManagers, printRequests.quote);
-router.patch('/print-requests/:id/stage',    authenticate, requireTenant, printManagers, printRequests.setStage);
+router.get('/service-requests/types',         authenticate, requireTenant, serviceManagers, serviceRequests.typeCatalogue);
+router.get('/service-requests',               authenticate, requireTenant, serviceManagers, serviceRequests.list);
+router.get('/service-requests/:id',           authenticate, requireTenant, serviceManagers, serviceRequests.get);
+router.post('/service-requests/:id/quote',    authenticate, requireTenant, serviceManagers, serviceRequests.quote);
+router.patch('/service-requests/:id/stage',   authenticate, requireTenant, serviceManagers, serviceRequests.setStage);
 
 router.get('/labour/board',      authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.board);
 router.get('/labour/by-project', authenticate, requireTenant, requireFeature('projects'), projectManagers, labour.byProject);
@@ -696,11 +697,15 @@ router.get('/track/:token', async (req, res) => {
   res.json({ success: true, data });
 });
 
-router.get('/print-requests/:tenantSlug/services', printRequests.publicServices);
-router.post('/print-requests/:tenantSlug', printUpload.array('files', 10), printRequests.submitRequest);
-router.post('/track/:token/quote-response', printRequests.respondToQuote);
-router.post('/track/:token/pay',            printRequests.startPayment);
-router.post('/track/:token/confirm-payment', printRequests.confirmPayment);
+router.get('/service-requests/:tenantSlug/services', serviceRequests.publicServices);
+router.post('/service-requests/:tenantSlug', serviceUpload.array('files', 10), serviceRequests.submitRequest);
+// The intake page was /print before it handled anything else, and clients were
+// given that link. Kept pointing at the same handlers so those links still work.
+router.get('/print-requests/:tenantSlug/services', serviceRequests.publicServices);
+router.post('/print-requests/:tenantSlug', serviceUpload.array('files', 10), serviceRequests.submitRequest);
+router.post('/track/:token/quote-response', serviceRequests.respondToQuote);
+router.post('/track/:token/pay',            serviceRequests.startPayment);
+router.post('/track/:token/confirm-payment', serviceRequests.confirmPayment);
 
 router.get('/track/:token/documents',       clientPortal.listDocuments);
 router.post('/track/:token/documents',      hrDocUpload.single('file'), clientPortal.uploadDocument);

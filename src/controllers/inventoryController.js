@@ -1,4 +1,5 @@
 const { Category, Product, StockMovement } = require('../models');
+const serviceTypes = require('../config/serviceTypes');
 const audit = require('../utils/audit');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 
@@ -83,7 +84,7 @@ const createProduct = async (req, res) => {
     name, sku, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, images, attributes,
     item_type, unit_type, duration, revenue_account_code, bundle_items,
-    pricing_mode, min_price, max_price,
+    pricing_mode, min_price, max_price, service_type, requires_file,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
 
@@ -116,6 +117,12 @@ const createProduct = async (req, res) => {
     description,
     category_id:  normalizeCategoryId(category_id),
     item_type:    catalogType,
+    // Only meaningful on a service: what kind of work it is, and whether a
+    // client has to send something in before it can be started.
+    service_type: isService && serviceTypes.TYPE_KEYS.includes(service_type)
+      ? service_type
+      : serviceTypes.DEFAULT_TYPE,
+    requires_file: isService && !!requires_file,
     unit_type:    unit_type || 'fixed',
     duration:     duration != null ? Number(duration) : null,
     revenue_account_code: revenue_account_code?.trim() || null,
@@ -159,7 +166,7 @@ const updateProduct = async (req, res) => {
     name, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, is_active, images,
     unit_type, duration, revenue_account_code,
-    pricing_mode, min_price, max_price,
+    pricing_mode, min_price, max_price, service_type, requires_file,
   } = req.body;
 
   const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
@@ -181,6 +188,10 @@ const updateProduct = async (req, res) => {
   if (existing.item_type === 'bundle' && req.body.bundle_items !== undefined)
     update.bundle_items = Array.isArray(req.body.bundle_items) ? req.body.bundle_items : [];
   // Service-specific fields
+  if (isService && service_type !== undefined && serviceTypes.TYPE_KEYS.includes(service_type)) {
+    update.service_type = service_type;
+  }
+  if (isService && requires_file !== undefined) update.requires_file = !!requires_file;
   if (unit_type !== undefined)           update.unit_type           = unit_type;
   if (duration !== undefined)            update.duration            = duration != null ? Number(duration) : null;
   if (revenue_account_code !== undefined) update.revenue_account_code = revenue_account_code?.trim() || null;

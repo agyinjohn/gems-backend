@@ -197,7 +197,7 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     const pending = await Order.find({
       payment_ref: reference,
       payment_status: { $in: ['pending', 'failed'] },
-      source: { $in: ['storefront', 'print_request'] },
+      source: { $in: ['storefront', 'service_request'] },
     });
     ids = pending.map((o) => o._id);
   }
@@ -208,19 +208,19 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
     const order = await Order.findOne({
       _id: order_id,
       payment_status: { $in: ['pending', 'failed'] },
-      source: { $in: ['storefront', 'print_request'] },
+      source: { $in: ['storefront', 'service_request'] },
     });
     if (!order) continue;
-    const isPrint = order.source === 'print_request';
+    const isServiceRequest = order.source === 'service_request';
 
     order.payment_status = 'paid';
     order.payment_ref = reference || order.payment_ref;
     order.payment_method = 'paystack';
     order.paystack_settled = true;
-    // A print job's position on the shop floor is tracked separately and must
-    // not be reset by payment landing — a job can be paid for while it is
-    // already on the press.
-    if (!isPrint) order.status = 'processing';
+    // A service request's own stage is tracked separately and must not be
+    // reset by payment landing — a job can be paid for while it is already on
+    // the press, or halfway through a repair.
+    if (!isServiceRequest) order.status = 'processing';
     // Split-settled orders had their commission taken at the gateway and
     // stamped on the order at checkout — don't recompute it here.
     if (order.via_marketplace && !order.split_settled) {
