@@ -750,6 +750,10 @@ const payrollRunSchema = new Schema({
   // change and a payslip must keep meaning what it meant when it was issued.
   ssnit_tier1:  { type: Number, default: 0 },
   ssnit_tier2:  { type: Number, default: 0 },
+  // Tier 3, the voluntary provident fund. Both sides go to the scheme; only the
+  // employee's half comes off the payslip.
+  tier3_employee: { type: Number, default: 0 },
+  tier3_employer: { type: Number, default: 0 },
   // What pension was charged on: basic pay plus any pensionable allowance.
   // Stored so a payslip can show it and nobody has to reconstruct it from a
   // rate that may since have changed.
@@ -779,6 +783,8 @@ const payrollBatchSchema = new Schema({
   // What has to be paid to each institution for this period.
   total_ssnit_tier1:    { type: Number, default: 0 },
   total_ssnit_tier2:    { type: Number, default: 0 },
+  total_tier3_employee: { type: Number, default: 0 },
+  total_tier3_employer: { type: Number, default: 0 },
   total_net:            { type: Number, default: 0 },
   created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
   approved_by:  { type: Schema.Types.ObjectId, ref: 'User' },

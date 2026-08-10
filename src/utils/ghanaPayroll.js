@@ -58,11 +58,15 @@ function calculatePaye(taxableMonthly, bands) {
  *   withhold income tax.
  * @param {Array}  [options.payeBands] - bands in force for the period.
  * @param {object} [options.pensionRates] - employee/employer and tier rates.
+ * @param {boolean} [options.tier3Enabled=false] - the voluntary provident fund.
+ * @param {number} [options.tier3EmployeeRate=0] - deducted from the employee.
+ * @param {number} [options.tier3EmployerRate=0] - added by the business.
  */
 function calculateStatutory(basicSalary, allowances = 0, options = {}) {
   const {
     applySsnit = true, applyPaye = true, payeBands, pensionRates,
     pensionableAllowances = 0,
+    tier3Enabled = false, tier3EmployeeRate = 0, tier3EmployerRate = 0,
   } = options;
   const rates = pensionRates || pensionRatesFor(new Date());
 
@@ -88,11 +92,24 @@ function calculateStatutory(basicSalary, allowances = 0, options = {}) {
   const tier1 = applySsnit ? round2(pensionBase * rates.tier1_rate) : 0;
   const tier2 = applySsnit ? round2(pensionBase * rates.tier2_rate) : 0;
 
-  // PAYE relief for the SSNIT employee contribution only applies if it was
-  // actually withheld.
-  const taxableIncome = Math.max(0, taxableGross - ssnitEmployee);
+  // Tier 3 is voluntary and independent of the mandatory scheme — a business
+  // can run one without the other, so it is not gated on applySsnit. Charged on
+  // the same base, because it is a pension contribution like the others.
+  const rate3Employee = Math.max(Number(tier3EmployeeRate) || 0, 0);
+  const rate3Employer = Math.max(Number(tier3EmployerRate) || 0, 0);
+  const tier3Employee = tier3Enabled ? round2(pensionBase * rate3Employee) : 0;
+  const tier3Employer = tier3Enabled ? round2(pensionBase * rate3Employer) : 0;
+
+  // Pension contributions reduce taxable income, but only so far. The ceiling
+  // counts the employee's Tier 1 contribution towards it, so a business running
+  // Tier 3 at a high rate does not get unlimited relief — anything above the cap
+  // is still deducted from pay, it just isn't tax-free.
+  const reliefCap = round2(pensionBase * (rates.tier3_relief_cap_rate ?? 0.165));
+  const reliefClaimed = Math.min(round2(ssnitEmployee + tier3Employee), reliefCap);
+
+  const taxableIncome = Math.max(0, round2(taxableGross - reliefClaimed));
   const paye = applyPaye ? calculatePaye(taxableIncome, payeBands) : 0;
-  const totalDeductions = round2(ssnitEmployee + paye);
+  const totalDeductions = round2(ssnitEmployee + tier3Employee + paye);
   const net = round2(taxableGross - totalDeductions);
 
   return {
@@ -106,12 +123,19 @@ function calculateStatutory(basicSalary, allowances = 0, options = {}) {
     ssnit_employer: ssnitEmployer,
     ssnit_tier1: tier1,
     ssnit_tier2: tier2,
+    tier3_employee: tier3Employee,
+    tier3_employer: tier3Employer,
+    // What actually came off taxable pay, which is not the same as what was
+    // contributed once the ceiling bites.
+    pension_relief: applyPaye ? reliefClaimed : 0,
+    pension_relief_cap: reliefCap,
     paye,
     statutory_deductions: totalDeductions,
     net_salary: net,
     deductions: totalDeductions,
-    // What the employee's line should say, given the rate actually applied.
+    // What the employee's lines should say, given the rates actually applied.
     employee_rate: rates.employee_rate,
+    tier3_employee_rate: tier3Enabled ? rate3Employee : 0,
   };
 }
 
