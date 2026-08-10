@@ -2,6 +2,7 @@ const { Job, Customer, Employee, Invoice } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const { TYPE_KEYS, profileFor } = require('../config/serviceTypes');
 const audit = require('../utils/audit');
+const jobService = require('../services/jobService');
 
 function httpError(message, status = 400) {
   const e = new Error(message);
@@ -20,6 +21,8 @@ const list = async (req, res) => {
   if (req.query.status)      filter.status   = req.query.status;
   if (req.query.job_type)    filter.job_type  = req.query.job_type;
   if (req.query.assigned_to) filter.assigned_to = req.query.assigned_to;
+  if (req.query.contract_id) filter.contract_id = req.query.contract_id;
+  if (req.query.project_id)  filter.project_id  = req.query.project_id;
   if (req.query.open === 'true') filter.status = { $in: ['open', 'in_progress', 'done'] };
 
   const jobs = await Job.find(filter)
@@ -44,15 +47,14 @@ const list = async (req, res) => {
 
 const create = async (req, res) => {
   const { title, description, customer_id, job_type, items, assigned_to, due_date, notes,
-    walk_in_name, walk_in_phone } = req.body;
+    walk_in_name, walk_in_phone, contract_id, project_id } = req.body;
   if (!title?.trim()) throw httpError('A job title is required.');
 
   const branch_id = await resolveWriteBranchId(req);
 
-  // Auto-number: JOB-0001, JOB-0002 …
-  const last = await Job.findOne({ tenant_id: req.tenant_id }).sort({ createdAt: -1 }).select('code').lean();
-  const seq  = last?.code ? (parseInt(last.code.replace(/\D/g, ''), 10) || 0) + 1 : 1;
-  const code = `JOB-${String(seq).padStart(4, '0')}`;
+  // Shared with the accept-a-quote path, so a job raised from a request and one
+  // typed by hand are numbered the same way.
+  const code = await jobService.nextJobCode(req.tenant_id);
 
   let customer_name;
   if (customer_id) {
@@ -82,6 +84,8 @@ const create = async (req, res) => {
     assigned_name,
     walk_in_name:  walk_in_name  || undefined,
     walk_in_phone: walk_in_phone || undefined,
+    contract_id:   contract_id   || undefined,
+    project_id:    project_id    || undefined,
     due_date:      due_date      || undefined,
     notes,
     created_by: req.user._id,
@@ -113,6 +117,13 @@ const update = async (req, res) => {
 
   const fields = ['title', 'description', 'job_type', 'due_date', 'notes', 'status', 'walk_in_name', 'walk_in_phone'];
   fields.forEach((f) => { if (req.body[f] !== undefined) job[f] = req.body[f]; });
+
+  // Sent empty, these clear the link rather than being ignored — moving a job
+  // out from under a contract has to be as possible as moving it in.
+  if (req.body.contract_id !== undefined) job.contract_id = req.body.contract_id || undefined;
+  if (req.body.project_id  !== undefined) job.project_id  = req.body.project_id  || undefined;
+  // Where the work came from is a fact about its history, not a field to edit.
+  
 
   if (req.body.status === 'done' && !job.completed_date) job.completed_date = new Date();
 

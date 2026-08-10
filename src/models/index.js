@@ -360,6 +360,10 @@ const orderSchema = new Schema({
   service_type:     { type: String, enum: SERVICE_TYPE_KEYS, default: DEFAULT_SERVICE_TYPE },
   // The same read-only key projects use, so one public page serves both.
   track_token:      { type: String, default: null },
+  // The internal job this request became, once the client accepted the quote.
+  // The request stays as the client's record — it holds the tracking link and
+  // the conversation; the job is what the shop works from.
+  job_id:           { type: Schema.Types.ObjectId, ref: 'Job' },
   // What the client sent in with the request — artwork to print, a photo of
   // the fault, a brief. Held on the order rather than a separate upload record
   // because the files are part of the job, and should go when it does.
@@ -1799,6 +1803,16 @@ const jobSchema = new Schema({
   customer_name:  String,
   job_type:       { type: String, enum: SERVICE_TYPE_KEYS, default: DEFAULT_SERVICE_TYPE },
   items:          { type: [jobItemSchema], default: [] },
+  // Where this work came from, and what it belongs to. All optional: plenty of
+  // work walks in off the street under no contract and from no request, and
+  // forcing a parent on it would mean inventing one.
+  //
+  // service_request_id is the client's own record of asking — the thing they
+  // hold a tracking link to. Set when accepting a quote turns the request into
+  // work, so the two halves of one job stay joined instead of being typed twice.
+  service_request_id: { type: Schema.Types.ObjectId, ref: 'Order' },
+  contract_id:    { type: Schema.Types.ObjectId, ref: 'Contract' },
+  project_id:     { type: Schema.Types.ObjectId, ref: 'Project' },
   // Who is doing the work.
   assigned_to:    { type: Schema.Types.ObjectId, ref: 'Employee' },
   assigned_name:  String,
@@ -1815,6 +1829,8 @@ const jobSchema = new Schema({
   created_by:     { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 jobSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
+jobSchema.index({ tenant_id: 1, contract_id: 1 });
+jobSchema.index({ tenant_id: 1, service_request_id: 1 });
 jobSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
 
 // CONTRACT
