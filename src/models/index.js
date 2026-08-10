@@ -1913,7 +1913,8 @@ const allSchemas = [
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
   projectMessageSchema,
-  contractSchema, contractDocumentSchema, contractPaymentMilestoneSchema, contractSignatorySchema,
+  contractSchema, contractDocumentSchema, contractNoteSchema,
+  contractPaymentMilestoneSchema, contractSignatorySchema,
 ];
 allSchemas.forEach(schema => {
   schema.set('toJSON', {
@@ -1995,5 +1996,6 @@ module.exports = {
   ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
   ProjectMessage:        mongoose.model('ProjectMessage', projectMessageSchema),
   Job:                   mongoose.model('Job', jobSchema),
+  Contract:              mongoose.model('Contract', contractSchema),
   ContractDocument:      mongoose.model('ContractDocument', contractDocumentSchema),
 };
