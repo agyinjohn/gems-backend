@@ -4,6 +4,7 @@ const {
 } = require('../models');
 const projectService = require('./projectService');
 const types = require('../config/projectTypes');
+const serviceTypes = require('../config/serviceTypes');
 
 /**
  * The read-only view a client is given of their own job.
@@ -147,20 +148,18 @@ async function trackedProject(project) {
   };
 }
 
-/* ── The client's view of an order or print job ───────────────────────────── */
+/* ── The client's view of an order or service request ─────────────────────── */
 
-/** What a print job is actually doing right now, in the client's words. */
-const STAGE_LABEL = {
-  awaiting_quote: 'We are pricing your job',
-  quoted: 'Quote ready — awaiting your go-ahead',
-  queued: 'Accepted and queued',
-  preparing: 'Preparing artwork',
-  printing: 'Printing',
-  finishing: 'Finishing',
-  ready: 'Ready for collection',
-  collected: 'Collected',
-  cancelled: 'Cancelled',
-};
+/**
+ * The journey this particular job runs through, in the client's words.
+ *
+ * Sent rather than assumed, because the steps are not the same for every kind
+ * of work: somebody waiting on a repair should not be told their generator is
+ * "on the press". The page draws whatever it is given.
+ */
+const clientJourney = (serviceType) => serviceTypes
+  .stagesFor(serviceType)
+  .map((stage) => ({ key: stage.key, label: stage.client }));
 
 async function trackedOrder(order) {
   const tenant = await Tenant.findById(order.tenant_id).select('business_name phone email logo').lean();
@@ -175,10 +174,19 @@ async function trackedOrder(order) {
       logo: tenant?.logo || '',
     },
     reference: order.order_number,
-    title: order.source === 'print_request' ? 'Print job' : 'Order',
+    title: order.source === 'service_request'
+      ? serviceTypes.profileFor(order.service_type).label
+      : 'Order',
     status: order.status,
+    service_type: serviceTypes.profileFor(order.service_type).key,
     production_stage: order.production_stage || null,
-    production_label: STAGE_LABEL[order.production_stage] || null,
+    production_label: order.production_stage
+      ? serviceTypes.stageLabel(order.service_type, order.production_stage, 'client')
+      : null,
+    // Named journey rather than stages: a tracked project already sends stages,
+    // meaning its milestones, and one page reads both.
+    // Cancelled is an exit, not a step, so it never appears here.
+    journey: order.source === 'service_request' ? clientJourney(order.service_type) : [],
     quote_status: order.quote_status || null,
     payment_status: order.payment_status,
     currency: 'GHS',
@@ -188,7 +196,7 @@ async function trackedOrder(order) {
       quantity: i.quantity,
       unit_price: round2(i.unit_price || 0),
       total: round2(i.total || 0),
-      spec: i.print_spec || null,
+      spec: i.spec || null,
     })),
     // The client uploaded these, so they may have them back.
     files: (order.files || []).map((f) => ({
@@ -228,5 +236,5 @@ module.exports = {
   revokeToken,
   resolve,
   mintToken,
-  STAGE_LABEL,
+  clientJourney,
 };

@@ -4,6 +4,11 @@ const {
   ALL_DELAY_CAUSES,
   ALL_DOCUMENT_CATEGORIES,
 } = require('../config/projectTypes');
+const {
+  TYPE_KEYS: SERVICE_TYPE_KEYS,
+  ALL_STAGE_KEYS: SERVICE_STAGE_KEYS,
+  DEFAULT_TYPE: DEFAULT_SERVICE_TYPE,
+} = require('../config/serviceTypes');
 const { Schema } = mongoose;
 
 // TENANT
@@ -173,6 +178,14 @@ const productSchema = new Schema({
   // --- catalog type ---
   item_type:           { type: String, enum: ['product', 'service', 'bundle'], default: 'product' },
   // --- service-specific fields (ignored for products) ---
+  // What kind of work this is, which decides the stages a request for it runs
+  // through and the words the client is shown. See config/serviceTypes.js.
+  service_type:        { type: String, enum: SERVICE_TYPE_KEYS, default: DEFAULT_SERVICE_TYPE },
+  // Whether a client must send something in before the request can be taken.
+  // Printing cannot start without artwork; a site visit has nothing to attach.
+  // Per service rather than per type, because one shop's survey wants photos
+  // and another's does not.
+  requires_file:       { type: Boolean, default: false },
   // How the service is billed: per hour, per day, as a fixed fee, or per unit
   unit_type:           { type: String, enum: ['hour', 'day', 'fixed', 'unit'], default: 'fixed' },
   // Estimated duration (e.g. 2 hours, 3 days). Informational only.
@@ -274,10 +287,11 @@ const orderItemSchema = new Schema({
   // For services: the GL revenue account code to post to (e.g. '4010').
   // Null means fall back to the default for the item_type.
   revenue_account_code: { type: String, default: null },
-  // What was asked for on a print line — paper, sides, colour, finishing.
-  // Free-form rather than an enum: every shop words these differently, and a
-  // fixed list would need editing before a shop could sell a new finish.
-  print_spec:   { type: String, default: '' },
+  // What was asked for on this line — paper and finishing on a print job, the
+  // fault on a repair, the brief on a design. Free-form rather than an enum:
+  // every trade words these differently, and a fixed list would need editing
+  // before a shop could sell anything new.
+  spec:         { type: String, default: '' },
 });
 
 const orderSchema = new Schema({
@@ -302,12 +316,15 @@ const orderSchema = new Schema({
   // Service orders:  pending → in_progress → completed
   // Either type:     → cancelled
   status:           { type: String, enum: ['pending','processing','in_progress','shipped','delivered','completed','cancelled'], default: 'pending' },
-  source:           { type: String, enum: ['storefront','internal','pos','print_request'], default: 'storefront' },
+  source:           { type: String, enum: ['storefront','internal','pos','service_request'], default: 'storefront' },
+  // Which trade's vocabulary this request runs in — see config/serviceTypes.js.
+  // Derived from the services asked for, not chosen by the client.
+  service_type:     { type: String, enum: SERVICE_TYPE_KEYS, default: DEFAULT_SERVICE_TYPE },
   // The same read-only key projects use, so one public page serves both.
   track_token:      { type: String, default: null },
-  // What the client sent us to print. Held on the order rather than a separate
-  // upload record because the files are the job — an order without them is not
-  // actionable, and they should go when it does.
+  // What the client sent in with the request — artwork to print, a photo of
+  // the fault, a brief. Held on the order rather than a separate upload record
+  // because the files are part of the job, and should go when it does.
   files: [{
     name:        String,
     url:         String,
@@ -316,20 +333,24 @@ const orderSchema = new Schema({
     size:        Number,
     uploaded_at: { type: Date, default: Date.now },
   }],
-  // A print request arrives without an agreed price. It is quoted, the client
+  // A service request arrives without an agreed price. It is quoted, the client
   // agrees, and only then is it work. Separate from payment_status because a
-  // job can be accepted and produced before the money arrives.
+  // job can be accepted and done before the money arrives.
   quote_status:     { type: String, enum: ['awaiting_quote', 'quoted', 'accepted', 'declined'], default: null },
   quote_note:       { type: String, default: '' },
   quoted_at:        Date,
   quoted_by:        { type: Schema.Types.ObjectId, ref: 'User' },
   accepted_at:      Date,
-  // Where the job is on the shop floor. Distinct from `status`, which is the
-  // retail lifecycle every order shares — "shipped" says nothing useful about
-  // a job sitting on the guillotine.
+  // Where the job actually is. Distinct from `status`, which is the retail
+  // lifecycle every order shares — "shipped" says nothing useful about a job
+  // sitting on the guillotine or a generator waiting on a part.
+  //
+  // The enum is every stage any service type defines, because one column holds
+  // them all. Which of them a given request may use is decided by its
+  // service_type, and enforced where the stage is set rather than here.
   production_stage: {
     type: String,
-    enum: ['awaiting_quote', 'quoted', 'queued', 'preparing', 'printing', 'finishing', 'ready', 'collected', 'cancelled'],
+    enum: SERVICE_STAGE_KEYS,
     default: null,
   },
   // Order was placed via the cross-tenant marketplace directory rather than
