@@ -226,8 +226,9 @@ const updateOrderStatus = async (req, res) => {
 const getStorefrontProducts = async (req, res) => {
   const { search, category, page = 1, limit = 12, tenant_slug, branch_slug } = req.query;
   // Open-price items are quoted in person, so they never appear in a
-  // self-service catalog.
-  const filter = { is_active: true, pricing_mode: { $ne: 'open' } };
+  // self-service catalog. sell_online is the deliberate version of the same
+  // decision: absent means yes, which is what everything did before it existed.
+  const filter = { is_active: true, pricing_mode: { $ne: 'open' }, sell_online: { $ne: false } };
 
   // Resolve tenant from slug
   if (tenant_slug) {

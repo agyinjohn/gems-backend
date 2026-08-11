@@ -85,6 +85,7 @@ const createProduct = async (req, res) => {
     stock_qty, low_stock_threshold, unit, images, attributes,
     item_type, unit_type, duration, revenue_account_code, bundle_items,
     pricing_mode, min_price, max_price, service_type, requires_file,
+    sell_online, requestable,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
 
@@ -123,6 +124,9 @@ const createProduct = async (req, res) => {
       ? service_type
       : serviceTypes.DEFAULT_TYPE,
     requires_file: isService && !!requires_file,
+    // Where it is offered. Absent means the old behaviour: everywhere.
+    sell_online:  sell_online === undefined ? true : !!sell_online,
+    requestable:  requestable === undefined ? true : !!requestable,
     unit_type:    unit_type || 'fixed',
     duration:     duration != null ? Number(duration) : null,
     revenue_account_code: revenue_account_code?.trim() || null,
@@ -167,6 +171,7 @@ const updateProduct = async (req, res) => {
     stock_qty, low_stock_threshold, unit, is_active, images,
     unit_type, duration, revenue_account_code,
     pricing_mode, min_price, max_price, service_type, requires_file,
+    sell_online, requestable,
   } = req.body;
 
   const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
@@ -192,6 +197,8 @@ const updateProduct = async (req, res) => {
     update.service_type = service_type;
   }
   if (isService && requires_file !== undefined) update.requires_file = !!requires_file;
+  if (sell_online !== undefined) update.sell_online = !!sell_online;
+  if (requestable !== undefined) update.requestable = !!requestable;
   if (unit_type !== undefined)           update.unit_type           = unit_type;
   if (duration !== undefined)            update.duration            = duration != null ? Number(duration) : null;
   if (revenue_account_code !== undefined) update.revenue_account_code = revenue_account_code?.trim() || null;

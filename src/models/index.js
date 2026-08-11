@@ -245,6 +245,16 @@ const productSchema = new Schema({
   price:               { type: Number, required: true, default: 0 },
   compare_price:       { type: Number, default: 0 },
   cost_price:          { type: Number, default: 0 },
+  // --- where this item is offered ---
+  // Reach used to be a side effect: an item appeared in the shop unless it was
+  // open-priced, and could be requested if it happened to be a service. So a
+  // site survey you wanted clients to *ask* for but not *add to a cart* had no
+  // setting — the only levers were pricing it by hand or switching it off
+  // everywhere. These make reach a decision.
+  //
+  // Both default true, which is what everything did before.
+  sell_online:         { type: Boolean, default: true },
+  requestable:         { type: Boolean, default: true },
   // --- inventory (products only, ignored for services/bundles) ---
   stock_qty:           { type: Number, default: 0 },
   reserved_qty:        { type: Number, default: 0 },

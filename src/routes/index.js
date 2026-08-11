@@ -522,7 +522,15 @@ router.get('/marketplace/shops', async (req, res) => {
   }).select('business_name slug logo storefront_settings.announcement').sort('business_name');
 
   const tenantIds = tenants.map((t) => t._id);
-  const products = await Product.find({ tenant_id: { $in: tenantIds }, is_active: true })
+  // The same test the storefront itself applies, so the directory advertises
+  // what a shopper would actually find — a shop whose whole list is held back
+  // from the store has nothing to show and does not belong here.
+  const products = await Product.find({
+    tenant_id: { $in: tenantIds },
+    is_active: true,
+    sell_online: { $ne: false },
+    pricing_mode: { $ne: 'open' },
+  })
     .select('tenant_id images category_id')
     .populate('category_id', 'name')
     .sort('-createdAt')

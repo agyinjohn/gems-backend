@@ -45,11 +45,16 @@ async function findStore(slug) {
   return Tenant.findOne({ slug, is_active: true }).select('_id business_name slug phone email logo').lean();
 }
 
+/** What a client may ask for: work, and packages of work. Not stock. */
+const OFFERABLE = ['service', 'bundle'];
+
 /**
- * The services a client may choose from.
+ * The offerings a client may choose from.
  *
- * Only services, only active ones, and only from this shop. A product is
- * excluded because a service request is for work done, not stock sold.
+ * Services and solutions — a solution being a named package of work sold
+ * together — but never a plain product, because a request is for something to
+ * be done rather than something to be shipped. Only active ones, only those
+ * marked requestable, and only from this shop.
  */
 const publicServices = async (req, res) => {
   const store = await findStore(req.params.tenantSlug);
@@ -57,9 +62,10 @@ const publicServices = async (req, res) => {
 
   const services = await Product.find({
     tenant_id: store._id,
-    item_type: 'service',
+    item_type: { $in: OFFERABLE },
     is_active: { $ne: false },
-  }).select('name description price unit_type pricing_mode min_price max_price category_id service_type requires_file')
+    requestable: { $ne: false },
+  }).select('name description price unit_type pricing_mode min_price max_price category_id service_type requires_file item_type')
     .sort({ name: 1 }).lean();
 
   res.json({
@@ -71,6 +77,9 @@ const publicServices = async (req, res) => {
         name: s.name,
         description: s.description || '',
         unit_type: s.unit_type || 'unit',
+        // A solution is a package rather than a single piece of work. Told to
+        // the client so the form can say so, not so it can price it differently.
+        is_solution: s.item_type === 'bundle',
         service_type: types.profileFor(s.service_type).key,
         // Told to the client up front, so the form can ask for the file at the
         // point they pick the service rather than rejecting the whole request
@@ -115,7 +124,11 @@ const submitRequest = async (req, res) => {
 
   const ids = [...new Set(lines.map((l) => String(l.service_id)).filter(Boolean))];
   const services = await Product.find({
-    _id: { $in: ids }, tenant_id: store._id, item_type: 'service', is_active: { $ne: false },
+    _id: { $in: ids },
+    tenant_id: store._id,
+    item_type: { $in: OFFERABLE },
+    is_active: { $ne: false },
+    requestable: { $ne: false },
   }).lean();
   const byId = new Map(services.map((s) => [String(s._id), s]));
   if (services.length !== ids.length) {
@@ -152,7 +165,7 @@ const submitRequest = async (req, res) => {
       quantity: qty,
       unit_price: unit,
       total: round2(unit * qty),
-      item_type: 'service',
+      item_type: service.item_type === 'bundle' ? 'bundle' : 'service',
       spec: String(line.spec || '').slice(0, 300),
     });
   }
