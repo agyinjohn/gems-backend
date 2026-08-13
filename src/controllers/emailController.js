@@ -227,15 +227,72 @@ const updateSettings = async (req, res) => {
   return getSettings(req, res);
 };
 
-/** Try the mailbox without sending anything, so a wrong password says so. */
+/**
+ * Try the mailbox, and — given somewhere to send it — post a real message.
+ *
+ * Two different questions. Signing in proves the password; a message landing in
+ * an inbox proves the whole path, which is the one somebody actually wants
+ * answered before they trust this with a customer. A mailbox can authenticate
+ * perfectly and still refuse to send, so both are worth having.
+ */
 const verify = async (req, res) => {
-  const tenant = await Tenant.findById(req.tenant_id).select('email_settings').lean();
-  const result = await email.verifyConnection(tenant?.email_settings || {});
-  await Tenant.findByIdAndUpdate(req.tenant_id, result.ok
-    ? { 'email_settings.verified_at': new Date(), 'email_settings.last_error': '' }
-    : { 'email_settings.last_error': result.reason });
-  if (!result.ok) return res.status(400).json({ success: false, message: result.reason });
-  res.json({ success: true, message: 'The mailbox answered. Email is ready to send.' });
+  const tenant = await Tenant.findById(req.tenant_id).select('email_settings business_name').lean();
+  const settings = tenant?.email_settings || {};
+
+  // Signing in first: it fails in a second, and it fails the same way whether
+  // or not there is anywhere to send to.
+  const connection = await email.verifyConnection(settings);
+  if (!connection.ok) {
+    await Tenant.findByIdAndUpdate(req.tenant_id, { 'email_settings.last_error': connection.reason });
+    return res.status(400).json({
+      success: false,
+      message: connection.reason,
+      data: { stage: 'sign_in', detail: connection.detail || '' },
+    });
+  }
+
+  const to = String(req.body?.to || '').trim();
+  if (!to) {
+    await Tenant.findByIdAndUpdate(req.tenant_id, {
+      'email_settings.verified_at': new Date(), 'email_settings.last_error': '',
+    });
+    return res.json({
+      success: true,
+      message: 'The mailbox signed in. Give an address above to send a real one and be sure.',
+      data: { stage: 'sign_in' },
+    });
+  }
+
+  if (!email.looksLikeEmail(to)) {
+    return res.status(400).json({ success: false, message: `${to} is not an email address.` });
+  }
+
+  const sent = await email.sendEmail({
+    tenantId: req.tenant_id,
+    to,
+    subject: `Test from ${tenant?.business_name || 'your business'}`,
+    body: `This is a test from GEMS.\n\n`
+      + `If you are reading it, ${tenant?.business_name || 'your business'} can now email customers `
+      + `from ${settings.from_email} — order confirmations, quotes and the rest.\n\n`
+      + `Nothing else to do. You can delete this.`,
+    source: 'test',
+    userId: req.user._id,
+    tenant,
+  });
+
+  if (!sent.sent) {
+    return res.status(400).json({
+      success: false,
+      message: `The mailbox signed in, but would not send: ${sent.reason}`,
+      data: { stage: 'send', detail: sent.reason },
+    });
+  }
+
+  res.json({
+    success: true,
+    message: `Sent to ${to}. If it is not there in a minute, look in the spam folder.`,
+    data: { stage: 'send' },
+  });
 };
 
 /* ── Templates ────────────────────────────────────────────────────────────── */

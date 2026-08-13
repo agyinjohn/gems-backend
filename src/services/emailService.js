@@ -339,15 +339,29 @@ async function sendTemplated({ tenantId, to, key, vars = {}, userId }) {
   });
 }
 
-/** Prove the mailbox works before anything real is sent through it. */
+/**
+ * Prove the mailbox works before anything real is sent through it.
+ *
+ * This opens a connection and signs in; it sends nothing. That is enough to
+ * catch the usual four — wrong password, wrong host, wrong port, blocked — and
+ * fails in a second rather than after a delivery attempt. Actually posting
+ * something is a separate step, because a mailbox that authenticates can still
+ * refuse to send.
+ *
+ * The raw text the server gave is handed back alongside the readable version:
+ * the readable one is for the person setting this up, the raw one is what they
+ * paste to whoever they end up asking.
+ */
 async function verifyConnection(settings) {
   const state = readiness(settings);
-  if (!state.configured) return { ok: false, reason: `Missing ${state.missing.join(', ')}.` };
+  if (!state.configured) {
+    return { ok: false, reason: `Still missing ${state.missing.join(', ')}.`, detail: '' };
+  }
   try {
     await buildTransport(settings).verify();
     return { ok: true };
   } catch (err) {
-    return { ok: false, reason: friendlyError(err) };
+    return { ok: false, reason: friendlyError(err), detail: String(err?.message || err) };
   }
 }
 
