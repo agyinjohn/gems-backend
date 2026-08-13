@@ -1,7 +1,43 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { User, Tenant, Branch } = require('../models');
+const { User, Tenant, Branch, Product } = require('../models');
 const audit = require('../utils/audit');
+
+/**
+ * What this business actually sells.
+ *
+ * The app has one counter for taking money over the table, and calling it a
+ * point of sale is wrong for a firm that has never sold a thing off a shelf —
+ * what happens there is billing a client for work. Read from the catalogue
+ * rather than asked at sign-up, because it changes: a printer that starts
+ * stocking paper becomes both without anyone updating a setting.
+ */
+async function catalogMix(tenantId) {
+  const [goods, work] = await Promise.all([
+    // Rows written before item_type existed are products, which is what the
+    // column defaults to.
+    Product.countDocuments({ tenant_id: tenantId, is_active: true, item_type: { $nin: ['service', 'bundle'] } }),
+    Product.countDocuments({ tenant_id: tenantId, is_active: true, item_type: { $in: ['service', 'bundle'] } }),
+  ]);
+  if (goods && work) return 'both';
+  if (work) return 'services';
+  if (goods) return 'products';
+  return 'empty';
+}
+
+/** The slice of the tenant record the app is given on the way in. */
+async function tenantPayload(tenant) {
+  return {
+    id: tenant._id,
+    business_name: tenant.business_name,
+    slug: tenant.slug,
+    plan: tenant.plan,
+    subscription_status: tenant.subscription_status,
+    subscription_expires_at: tenant.subscription_expires_at,
+    removed_features: tenant.removed_features || [],
+    sells: await catalogMix(tenant._id),
+  };
+}
 
 const generateToken = (user) =>
   jwt.sign(
@@ -25,7 +61,7 @@ const login = async (req, res) => {
   if (user.tenant_id) {
     const tenant = await Tenant.findById(user.tenant_id);
     if (!tenant || !tenant.is_active) return res.status(403).json({ success: false, message: 'Your business account is inactive.' });
-    tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at, removed_features: tenant.removed_features || [] };
+    tenantData = await tenantPayload(tenant);
     const branch = await Branch.findById(user.branch_id);
     if (branch) branchData = { id: branch._id, name: branch.name, slug: branch.slug };
   }
@@ -44,7 +80,7 @@ const getMe = async (req, res) => {
   let branchData = null;
   if (req.user.tenant_id) {
     const tenant = await Tenant.findById(req.user.tenant_id);
-    if (tenant) tenantData = { id: tenant._id, business_name: tenant.business_name, slug: tenant.slug, plan: tenant.plan, subscription_status: tenant.subscription_status, subscription_expires_at: tenant.subscription_expires_at, removed_features: tenant.removed_features || [] };
+    if (tenant) tenantData = await tenantPayload(tenant);
   }
   if (req.user.branch_id) {
     const branch = await Branch.findById(req.user.branch_id);

@@ -1,5 +1,76 @@
 const { Order, Product, Customer, Lead, Employee, Expense, PurchaseOrder, Attendance, LeaveRequest, PayrollRun, StockMovement, Supplier } = require('../models');
 
+/**
+ * The window the money figures cover.
+ *
+ * Absent means everything, which is what this dashboard has always shown — a
+ * range narrows it rather than quietly changing what "total revenue" meant
+ * yesterday. Dates arrive as plain days (2026-08-13) and are read as whole days
+ * in UTC, which is Ghana time; a shop's "13th" is the 13th.
+ */
+function readRange(query) {
+  const day = (value, endOfDay) => {
+    if (!value) return null;
+    const d = new Date(`${String(value).slice(0, 10)}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  const from = day(query.from, false);
+  const to = day(query.to, true);
+  if (!from && !to) return null;
+  // A backwards range is a slip, not a request for nothing.
+  if (from && to && from > to) return { from: day(query.to, false), to: day(query.from, true) };
+  return { from, to };
+}
+
+/** That window as a query fragment on whichever date column applies. */
+function within(range, field = 'createdAt') {
+  if (!range) return {};
+  return {
+    [field]: {
+      ...(range.from ? { $gte: range.from } : {}),
+      ...(range.to ? { $lte: range.to } : {}),
+    },
+  };
+}
+
+/**
+ * How to slice the trend. Months are unreadable across a fortnight and days are
+ * unreadable across two years, so the span decides.
+ */
+function trendGrain(range) {
+  if (!range || !range.from || !range.to) return 'month';
+  const days = (range.to - range.from) / (24 * 60 * 60 * 1000);
+  return days <= 62 ? 'day' : 'month';
+}
+
+/** Paid orders over the window, grouped for the chart. */
+function salesTrend({ tid, bf, range }) {
+  const match = { tenant_id: tid, ...bf, payment_status: 'paid' };
+  if (range) Object.assign(match, within(range));
+  // No range: the last six months, as before.
+  else match.createdAt = { $gte: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000) };
+
+  if (trendGrain(range) === 'day') {
+    return Order.aggregate([
+      { $match: match },
+      { $group: {
+        _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+        revenue: { $sum: '$total' }, orders: { $sum: 1 },
+      } },
+      { $sort: { _id: 1 } },
+      // The axis reads this key whatever it holds; a day is "13 Aug".
+      { $project: { month: { $concat: [{ $substr: ['$_id', 8, 2] }, ' ', { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], { $toInt: { $substr: ['$_id', 5, 2] } }] }] }, revenue: 1, orders: 1 } },
+    ]);
+  }
+
+  return Order.aggregate([
+    { $match: match },
+    { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
+    { $project: { month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
+  ]);
+}
+
 const getDashboard = async (req, res) => {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -11,29 +82,28 @@ const getDashboard = async (req, res) => {
   // without branch_id (Customer, Lead, Attendance, LeaveRequest, PayrollRun,
   // Supplier) stay tenant-scoped.
   const bf = req.branchFilter || {};
+  // What the caller asked to see. Null means everything, as before.
+  const range = readRange(req.query);
+  const period = within(range);
 
   // ── SALES STAFF ──────────────────────────────────────────────────────────────────
   if (role === 'sales_staff') {
     const [todayOrders, monthRevenue, activeLeads, recentOrders, topProducts, monthlySales] = await Promise.all([
-      Order.countDocuments({ tenant_id: tid, ...bf, createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } }),
-      Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+      Order.countDocuments({ tenant_id: tid, ...bf, ...(range ? period : { createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } }) }),
+      Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid', ...(range ? period : { createdAt: { $gte: monthStart } }) } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
       Lead.countDocuments({ tenant_id: tid, ...bf, stage: { $nin: ['won','lost'] } }),
-      Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(8).select('order_number customer_name total status payment_status createdAt'),
+      Order.find({ tenant_id: tid, ...bf, ...period }).sort({ createdAt: -1 }).limit(8).select('order_number customer_name total status payment_status createdAt'),
       Order.aggregate([
-        { $match: { tenant_id: tid, ...bf, payment_status: 'paid' } },
+        { $match: { tenant_id: tid, ...bf, payment_status: 'paid', ...period } },
         { $unwind: '$items' },
         { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
         { $sort: { revenue: -1 } }, { $limit: 5 },
       ]),
-      Order.aggregate([
-        { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6*30*24*60*60*1000) } } },
-        { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
-        { $sort: { '_id.year': 1, '_id.month': 1 } },
-        { $project: { month: { $arrayElemAt: [['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
-      ]),
+      salesTrend({ tid, bf, range }),
     ]);
     return res.json({ success: true, data: {
       role: 'sales_staff',
+      range: range ? { from: range.from, to: range.to, grain: trendGrain(range) } : null,
       kpis: { today_orders: todayOrders, month_revenue: monthRevenue[0]?.total || 0, active_leads: activeLeads },
       recent_orders: recentOrders, top_products: topProducts, monthly_sales: monthlySales,
     }});
@@ -181,27 +251,26 @@ const getDashboard = async (req, res) => {
 
   // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER ────────────────────────────────
   const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales, recentLeave, hrSummary, monthPayrollAgg] = await Promise.all([
-    Order.countDocuments({ tenant_id: tid, ...bf, payment_status: 'paid' }),
-    Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid' } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+    // Anything counted over time answers to the chosen window…
+    Order.countDocuments({ tenant_id: tid, ...bf, payment_status: 'paid', ...period }),
+    Order.aggregate([{ $match: { tenant_id: tid, ...bf, payment_status: 'paid', ...period } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
+    // …and anything that is a standing count — what is on the shelf, who is on
+    // the books — is as it stands now, whatever window is chosen. Asking how
+    // many products existed during March is a different question.
     Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
     Product.countDocuments({ tenant_id: tid, ...bf, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
     Customer.countDocuments({ tenant_id: tid, ...bf }),
     Lead.countDocuments({ tenant_id: tid, ...bf, stage: { $nin: ['won', 'lost'] } }),
     Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
-    Expense.aggregate([{ $match: { tenant_id: tid, ...bf, expense_date: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
-    Order.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(5).select('order_number customer_name total status payment_status createdAt'),
+    Expense.aggregate([{ $match: { tenant_id: tid, ...bf, ...(range ? within(range, 'expense_date') : { expense_date: { $gte: monthStart } }) } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+    Order.find({ tenant_id: tid, ...bf, ...period }).sort({ createdAt: -1 }).limit(5).select('order_number customer_name total status payment_status createdAt'),
     Order.aggregate([
-      { $match: { tenant_id: tid, ...bf, payment_status: 'paid' } },
+      { $match: { tenant_id: tid, ...bf, payment_status: 'paid', ...period } },
       { $unwind: '$items' },
       { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
       { $sort: { revenue: -1 } }, { $limit: 5 },
     ]),
-    Order.aggregate([
-      { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000) } } },
-      { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-      { $project: { month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, revenue: 1, orders: 1 } },
-    ]),
+    salesTrend({ tid, bf, range }),
     // HR module is only accessible to business_owner/hr_manager, so only fetch/send
     // this data for business_owner — branch_manager/super_admin skip it.
     role === 'business_owner'
@@ -217,6 +286,7 @@ const getDashboard = async (req, res) => {
 
   res.json({ success: true, data: {
     role: 'admin',
+    range: range ? { from: range.from, to: range.to, grain: trendGrain(range) } : null,
     kpis: {
       total_orders: orders, total_revenue: revenue[0]?.total || 0,
       total_products: products, low_stock_items: lowStock,
