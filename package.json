@@ -10,7 +10,8 @@
     "db:migrate": "node src/config/migrate.js",
     "db:backfill-branches": "node src/config/backfillBranches.js",
     "db:fix-orphans": "node src/config/fixOrphanedHr.js",
-    "db:migrate-service-requests": "node src/config/migrateServiceRequests.js"
+    "db:migrate-service-requests": "node src/config/migrateServiceRequests.js",
+    "db:fix-indexes": "node src/config/indexRepair.js"
   },
   "keywords": [],
   "author": "",

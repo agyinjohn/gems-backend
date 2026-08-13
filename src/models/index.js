@@ -11,6 +11,23 @@ const {
 } = require('../config/serviceTypes');
 const { Schema } = mongoose;
 
+/**
+ * Unique, but only among the rows that actually carry a value.
+ *
+ * `sparse` looks like it does this and does not: it skips a document only when
+ * the field is *missing*, so a field defaulted to null — or set to null on
+ * purpose, which is how a service says it has no SKU — is indexed like any
+ * other value, and the second null collides with the first. On a compound
+ * sparse index it is worse still, since a document is indexed when *any* of the
+ * fields is present, and tenant_id always is.
+ *
+ * A partial index says what was meant: index it when there is something there.
+ */
+const UNIQUE_WHEN_SET = (field) => ({
+  unique: true,
+  partialFilterExpression: { [field]: { $type: 'string' } },
+});
+
 // TENANT
 const tenantSchema = new Schema({
   business_name:           { type: String, required: true },
@@ -268,7 +285,7 @@ const productSchema = new Schema({
   is_active:           { type: Boolean, default: true },
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
-productSchema.index({ tenant_id: 1, sku: 1 }, { unique: true, sparse: true });
+productSchema.index({ tenant_id: 1, sku: 1 }, UNIQUE_WHEN_SET('sku'));
 productSchema.index({ tenant_id: 1, item_type: 1, is_active: 1 });
 
 // STOCK MOVEMENT
@@ -429,7 +446,7 @@ const orderSchema = new Schema({
   created_by:       { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 orderSchema.index({ tenant_id: 1, order_number: 1 }, { unique: true });
-orderSchema.index({ track_token: 1 }, { unique: true, sparse: true });
+orderSchema.index({ track_token: 1 }, UNIQUE_WHEN_SET('track_token'));
 
 // SUPPLIER
 const supplierSchema = new Schema({
@@ -946,7 +963,7 @@ const storageLocationSchema = new Schema({
   description: String,
   is_active:   { type: Boolean, default: true },
 }, { timestamps: true });
-storageLocationSchema.index({ tenant_id: 1, code: 1 }, { unique: true, sparse: true });
+storageLocationSchema.index({ tenant_id: 1, code: 1 }, UNIQUE_WHEN_SET('code'));
 
 // ASSET CATEGORY
 const assetCategorySchema = new Schema({
@@ -1396,8 +1413,7 @@ const projectSchema = new Schema({
   // Used to turn hours lost on site into days of extension claimed.
   working_hours_per_day: { type: Number, default: 8 },
   // Unguessable key for the read-only page a client is given. Minted only when
-  // somebody asks for the link, so a job nobody shares never carries one, and
-  // sparse so the unique index ignores the ones that don't.
+  // somebody asks for the link, so a job nobody shares never carries one.
   track_token:    { type: String, default: null },
   // Texting a client who never asked to be texted is a good way to lose one,
   // and every message spends the tenant's credits — so this stays off until
@@ -1420,7 +1436,7 @@ const projectSchema = new Schema({
 }, { timestamps: true });
 projectSchema.index({ tenant_id: 1, branch_id: 1, status: 1 });
 projectSchema.index({ tenant_id: 1, code: 1 }, { unique: true });
-projectSchema.index({ track_token: 1 }, { unique: true, sparse: true });
+projectSchema.index({ track_token: 1 }, UNIQUE_WHEN_SET('track_token'));
 
 // A stage of work. Weight is its share of the whole job, so overall progress
 // is the weighted average rather than a figure somebody felt like typing.
