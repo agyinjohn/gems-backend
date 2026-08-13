@@ -20,10 +20,17 @@ const audit = require('../utils/audit');
  * types the password they sign in with, Gmail refuses it, and without being
  * told why they conclude the feature is broken.
  *
+ * A step that names a page carries that address on its own, so it can be copied
+ * and pasted rather than picked letter by letter out of a sentence — which is
+ * how "myaccount.google.com/apppasswords" gets typed as "apppassword" and the
+ * whole thing gives up.
+ *
  * Menus move. Every entry says what to search for if the steps no longer match
- * what is on screen, and links to the provider's own page, which is the one
+ * what is on screen, and points at the provider's own page, which is the one
  * that is right.
  */
+const step = (text, url) => (url ? { text, url } : { text });
+
 const PRESETS = [
   {
     key: 'gmail',
@@ -36,11 +43,13 @@ const PRESETS = [
     note: 'Google refuses the password you sign in with. You need a 16-character app password.',
     help_url: 'https://myaccount.google.com/apppasswords',
     steps: [
-      'Turn on 2-Step Verification first, at myaccount.google.com/security. Google will not offer app passwords without it.',
-      'Go to myaccount.google.com/apppasswords and sign in again if asked.',
-      'Give it a name you will recognise later — GEMS — and choose Create.',
-      'Google shows a 16-character password once. Copy it and paste it below; the spaces do not matter.',
-      'Close the window. You will not be shown it again, but you can always create another.',
+      step('Turn on 2-Step Verification first. Google will not offer app passwords without it.',
+        'https://myaccount.google.com/signinoptions/twosv'),
+      step('Then open the app passwords page and sign in again if asked.',
+        'https://myaccount.google.com/apppasswords'),
+      step('Give it a name you will recognise later — GEMS — and choose Create.'),
+      step('Google shows a 16-character password once. Copy it and paste it below; the spaces do not matter.'),
+      step('Close the window. You will not be shown it again, but you can always create another.'),
     ],
     caveat: 'On a Workspace account the administrator can switch app passwords off for everyone. '
       + 'If the page says they are unavailable, that is who to ask.',
@@ -56,10 +65,12 @@ const PRESETS = [
     note: 'Needs an app password once two-step verification is on.',
     help_url: 'https://account.microsoft.com/security',
     steps: [
-      'Turn on two-step verification at account.microsoft.com/security.',
-      'On a personal Outlook or Hotmail account, open the Advanced security options and choose Create a new app password.',
-      'On a work or school Microsoft 365 account, go to mysignins.microsoft.com/security-info, choose Add sign-in method, then App password.',
-      'Copy the password it shows and paste it below.',
+      step('Turn on two-step verification for the account.', 'https://account.microsoft.com/security'),
+      step('On a personal Outlook or Hotmail account, open Advanced security options and choose '
+        + 'Create a new app password.', 'https://account.live.com/proofs/AppPassword'),
+      step('On a work or school Microsoft 365 account, use the security info page instead: '
+        + 'Add sign-in method, then App password.', 'https://mysignins.microsoft.com/security-info'),
+      step('Copy the password it shows and paste it below.'),
     ],
     caveat: 'Microsoft switches off SMTP sending for many business accounts by default. If the test '
       + 'fails with an authentication error even on a fresh app password, your IT administrator has to '
@@ -76,10 +87,10 @@ const PRESETS = [
     note: 'Zoho wants TLS on port 465, and an app password.',
     help_url: 'https://accounts.zoho.com',
     steps: [
-      'Sign in at accounts.zoho.com and open Security.',
-      'Find App Passwords and choose Generate New Password.',
-      'Name it GEMS, generate, and copy what it shows.',
-      'Paste it below. Leave the port at 465 with TLS on.',
+      step('Sign in to your Zoho account and open Security.', 'https://accounts.zoho.com'),
+      step('Find App Passwords and choose Generate New Password.'),
+      step('Name it GEMS, generate, and copy what it shows.'),
+      step('Paste it below. Leave the port at 465 with TLS on.'),
     ],
     caveat: 'If your account is on zoho.eu or another region, the server is smtp.zoho.eu rather than smtp.zoho.com.',
   },
@@ -92,10 +103,11 @@ const PRESETS = [
     username_hint: 'Your full address at your own domain',
     needs_app_password: false,
     note: 'Often what comes with a domain bought in Ghana. No app password — the mailbox password works.',
-    help_url: '',
+    help_url: 'https://app.titan.email',
     steps: [
-      'Use the same password you use to read this mailbox.',
-      'If you have forgotten it, reset it wherever you manage the mailbox — usually your domain or hosting provider.',
+      step('Use the same password you use to read this mailbox.'),
+      step('Forgotten it? Reset it where you read your mail, or wherever you manage the domain.',
+        'https://app.titan.email'),
     ],
     caveat: '',
   },
@@ -110,10 +122,11 @@ const PRESETS = [
     note: 'Replace the server with your own domain, as your host gave it to you.',
     help_url: '',
     steps: [
-      'Sign in to cPanel and open Email Accounts.',
-      'Find the address you want to send from. Use its own password — set a new one there if you do not know it.',
-      'Open Connect Devices on that account to see the exact outgoing server and port your host wants. '
-        + 'It is usually mail.yourdomain.com on 465.',
+      step('Sign in to cPanel — usually your own domain with :2083 on the end.'),
+      step('Open Email Accounts, find the address you want to send from, and use its own password. '
+        + 'Set a new one there if you do not know it.'),
+      step('Open Connect Devices on that account to see the exact outgoing server and port your host '
+        + 'wants. It is usually mail.yourdomain.com on 465.'),
     ],
     caveat: 'Some hosts block outgoing mail from other servers until you ask them to allow it. '
       + 'If the test times out, that is worth asking your host about.',
@@ -129,9 +142,10 @@ const PRESETS = [
     note: 'Any mailbox that can send by SMTP will work.',
     help_url: '',
     steps: [
-      'Search your provider\'s help for "SMTP settings" — they publish the server name and port.',
-      'Search it for "app password" too. If the mailbox has two-step verification, you almost certainly need one.',
-      'Port 587 with TLS off, or 465 with TLS on, covers nearly every provider.',
+      step('Search your provider\'s help for "SMTP settings" — they publish the server name and port.'),
+      step('Search it for "app password" too. If the mailbox has two-step verification, you almost '
+        + 'certainly need one.'),
+      step('Port 587 with TLS off, or 465 with TLS on, covers nearly every provider.'),
     ],
     caveat: '',
   },
