@@ -247,7 +247,13 @@ const verify = async (req, res) => {
     return res.status(400).json({
       success: false,
       message: connection.reason,
-      data: { stage: 'sign_in', detail: connection.detail || '' },
+      // When a timeout was narrowed down to the wrong port, the settings that
+      // do work travel with the error so the page can offer to apply them.
+      data: {
+        stage: 'sign_in',
+        detail: connection.detail || '',
+        ...(connection.suggestion ? { suggestion: connection.suggestion } : {}),
+      },
     });
   }
 

@@ -225,15 +225,31 @@ function fromAddress(settings, businessName) {
   return name ? `"${name}" <${settings.from_email}>` : settings.from_email;
 }
 
-function buildTransport(settings) {
+/**
+ * Whether to speak TLS from the first byte, decided by the port rather than by
+ * the switch.
+ *
+ * The two are not independent, and getting them crossed does not fail cleanly —
+ * it hangs. Speaking TLS at 587, which expects a plain greeting first, leaves
+ * both ends waiting for the other until the timeout, and all the person setting
+ * it up sees is "connection timeout" on settings that look right.
+ *
+ * 465 is implicit TLS. 25, 587 and 2525 start plain and upgrade. Anything else
+ * is unusual enough to take the switch at its word.
+ */
+function secureForPort(port, flag) {
+  if (port === 465) return true;
+  if (port === 25 || port === 587 || port === 2525) return false;
+  return flag === true;
+}
+
+function buildTransport(settings, overrides = {}) {
   const smtp = settings.smtp || {};
-  const port = Number(smtp.port) || 587;
+  const port = Number(overrides.port ?? smtp.port) || 587;
   return nodemailer.createTransport({
     host: smtp.host,
     port,
-    // 465 is TLS from the first byte; 587 starts plain and upgrades, which is
-    // what nearly every mailbox provider expects.
-    secure: smtp.secure === true || port === 465,
+    secure: secureForPort(port, overrides.secure ?? smtp.secure),
     auth: { user: smtp.username, pass: decryptSecret(smtp.password) },
     connectionTimeout: 15000,
     greetingTimeout: 15000,
@@ -312,8 +328,10 @@ function friendlyError(err) {
       + 'If the mailbox has two-step verification, you need an app password rather than the everyday one.';
   }
   if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return 'That mail server could not be found — check the host name.';
-  if (/ECONNREFUSED|ETIMEDOUT|timed out|Greeting never received/i.test(text)) {
-    return 'The mail server did not answer. Check the port — 587 for most mailboxes, 465 when TLS is on.';
+  if (/ECONNREFUSED|ETIMEDOUT|timed out|Connection timeout|Greeting never received/i.test(text)) {
+    return 'Nothing answered on that port. Either the port is wrong — 587 for most mailboxes, '
+      + '465 with TLS — or the server GEMS runs on is not allowed to send mail out. '
+      + 'Hosting providers block that by default on their cheaper plans.';
   }
   if (/self.signed|certificate/i.test(text)) return 'The mail server’s security certificate could not be verified.';
   return text || 'The mail server refused the message.';
@@ -361,12 +379,63 @@ async function verifyConnection(settings) {
     await buildTransport(settings).verify();
     return { ok: true };
   } catch (err) {
-    return { ok: false, reason: friendlyError(err), detail: String(err?.message || err) };
+    const detail = String(err?.message || err);
+
+    // A timeout has two causes that look identical from here: the wrong port,
+    // or a host that will not let mail out at all. Trying the other port tells
+    // them apart in ten seconds, which beats a week of guessing.
+    if (/ETIMEDOUT|timed out|Connection timeout|Greeting never received/i.test(detail)) {
+      const alternative = await tryOtherPort(settings);
+      if (alternative) {
+        return {
+          ok: false,
+          reason: `Port ${Number(settings.smtp?.port) || 587} did not answer, but ${alternative.port} `
+            + `${alternative.secure ? 'with TLS on' : 'with TLS off'} did. Change the port to `
+            + `${alternative.port}, turn TLS ${alternative.secure ? 'on' : 'off'}, and save.`,
+          detail,
+          suggestion: alternative,
+        };
+      }
+      return {
+        ok: false,
+        reason: 'Neither 587 nor 465 answered. Either the mail server name is wrong, or the server '
+          + 'GEMS runs on is not allowed to send mail out — hosting providers block that by default '
+          + 'on their cheaper plans, and only they can unblock it.',
+        detail,
+      };
+    }
+
+    return { ok: false, reason: friendlyError(err), detail };
   }
+}
+
+/**
+ * The other way round, in case that is the one this mailbox wants.
+ *
+ * Only reached after a timeout, and only tries the pairing that was not just
+ * tried — there are two in practice, and a mailbox that answers on neither is
+ * not a settings problem.
+ */
+async function tryOtherPort(settings) {
+  const port = Number(settings.smtp?.port) || 587;
+  const candidates = port === 465
+    ? [{ port: 587, secure: false }]
+    : [{ port: 465, secure: true }];
+
+  for (const candidate of candidates) {
+    try {
+      await buildTransport(settings, candidate).verify();
+      return candidate;
+    } catch {
+      // Expected: this is the guess, not the answer.
+    }
+  }
+  return null;
 }
 
 module.exports = {
   DEFAULT_TEMPLATES,
+  secureForPort,
   TEMPLATE_VARIABLES,
   encryptSecret,
   decryptSecret,
