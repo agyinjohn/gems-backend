@@ -31,6 +31,70 @@ const audit = require('../utils/audit');
  */
 const step = (text, url) => (url ? { text, url } : { text });
 
+/**
+ * The two ways out of the building.
+ *
+ * SMTP is the right answer whenever it works: the business's own mailbox, no
+ * third party, nothing new to sign up for. It cannot work everywhere — most
+ * hosting providers block outgoing SMTP on their cheaper plans, Render's free
+ * plan among them, and nothing on this page can undo that from inside.
+ *
+ * An email service posts over HTTPS instead, which nobody blocks. It costs a
+ * sign-up and an API key, and in exchange it works on a host that would drop
+ * an SMTP connection on the floor.
+ */
+const ROUTES = [
+  {
+    key: 'smtp',
+    label: 'Your own mailbox',
+    tagline: 'Gmail, Outlook, or the address that came with your domain.',
+    good: 'Nothing new to sign up for, and mail comes straight from your own address.',
+    bad: 'Many hosting plans block it — if the test times out on both ports, this is why.',
+  },
+  {
+    key: 'brevo',
+    label: 'Brevo',
+    tagline: 'A free email service that works where SMTP is blocked.',
+    good: 'Sends over the web, so hosting restrictions do not apply. Free for a few hundred a day.',
+    bad: 'One more account to keep, and the sending address has to be confirmed once.',
+  },
+  {
+    key: 'resend',
+    label: 'Resend',
+    tagline: 'Same idea as Brevo. Better if you own the domain.',
+    good: 'Sends over the web. Straightforward once your domain is verified.',
+    bad: 'Wants a domain you control — a plain Gmail address will not do.',
+  },
+];
+
+/** How to get an API key, for the routes that need one. */
+const ROUTE_SETUP = {
+  brevo: {
+    label: 'Brevo',
+    steps: [
+      step('Create a free Brevo account, or sign in to the one you have.', 'https://www.brevo.com'),
+      step('Confirm the address you want to send from under Senders, Domains & Dedicated IPs. '
+        + 'Brevo will email that address a code.', 'https://app.brevo.com/senders/list'),
+      step('Open SMTP & API, choose the API keys tab, and generate a new key.',
+        'https://app.brevo.com/settings/keys/api'),
+      step('Copy the key and paste it below. Use the same address you just confirmed as the send-from address.'),
+    ],
+    caveat: 'The send-from address has to be one Brevo has confirmed, or it will refuse every message.',
+  },
+  resend: {
+    label: 'Resend',
+    steps: [
+      step('Create a free Resend account.', 'https://resend.com/signup'),
+      step('Add the domain you send from and put the records it gives you into your DNS.',
+        'https://resend.com/domains'),
+      step('Create an API key with permission to send.', 'https://resend.com/api-keys'),
+      step('Copy the key and paste it below.'),
+    ],
+    caveat: 'Until a domain is verified, Resend only lets you send to the address you signed up with — '
+      + 'fine for testing, not for customers.',
+  },
+};
+
 const PRESETS = [
   {
     key: 'gmail',
@@ -166,6 +230,7 @@ const getSettings = async (req, res) => {
       from_name: s.from_name || '',
       from_email: s.from_email || '',
       reply_to: s.reply_to || '',
+      provider: email.providerOf(s),
       smtp: {
         host: s.smtp?.host || '',
         port: s.smtp?.port || 587,
@@ -174,10 +239,14 @@ const getSettings = async (req, res) => {
         // Never the password itself — only whether there is one.
         password_set: !!s.smtp?.password,
       },
+      // Same rule for the API key: whether, never what.
+      api_key_set: !!s.api_key,
       ...email.readiness(s),
       last_error: s.last_error || '',
       sends: sent,
       failures: failed,
+      routes: ROUTES,
+      route_setup: ROUTE_SETUP,
       presets: PRESETS,
       // What the recipient will see in the From column.
       preview_from: s.from_email ? email.fromAddress(s, tenant?.business_name) : '',
@@ -186,11 +255,20 @@ const getSettings = async (req, res) => {
 };
 
 const updateSettings = async (req, res) => {
-  const { enabled, from_name, from_email, reply_to, smtp = {} } = req.body;
+  const { enabled, from_name, from_email, reply_to, provider, api_key, smtp = {} } = req.body;
   const update = {};
 
   if (enabled !== undefined) update['email_settings.enabled'] = !!enabled;
   if (from_name !== undefined) update['email_settings.from_name'] = String(from_name).trim();
+
+  if (provider !== undefined) {
+    if (!ROUTES.some((r) => r.key === provider)) {
+      return res.status(400).json({ success: false, message: 'That is not a way of sending email.' });
+    }
+    update['email_settings.provider'] = provider;
+  }
+  // Blank means "keep the key you have", exactly as the mailbox password does.
+  if (api_key) update['email_settings.api_key'] = email.encryptSecret(String(api_key).trim());
 
   for (const [field, value] of [['from_email', from_email], ['reply_to', reply_to]]) {
     if (value === undefined) continue;
@@ -217,7 +295,10 @@ const updateSettings = async (req, res) => {
 
   // Anything changed here might have broken it, so the last verification and
   // the last error both stop applying.
-  if (Object.keys(update).some((k) => k.startsWith('email_settings.smtp') || k === 'email_settings.from_email')) {
+  if (Object.keys(update).some((k) => k.startsWith('email_settings.smtp')
+    || k === 'email_settings.from_email'
+    || k === 'email_settings.provider'
+    || k === 'email_settings.api_key')) {
     update['email_settings.verified_at'] = null;
     update['email_settings.last_error'] = '';
   }

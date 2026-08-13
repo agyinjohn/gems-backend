@@ -201,6 +201,58 @@ async function resolveTemplate(tenantId, key) {
 const looksLikeEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 
 /**
+ * A JSON round trip over HTTPS.
+ *
+ * Hand-rolled rather than pulled in, exactly as smsService does for mNotify:
+ * one POST and one GET is not worth a dependency, and this way the whole
+ * request is visible at the point somebody has to debug it.
+ */
+function httpJson(url, { method = 'POST', headers = {}, body } = {}) {
+  const https = require('https');
+  const target = new URL(url);
+  const payload = body === undefined ? null : JSON.stringify(body);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: target.hostname,
+      path: target.pathname + target.search,
+      method,
+      timeout: 20000,
+      headers: {
+        Accept: 'application/json',
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+        ...headers,
+      },
+    }, (res) => {
+      let raw = '';
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = raw ? JSON.parse(raw) : null; } catch { /* some replies are empty */ }
+        resolve({ status: res.statusCode, body: parsed, raw });
+      });
+    });
+
+    req.on('timeout', () => { req.destroy(new Error('The email service did not answer in time.')); });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/** What the provider said went wrong, dug out of whatever shape it replied in. */
+const providerMessage = (res, fallback) => res.body?.message
+  || res.body?.error?.message
+  || res.body?.error
+  || (res.raw ? String(res.raw).slice(0, 300) : '')
+  || fallback;
+
+/** Which way out this tenant has chosen. */
+const providerOf = (settings) => (settings?.provider === 'brevo' || settings?.provider === 'resend'
+  ? settings.provider
+  : 'smtp');
+
+/**
  * Whether this tenant could send an email right now, and what is missing if not.
  * Used by the settings page, so "not set up" is a sentence rather than a guess.
  */
@@ -208,12 +260,19 @@ function readiness(settings) {
   const s = settings || {};
   const missing = [];
   if (!looksLikeEmail(s.from_email)) missing.push('the address email is sent from');
-  if (!s.smtp?.host) missing.push('the mail server');
-  if (!s.smtp?.username) missing.push('the mailbox username');
-  if (!s.smtp?.password) missing.push('the mailbox password');
+
+  if (providerOf(s) === 'smtp') {
+    if (!s.smtp?.host) missing.push('the mail server');
+    if (!s.smtp?.username) missing.push('the mailbox username');
+    if (!s.smtp?.password) missing.push('the mailbox password');
+  } else if (!s.api_key) {
+    missing.push('the API key');
+  }
+
   return {
     configured: missing.length === 0,
     enabled: s.enabled !== false,
+    provider: providerOf(s),
     missing,
     verified_at: s.verified_at || null,
   };
@@ -257,6 +316,85 @@ function buildTransport(settings, overrides = {}) {
   });
 }
 
+/* ── The three ways out ────────────────────────────────────────────────────
+ *
+ * Same shape from each: { sent, provider, provider_ref } or { sent: false,
+ * reason }. Never report a send you are not sure of — the caller writes down
+ * what happened and the business reads it later.
+ */
+
+const DISPATCH = {
+  async smtp({ settings, businessName, to, subject, body }) {
+    const info = await buildTransport(settings).sendMail({
+      from: fromAddress(settings, businessName),
+      to,
+      ...(settings.reply_to ? { replyTo: settings.reply_to } : {}),
+      subject: subject || '',
+      text: body || '',
+    });
+    return { sent: true, provider: 'smtp', provider_ref: info?.messageId || null };
+  },
+
+  async brevo({ settings, businessName, to, subject, body }) {
+    const res = await httpJson('https://api.brevo.com/v3/smtp/email', {
+      headers: { 'api-key': decryptSecret(settings.api_key) },
+      body: {
+        sender: { name: settings.from_name || businessName || undefined, email: settings.from_email },
+        to: [{ email: to }],
+        ...(settings.reply_to ? { replyTo: { email: settings.reply_to } } : {}),
+        subject: subject || '',
+        textContent: body || '',
+      },
+    });
+    if (res.status >= 200 && res.status < 300) {
+      return { sent: true, provider: 'brevo', provider_ref: res.body?.messageId || null };
+    }
+    return { sent: false, provider: 'brevo', reason: providerMessage(res, 'Brevo refused the message.') };
+  },
+
+  async resend({ settings, businessName, to, subject, body }) {
+    const res = await httpJson('https://api.resend.com/emails', {
+      headers: { Authorization: `Bearer ${decryptSecret(settings.api_key)}` },
+      body: {
+        from: fromAddress(settings, businessName),
+        to: [to],
+        ...(settings.reply_to ? { reply_to: settings.reply_to } : {}),
+        subject: subject || '',
+        text: body || '',
+      },
+    });
+    if (res.status >= 200 && res.status < 300) {
+      return { sent: true, provider: 'resend', provider_ref: res.body?.id || null };
+    }
+    return { sent: false, provider: 'resend', reason: providerMessage(res, 'Resend refused the message.') };
+  },
+};
+
+/** Prove the key or the mailbox, without sending anything. */
+const CHECK = {
+  async smtp(settings) {
+    await buildTransport(settings).verify();
+  },
+  async brevo(settings) {
+    const res = await httpJson('https://api.brevo.com/v3/account', {
+      method: 'GET',
+      headers: { 'api-key': decryptSecret(settings.api_key) },
+    });
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(providerMessage(res, 'Brevo did not accept that API key.'));
+    }
+  },
+  async resend(settings) {
+    const res = await httpJson('https://api.resend.com/domains', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${decryptSecret(settings.api_key)}` },
+    });
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(providerMessage(res, 'Resend did not accept that API key.'));
+    }
+  },
+};
+
 /**
  * Send one email as the tenant.
  *
@@ -295,23 +433,32 @@ async function sendEmail({ tenantId, to, subject, body, templateKey, source, use
     return { sent: false, channel: 'email', reason: 'not_configured', missing: state.missing };
   }
 
+  const provider = providerOf(conf);
+
   try {
-    const info = await buildTransport(conf).sendMail({
-      from: fromAddress(conf, doc?.business_name),
+    const result = await DISPATCH[provider]({
+      settings: conf,
+      businessName: doc?.business_name,
       to: recipient,
-      ...(conf.reply_to ? { replyTo: conf.reply_to } : {}),
-      subject: subject || '',
-      text: body || '',
+      subject,
+      body,
     });
-    await log('sent', { provider: 'smtp', provider_ref: info?.messageId || null });
+
+    if (!result.sent) {
+      await log('failed', { provider, error: result.reason });
+      await Tenant.findByIdAndUpdate(tenantId, { 'email_settings.last_error': result.reason }).catch(() => {});
+      return { sent: false, channel: 'email', reason: result.reason };
+    }
+
+    await log('sent', { provider, provider_ref: result.provider_ref });
     await Tenant.findByIdAndUpdate(tenantId, {
       'email_settings.verified_at': new Date(),
       'email_settings.last_error': '',
     }).catch(() => {});
-    return { sent: true, channel: 'email', provider_ref: info?.messageId || null };
+    return { sent: true, channel: 'email', provider_ref: result.provider_ref };
   } catch (err) {
     const reason = friendlyError(err);
-    await log('failed', { provider: 'smtp', error: reason });
+    await log('failed', { provider, error: reason });
     await Tenant.findByIdAndUpdate(tenantId, { 'email_settings.last_error': reason }).catch(() => {});
     return { sent: false, channel: 'email', reason };
   }
@@ -375,11 +522,19 @@ async function verifyConnection(settings) {
   if (!state.configured) {
     return { ok: false, reason: `Still missing ${state.missing.join(', ')}.`, detail: '' };
   }
+
+  const provider = providerOf(settings);
   try {
-    await buildTransport(settings).verify();
+    await CHECK[provider](settings);
     return { ok: true };
   } catch (err) {
     const detail = String(err?.message || err);
+
+    // Ports are an SMTP problem. A key that is refused over HTTPS is refused,
+    // and there is no second port to try.
+    if (provider !== 'smtp') {
+      return { ok: false, reason: detail, detail };
+    }
 
     // A timeout has two causes that look identical from here: the wrong port,
     // or a host that will not let mail out at all. Trying the other port tells
@@ -436,6 +591,7 @@ async function tryOtherPort(settings) {
 module.exports = {
   DEFAULT_TEMPLATES,
   secureForPort,
+  providerOf,
   TEMPLATE_VARIABLES,
   encryptSecret,
   decryptSecret,

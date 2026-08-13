@@ -135,6 +135,14 @@ const tenantSchema = new Schema({
     from_name:  { type: String, default: '' },
     from_email: { type: String, default: '', lowercase: true, trim: true },
     reply_to:   { type: String, default: '', lowercase: true, trim: true },
+    // How it leaves the building. SMTP is the mailbox the business already has,
+    // and is the right answer whenever it works. It cannot work everywhere:
+    // most hosting providers block outgoing SMTP on their cheaper plans, and no
+    // setting on this page can undo that. The others post over HTTPS, which
+    // nobody blocks, at the cost of signing up for one more thing.
+    provider:   { type: String, enum: ['smtp', 'brevo', 'resend'], default: 'smtp' },
+    // For the HTTPS providers. Encrypted at rest, like the mailbox password.
+    api_key:    { type: String, default: '' },
     smtp: {
       host:     { type: String, default: '', trim: true },
       port:     { type: Number, default: 587 },
