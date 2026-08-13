@@ -5,6 +5,7 @@ const { sendOrderConfirmation } = require('./notificationService');
 const { verifyPaystackTransaction } = require('./paymentService');
 const { clearCustomerDisplayByOrderId, setPaidDisplayFlash } = require('./posDisplayService');
 const { resolveUnitPrice } = require('./pricingService');
+const { stockLines, shortageFor } = require('./stockService');
 
 async function getOpenShift(tenantId, userId, branchId) {
   const filter = { tenant_id: tenantId, opened_by: userId, status: 'open' };
@@ -72,15 +73,19 @@ async function completePosSale({
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, tenant_id: tenantId, is_active: true });
     if (!p) throw Object.assign(new Error(`Product not found.`), { status: 400 });
-    const isService = p.item_type === 'service';
-    if (!isService) {
-      if (fromReservation) {
-        if ((p.reserved_qty || 0) < item.quantity) {
-          throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
+    // A service has nothing to run out of, and a solution runs out only when
+    // one of its parts does — both answered by asking what the line really
+    // draws down rather than what the row itself says it has.
+    if (fromReservation) {
+      // Already set aside when the sale was started; check it is still held.
+      for (const line of await stockLines({ tenantId, product: p, quantity: item.quantity })) {
+        if ((line.product.reserved_qty || 0) < line.quantity) {
+          throw Object.assign(new Error(`Insufficient stock for ${line.name}.`), { status: 400 });
         }
-      } else if (p.stock_qty - (p.reserved_qty || 0) < item.quantity) {
-        throw Object.assign(new Error(`Insufficient stock for ${p.name}.`), { status: 400 });
       }
+    } else {
+      const shortage = await shortageFor({ tenantId, product: p, quantity: item.quantity });
+      if (shortage) throw Object.assign(new Error(shortage), { status: 400 });
     }
     // Open-price items are quoted at the till; everything else is priced from
     // the catalog and any price sent by the client is ignored.
@@ -117,37 +122,34 @@ async function completePosSale({
   });
 
   for (const item of enrichedItems) {
-    if (item.item_type === 'service') continue;
-    if (item.item_type === 'bundle') {
-      const bundle = await Product.findById(item.product_id).lean();
-      if (bundle?.bundle_items?.length) {
-        for (const comp of bundle.bundle_items) {
-          const needed = comp.quantity * item.quantity;
-          await Product.findOneAndUpdate({ _id: comp.product_id, tenant_id: tenantId }, { $inc: { stock_qty: -needed } });
-          await StockMovement.create({ tenant_id: tenantId, product_id: comp.product_id, type: 'sale', quantity: -needed, reference: orderNumber, notes: `Bundle: ${bundle.name}`, created_by: userId });
-        }
+    const isBundle = item.item_type === 'bundle';
+    const sold = await Product.findOne({ _id: item.product_id, tenant_id: tenantId });
+    if (!sold) continue;
+
+    // A service draws down nothing, so this comes back empty for one; a
+    // solution comes back as its stocked parts.
+    for (const line of await stockLines({ tenantId, product: sold, quantity: item.quantity })) {
+      const stockUpdate = fromReservation
+        ? { $inc: { stock_qty: -line.quantity, reserved_qty: -line.quantity } }
+        : { $inc: { stock_qty: -line.quantity } };
+      const updated = await Product.findOneAndUpdate(
+        { _id: line.product_id, tenant_id: tenantId },
+        stockUpdate,
+        { new: true },
+      );
+      if (updated && updated.reserved_qty < 0) {
+        await Product.findByIdAndUpdate(updated._id, { reserved_qty: 0 });
       }
-      continue;
+      await StockMovement.create({
+        tenant_id: tenantId,
+        product_id: line.product_id,
+        type: 'sale',
+        quantity: -line.quantity,
+        reference: orderNumber,
+        ...(isBundle ? { notes: `Bundle: ${sold.name}` } : {}),
+        created_by: userId,
+      });
     }
-    const stockUpdate = fromReservation
-      ? { $inc: { stock_qty: -item.quantity, reserved_qty: -item.quantity } }
-      : { $inc: { stock_qty: -item.quantity } };
-    const updated = await Product.findOneAndUpdate(
-      { _id: item.product_id, tenant_id: tenantId },
-      stockUpdate,
-      { new: true },
-    );
-    if (updated && updated.reserved_qty < 0) {
-      await Product.findByIdAndUpdate(updated._id, { reserved_qty: 0 });
-    }
-    await StockMovement.create({
-      tenant_id: tenantId,
-      product_id: item.product_id,
-      type: 'sale',
-      quantity: -item.quantity,
-      reference: orderNumber,
-      created_by: userId,
-    });
   }
 
   await logPayment({

@@ -9,42 +9,30 @@ const { isFeatureEnabled } = require('../services/tenantService');
 const { getActiveSalesTaxRate, calcTaxAmount } = require('../services/taxService');
 const splitService = require('../services/splitService');
 const { resolveUnitPrice } = require('../services/pricingService');
+const { stockLines, shortageFor } = require('../services/stockService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-// Deduct stock for a sold item. For bundles, deducts each component product.
+// Deduct stock for a sold item — nothing for a service, and the stocked parts
+// of a solution rather than the solution itself.
 async function deductItemStock({ item, tenantId, branchId, orderNumber, createdBy }) {
-  if (item.item_type === 'service') return;
-  if (item.item_type === 'bundle') {
-    const bundle = await Product.findById(item.product_id).lean();
-    if (!bundle?.bundle_items?.length) return;
-    for (const comp of bundle.bundle_items) {
-      const needed = comp.quantity * item.quantity;
-      await Product.findByIdAndUpdate(comp.product_id, { $inc: { stock_qty: -needed } });
-      await StockMovement.create({
-        tenant_id:  tenantId,
-        branch_id:  branchId,
-        product_id: comp.product_id,
-        type:       'sale',
-        quantity:   -needed,
-        reference:  orderNumber,
-        notes:      `Bundle: ${bundle.name}`,
-        created_by: createdBy,
-      });
-    }
-    return;
+  const sold = await Product.findById(item.product_id);
+  if (!sold) return;
+  const isBundle = sold.item_type === 'bundle';
+
+  for (const line of await stockLines({ tenantId, product: sold, quantity: item.quantity })) {
+    await Product.findByIdAndUpdate(line.product_id, { $inc: { stock_qty: -line.quantity } });
+    await StockMovement.create({
+      tenant_id:  tenantId,
+      branch_id:  branchId,
+      product_id: line.product_id,
+      type:       'sale',
+      quantity:   -line.quantity,
+      reference:  orderNumber,
+      ...(isBundle ? { notes: `Bundle: ${sold.name}` } : {}),
+      created_by: createdBy,
+    });
   }
-  // physical product
-  await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
-  await StockMovement.create({
-    tenant_id:  tenantId,
-    branch_id:  branchId,
-    product_id: item.product_id,
-    type:       'sale',
-    quantity:   -item.quantity,
-    reference:  orderNumber,
-    created_by: createdBy,
-  });
 }
 
 const getOrders = async (req, res) => {
@@ -77,21 +65,9 @@ const createOrder = async (req, res) => {
     if (!p) throw { status: 400, message: `Product ${item.product_id} not found.` };
 
     const isService = p.item_type === 'service';
-    const isBundle  = p.item_type === 'bundle';
 
-    // Check stock: for bundles, check each component
-    if (isBundle) {
-      if (p.bundle_items?.length) {
-        for (const comp of p.bundle_items) {
-          const cp = await Product.findById(comp.product_id);
-          if (cp && cp.stock_qty < comp.quantity * item.quantity) {
-            throw { status: 400, message: `Insufficient stock for bundle component "${cp.name}".` };
-          }
-        }
-      }
-    } else if (!isService && p.stock_qty < item.quantity) {
-      throw { status: 400, message: `Insufficient stock for ${p.name}.` };
-    }
+    const shortage = await shortageFor({ tenantId: req.tenant_id, product: p, quantity: item.quantity });
+    if (shortage) throw { status: 400, message: shortage };
 
     if (isService) hasServiceItems = true;
     else hasPhysicalItems = true;
@@ -304,19 +280,8 @@ const initiateCheckout = async (req, res) => {
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, is_active: true });
     if (!p) throw { status: 400, message: `Product ${item.product_id} not found.` };
-    // Check stock: bundles check each component, products check directly
-    if (p.item_type === 'bundle') {
-      if (p.bundle_items?.length) {
-        for (const comp of p.bundle_items) {
-          const cp = await Product.findById(comp.product_id);
-          if (cp && cp.stock_qty < comp.quantity * item.quantity) {
-            throw { status: 400, message: `Insufficient stock for bundle component "${cp.name}".` };
-          }
-        }
-      }
-    } else if (p.item_type !== 'service' && p.stock_qty < item.quantity) {
-      throw { status: 400, message: `Insufficient stock for ${p.name}.` };
-    }
+    const shortage = await shortageFor({ tenantId: p.tenant_id, product: p, quantity: item.quantity });
+    if (shortage) throw { status: 400, message: shortage };
     if (!resolvedTenantId) resolvedTenantId = p.tenant_id;
     const bId = String(item.branch_id || p.branch_id || 'default');
     if (!branchGroups[bId]) branchGroups[bId] = { branch_id: item.branch_id || p.branch_id || null, branch_name: item.branch_name || 'Main Branch', items: [] };

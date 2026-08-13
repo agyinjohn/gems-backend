@@ -27,8 +27,8 @@ const splitService = require('../services/splitService');
 const {
   reserveStockForItems,
   releaseStockForItems,
-  availableQty,
 } = require('../services/posReservationService');
+const { shortageFor } = require('../services/stockService');
 
 const openShift = async (req, res) => {
   const branchId = await resolveWriteBranchId(req);
@@ -123,7 +123,8 @@ const initPaystackPayment = async (req, res) => {
     const { Product } = require('../models');
     const p = await Product.findOne({ _id: item.product_id, tenant_id: req.tenant_id, is_active: true });
     if (!p) return res.status(400).json({ success: false, message: 'Product not found.' });
-    if (availableQty(p) < item.quantity) return res.status(400).json({ success: false, message: `Insufficient stock for ${p.name}.` });
+    const shortage = await shortageFor({ tenantId: req.tenant_id, product: p, quantity: item.quantity });
+    if (shortage) return res.status(400).json({ success: false, message: shortage });
     const total = p.price * item.quantity;
     subtotal += total;
     enrichedItems.push({ product_id: p._id, product_name: p.name, quantity: item.quantity, unit_price: p.price, total });
