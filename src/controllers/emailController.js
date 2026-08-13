@@ -11,13 +11,130 @@ const audit = require('../utils/audit');
 
 /* ── Settings ─────────────────────────────────────────────────────────────── */
 
-/** Mailboxes a Ghanaian business is actually likely to have. */
+/**
+ * Mailboxes a Ghanaian business is actually likely to have, and how to get a
+ * password out of each one.
+ *
+ * The instructions are here rather than in a help page nobody opens, because
+ * "app password" is the single thing that stops this working. A business owner
+ * types the password they sign in with, Gmail refuses it, and without being
+ * told why they conclude the feature is broken.
+ *
+ * Menus move. Every entry says what to search for if the steps no longer match
+ * what is on screen, and links to the provider's own page, which is the one
+ * that is right.
+ */
 const PRESETS = [
-  { key: 'gmail',     label: 'Gmail / Google Workspace', host: 'smtp.gmail.com',        port: 587, secure: false, note: 'Needs an app password, not your everyday one — Google blocks the everyday one.' },
-  { key: 'outlook',   label: 'Outlook / Microsoft 365',  host: 'smtp.office365.com',    port: 587, secure: false, note: 'Use the full address as the username.' },
-  { key: 'zoho',      label: 'Zoho Mail',                host: 'smtp.zoho.com',         port: 465, secure: true,  note: 'Zoho wants TLS on port 465.' },
-  { key: 'titan',     label: 'Titan (domain mail)',      host: 'smtp.titan.email',      port: 465, secure: true,  note: 'Often what comes with a domain bought in Ghana.' },
-  { key: 'cpanel',    label: 'cPanel / your web host',   host: 'mail.yourdomain.com',   port: 465, secure: true,  note: 'Replace the host with your own domain, as your host gave it.' },
+  {
+    key: 'gmail',
+    label: 'Gmail / Google Workspace',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    username_hint: 'Your full Gmail address, e.g. orders@yourbusiness.com',
+    needs_app_password: true,
+    note: 'Google refuses the password you sign in with. You need a 16-character app password.',
+    help_url: 'https://myaccount.google.com/apppasswords',
+    steps: [
+      'Turn on 2-Step Verification first, at myaccount.google.com/security. Google will not offer app passwords without it.',
+      'Go to myaccount.google.com/apppasswords and sign in again if asked.',
+      'Give it a name you will recognise later — GEMS — and choose Create.',
+      'Google shows a 16-character password once. Copy it and paste it below; the spaces do not matter.',
+      'Close the window. You will not be shown it again, but you can always create another.',
+    ],
+    caveat: 'On a Workspace account the administrator can switch app passwords off for everyone. '
+      + 'If the page says they are unavailable, that is who to ask.',
+  },
+  {
+    key: 'outlook',
+    label: 'Outlook / Microsoft 365',
+    host: 'smtp.office365.com',
+    port: 587,
+    secure: false,
+    username_hint: 'The full address you sign in with',
+    needs_app_password: true,
+    note: 'Needs an app password once two-step verification is on.',
+    help_url: 'https://account.microsoft.com/security',
+    steps: [
+      'Turn on two-step verification at account.microsoft.com/security.',
+      'On a personal Outlook or Hotmail account, open the Advanced security options and choose Create a new app password.',
+      'On a work or school Microsoft 365 account, go to mysignins.microsoft.com/security-info, choose Add sign-in method, then App password.',
+      'Copy the password it shows and paste it below.',
+    ],
+    caveat: 'Microsoft switches off SMTP sending for many business accounts by default. If the test '
+      + 'fails with an authentication error even on a fresh app password, your IT administrator has to '
+      + 'enable SMTP AUTH for this mailbox.',
+  },
+  {
+    key: 'zoho',
+    label: 'Zoho Mail',
+    host: 'smtp.zoho.com',
+    port: 465,
+    secure: true,
+    username_hint: 'Your full Zoho address',
+    needs_app_password: true,
+    note: 'Zoho wants TLS on port 465, and an app password.',
+    help_url: 'https://accounts.zoho.com',
+    steps: [
+      'Sign in at accounts.zoho.com and open Security.',
+      'Find App Passwords and choose Generate New Password.',
+      'Name it GEMS, generate, and copy what it shows.',
+      'Paste it below. Leave the port at 465 with TLS on.',
+    ],
+    caveat: 'If your account is on zoho.eu or another region, the server is smtp.zoho.eu rather than smtp.zoho.com.',
+  },
+  {
+    key: 'titan',
+    label: 'Titan (domain mail)',
+    host: 'smtp.titan.email',
+    port: 465,
+    secure: true,
+    username_hint: 'Your full address at your own domain',
+    needs_app_password: false,
+    note: 'Often what comes with a domain bought in Ghana. No app password — the mailbox password works.',
+    help_url: '',
+    steps: [
+      'Use the same password you use to read this mailbox.',
+      'If you have forgotten it, reset it wherever you manage the mailbox — usually your domain or hosting provider.',
+    ],
+    caveat: '',
+  },
+  {
+    key: 'cpanel',
+    label: 'cPanel / your web host',
+    host: 'mail.yourdomain.com',
+    port: 465,
+    secure: true,
+    username_hint: 'The full address, e.g. info@yourbusiness.com',
+    needs_app_password: false,
+    note: 'Replace the server with your own domain, as your host gave it to you.',
+    help_url: '',
+    steps: [
+      'Sign in to cPanel and open Email Accounts.',
+      'Find the address you want to send from. Use its own password — set a new one there if you do not know it.',
+      'Open Connect Devices on that account to see the exact outgoing server and port your host wants. '
+        + 'It is usually mail.yourdomain.com on 465.',
+    ],
+    caveat: 'Some hosts block outgoing mail from other servers until you ask them to allow it. '
+      + 'If the test times out, that is worth asking your host about.',
+  },
+  {
+    key: 'other',
+    label: 'Something else',
+    host: '',
+    port: 587,
+    secure: false,
+    username_hint: 'Usually the full email address',
+    needs_app_password: false,
+    note: 'Any mailbox that can send by SMTP will work.',
+    help_url: '',
+    steps: [
+      'Search your provider\'s help for "SMTP settings" — they publish the server name and port.',
+      'Search it for "app password" too. If the mailbox has two-step verification, you almost certainly need one.',
+      'Port 587 with TLS off, or 465 with TLS on, covers nearly every provider.',
+    ],
+    caveat: '',
+  },
 ];
 
 const getSettings = async (req, res) => {
