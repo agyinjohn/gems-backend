@@ -1,16 +1,17 @@
 /**
- * Notification service — email/SMS channels with provider stubs.
- * Wire SENDGRID_API_KEY, TWILIO_* etc. in production.
+ * Notification service — one event, whichever channels the tenant has set up.
+ *
+ * Both channels belong to the tenant rather than the platform: SMS spends their
+ * prepaid credits and goes out under their sender ID, email goes through their
+ * own mailbox. Neither ever throws — a customer not getting a message must not
+ * take down the order that triggered it.
  */
 
-async function sendViaEmail({ to, subject, body }) {
+async function sendViaEmail({ tenantId, to, subject, body, templateKey, source, userId }) {
   if (!to) return { sent: false, channel: 'email', reason: 'no_recipient' };
-  if (process.env.SENDGRID_API_KEY || process.env.SMTP_HOST) {
-    console.log('[Notification:email] Would send', { to, subject });
-    return { sent: true, channel: 'email', stub: !process.env.SENDGRID_API_KEY };
-  }
-  console.log('[Notification:email:stub]', { to, subject, body: body?.slice(0, 120) });
-  return { sent: false, channel: 'email', stub: true };
+  if (!tenantId) return { sent: false, channel: 'email', reason: 'no_tenant' };
+  const { sendEmail } = require('./emailService');
+  return sendEmail({ tenantId, to, subject, body, templateKey, source, userId });
 }
 
 /**
@@ -28,24 +29,24 @@ async function sendViaSms({ tenantId, to, body, templateKey, source }) {
 
 /** Notify a customer about an order, on whichever channels are available. */
 async function sendOrderNotification({ tenantId, order, key, customerEmail, customerPhone, channel = 'storefront' }) {
-  const { sendTemplated } = require('./smsService');
+  const { sendTemplated: smsTemplated } = require('./smsService');
+  const { sendTemplated: emailTemplated } = require('./emailService');
 
-  const subject = `Order ${key.replace('order_', '')} — ${order.order_number}`;
-  const emailBody = `Hi ${order.customer_name},\n\nYour order ${order.order_number} for GHS ${order.total} has been ${key.replace('order_', '')}.\n\nThank you!`;
+  // One set of variables, two channels, each with its own wording. The business
+  // edits both on the same page and either can be switched off on its own.
+  const vars = {
+    customer_name: order.customer_name,
+    order_number: order.order_number,
+    total: Number(order.total || 0).toFixed(2),
+    status: key.replace('order_', ''),
+  };
 
   const results = await Promise.all([
-    sendViaEmail({ to: customerEmail || order.customer_email, subject, body: emailBody }),
-    sendTemplated({
-      tenantId,
-      to: customerPhone || order.customer_phone,
-      key,
-      vars: {
-        customer_name: order.customer_name,
-        order_number: order.order_number,
-        total: Number(order.total || 0).toFixed(2),
-        status: key.replace('order_', ''),
-      },
-    }).then((r) => ({ ...r, channel: 'sms' })),
+    emailTemplated({ tenantId, to: customerEmail || order.customer_email, key, vars })
+      .catch((err) => ({ sent: false, channel: 'email', reason: err.message })),
+    smsTemplated({ tenantId, to: customerPhone || order.customer_phone, key, vars })
+      .then((r) => ({ ...r, channel: 'sms' }))
+      .catch((err) => ({ sent: false, channel: 'sms', reason: err.message })),
   ]);
 
   return {

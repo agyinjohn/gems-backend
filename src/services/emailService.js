@@ -1,0 +1,369 @@
+const crypto = require('crypto');
+const { Tenant, EmailTemplate, EmailMessage } = require('../models');
+
+/**
+ * Email — the tenant's own mailbox, their own wording, and a record of every
+ * attempt.
+ *
+ * Deliberately not the platform's mail server. A quote from Ama's Prints has to
+ * arrive from Ama's Prints: mail sent on somebody else's domain lands in spam,
+ * and a customer who hits reply must reach the business rather than us. So the
+ * business supplies the mailbox it already owns — a Gmail, a Workspace account,
+ * whatever came with the domain — and GEMS posts through it.
+ *
+ * Shaped like smsService on purpose: the same template keys, the same "return a
+ * result, never throw" contract, the same one-row-per-attempt log. The
+ * differences are the ones that are real — a subject line, no credits to spend,
+ * and a body that can be a paragraph because nobody is charged by the character.
+ */
+
+const nodemailer = require('nodemailer');
+
+/* ── Built-in templates ────────────────────────────────────────────────────
+ *
+ * Keys match smsService, so one event can reach a customer both ways and a
+ * business that wants only one channel just switches the other off. Only
+ * customised ones are stored, so new templates ship without a migration.
+ */
+const ORDER_VARIABLES = [
+  '{{customer_name}}', '{{order_number}}', '{{total}}', '{{business_name}}', '{{status}}',
+];
+const PROJECT_VARIABLES = [
+  '{{customer_name}}', '{{project_name}}', '{{project_code}}', '{{business_name}}',
+];
+
+const DEFAULT_TEMPLATES = {
+  order_confirmed: {
+    group: 'Orders',
+    label: 'Order confirmed',
+    description: 'Sent when a customer’s payment succeeds.',
+    variables: ORDER_VARIABLES,
+    subject: 'Your order {{order_number}} is confirmed',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Thank you — we have received your payment of GH₵ {{total}} and your order {{order_number}} is confirmed.\n\n'
+      + 'We will be in touch as soon as it is on its way.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  order_shipped: {
+    group: 'Orders',
+    label: 'Order shipped',
+    description: 'Sent when an order is marked shipped.',
+    variables: ORDER_VARIABLES,
+    subject: 'Your order {{order_number}} is on its way',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Your order {{order_number}} has left us and is on its way to you.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  order_delivered: {
+    group: 'Orders',
+    label: 'Order delivered',
+    description: 'Sent when an order is marked delivered.',
+    variables: ORDER_VARIABLES,
+    subject: 'Your order {{order_number}} has been delivered',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Your order {{order_number}} has been delivered. We hope everything is as you expected — '
+      + 'if anything is not, please reply to this email and we will put it right.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  order_cancelled: {
+    group: 'Orders',
+    label: 'Order cancelled',
+    description: 'Sent when an order is cancelled.',
+    variables: ORDER_VARIABLES,
+    subject: 'Your order {{order_number}} has been cancelled',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Your order {{order_number}} has been cancelled. If this is unexpected, please reply to this '
+      + 'email and we will look into it.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+
+  project_application_raised: {
+    group: 'Projects',
+    label: 'Application raised',
+    description: 'Sent when a progress application is raised on a project.',
+    variables: [...PROJECT_VARIABLES, '{{invoice_number}}', '{{amount}}', '{{due_date}}'],
+    subject: 'Application {{invoice_number}} — {{project_name}}',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Application {{invoice_number}} for GH₵ {{amount}} on {{project_name}} has been raised and is '
+      + 'due on {{due_date}}.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  project_payment_received: {
+    group: 'Projects',
+    label: 'Payment received',
+    description: 'Sent when a payment is recorded against a project invoice.',
+    variables: [...PROJECT_VARIABLES, '{{invoice_number}}', '{{amount}}', '{{balance}}'],
+    subject: 'We have received your payment — {{project_name}}',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Thank you. We have received GH₵ {{amount}} towards {{project_name}}. The balance outstanding '
+      + 'on {{invoice_number}} is GH₵ {{balance}}.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  project_milestone_completed: {
+    group: 'Projects',
+    label: 'Stage completed',
+    description: 'Sent when a milestone on a project is marked complete.',
+    variables: [...PROJECT_VARIABLES, '{{milestone_name}}', '{{progress}}'],
+    subject: '{{milestone_name}} is complete — {{project_name}}',
+    body: 'Hi {{customer_name}},\n\n'
+      + '{{milestone_name}} on {{project_name}} is now complete, which puts the job at {{progress}} '
+      + 'percent overall.\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+};
+
+/** Every variable any template understands. */
+const TEMPLATE_VARIABLES = [...new Set(
+  Object.values(DEFAULT_TEMPLATES).flatMap((t) => t.variables),
+)];
+
+/* ── Storing the mailbox password ─────────────────────────────────────────── */
+
+// An app password for somebody's mailbox is not ours to keep in the clear. It
+// is encrypted with a key derived from the server's own secret, which means a
+// dump of the database on its own does not hand over anyone's email account.
+const ENC_PREFIX = 'enc:v1:';
+
+function encryptionKey() {
+  const secret = process.env.EMAIL_SECRET || process.env.JWT_SECRET;
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(String(secret)).digest();
+}
+
+function encryptSecret(plain) {
+  if (!plain) return '';
+  const key = encryptionKey();
+  if (!key) return plain; // No secret configured; storing it is still better than losing it.
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const out = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  return ENC_PREFIX + [iv, cipher.getAuthTag(), out].map((b) => b.toString('base64')).join(':');
+}
+
+function decryptSecret(stored) {
+  if (!stored) return '';
+  if (!String(stored).startsWith(ENC_PREFIX)) return String(stored);
+  const key = encryptionKey();
+  if (!key) return '';
+  try {
+    const [iv, tag, data] = String(stored).slice(ENC_PREFIX.length).split(':')
+      .map((p) => Buffer.from(p, 'base64'));
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  } catch {
+    // A changed server secret cannot be recovered from; the tenant re-enters it.
+    return '';
+  }
+}
+
+/* ── Templates ────────────────────────────────────────────────────────────── */
+
+function renderTemplate(text, vars = {}) {
+  return String(text || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (_, name) => (
+    vars[name] === undefined || vars[name] === null ? '' : String(vars[name])
+  ));
+}
+
+/** Built-ins with any tenant override folded in. */
+async function listTemplates(tenantId) {
+  const overrides = await EmailTemplate.find({ tenant_id: tenantId }).lean();
+  const byKey = Object.fromEntries(overrides.map((o) => [o.key, o]));
+  return Object.entries(DEFAULT_TEMPLATES).map(([key, base]) => {
+    const override = byKey[key];
+    return {
+      key,
+      group: base.group,
+      label: base.label,
+      description: base.description,
+      variables: base.variables,
+      subject: override?.subject ?? base.subject,
+      body: override?.body ?? base.body,
+      enabled: override?.enabled ?? true,
+      customised: !!override,
+      default_subject: base.subject,
+      default_body: base.body,
+    };
+  });
+}
+
+/** What to actually send for an event, or null when it is switched off. */
+async function resolveTemplate(tenantId, key) {
+  const base = DEFAULT_TEMPLATES[key];
+  if (!base) return null;
+  const override = await EmailTemplate.findOne({ tenant_id: tenantId, key }).lean();
+  if (override && override.enabled === false) return null;
+  return { subject: override?.subject || base.subject, body: override?.body || base.body };
+}
+
+/* ── Sending ──────────────────────────────────────────────────────────────── */
+
+const looksLikeEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+
+/**
+ * Whether this tenant could send an email right now, and what is missing if not.
+ * Used by the settings page, so "not set up" is a sentence rather than a guess.
+ */
+function readiness(settings) {
+  const s = settings || {};
+  const missing = [];
+  if (!looksLikeEmail(s.from_email)) missing.push('the address email is sent from');
+  if (!s.smtp?.host) missing.push('the mail server');
+  if (!s.smtp?.username) missing.push('the mailbox username');
+  if (!s.smtp?.password) missing.push('the mailbox password');
+  return {
+    configured: missing.length === 0,
+    enabled: s.enabled !== false,
+    missing,
+    verified_at: s.verified_at || null,
+  };
+}
+
+/** The line a mail client shows in the From column. */
+function fromAddress(settings, businessName) {
+  const name = (settings.from_name || businessName || '').replace(/"/g, '');
+  return name ? `"${name}" <${settings.from_email}>` : settings.from_email;
+}
+
+function buildTransport(settings) {
+  const smtp = settings.smtp || {};
+  const port = Number(smtp.port) || 587;
+  return nodemailer.createTransport({
+    host: smtp.host,
+    port,
+    // 465 is TLS from the first byte; 587 starts plain and upgrades, which is
+    // what nearly every mailbox provider expects.
+    secure: smtp.secure === true || port === 465,
+    auth: { user: smtp.username, pass: decryptSecret(smtp.password) },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+}
+
+/**
+ * Send one email as the tenant.
+ *
+ * Returns a result rather than throwing: an order must not fail to be recorded
+ * because a mail server was slow. Every outcome is logged, refusals included,
+ * so "did the customer get it" has an answer.
+ */
+async function sendEmail({ tenantId, to, subject, body, templateKey, source, userId, settings, tenant }) {
+  const recipient = String(to || '').trim();
+  const log = async (status, extra = {}) => EmailMessage.create({
+    tenant_id: tenantId,
+    to: recipient,
+    subject: subject || '',
+    body: body || '',
+    template_key: templateKey,
+    source,
+    sent_by: userId || null,
+    ...extra,
+    status,
+  }).catch(() => {});
+
+  if (!looksLikeEmail(recipient)) return { sent: false, channel: 'email', reason: 'no_recipient' };
+  if (!subject?.trim() && !body?.trim()) return { sent: false, channel: 'email', reason: 'empty_body' };
+
+  const doc = tenant || await Tenant.findById(tenantId).select('email_settings business_name').lean();
+  const conf = settings || doc?.email_settings || {};
+
+  if (conf.enabled === false) {
+    await log('disabled');
+    return { sent: false, channel: 'email', reason: 'email_disabled' };
+  }
+
+  const state = readiness(conf);
+  if (!state.configured) {
+    await log('not_configured', { error: `Email is not set up: missing ${state.missing.join(', ')}.` });
+    return { sent: false, channel: 'email', reason: 'not_configured', missing: state.missing };
+  }
+
+  try {
+    const info = await buildTransport(conf).sendMail({
+      from: fromAddress(conf, doc?.business_name),
+      to: recipient,
+      ...(conf.reply_to ? { replyTo: conf.reply_to } : {}),
+      subject: subject || '',
+      text: body || '',
+    });
+    await log('sent', { provider: 'smtp', provider_ref: info?.messageId || null });
+    await Tenant.findByIdAndUpdate(tenantId, {
+      'email_settings.verified_at': new Date(),
+      'email_settings.last_error': '',
+    }).catch(() => {});
+    return { sent: true, channel: 'email', provider_ref: info?.messageId || null };
+  } catch (err) {
+    const reason = friendlyError(err);
+    await log('failed', { provider: 'smtp', error: reason });
+    await Tenant.findByIdAndUpdate(tenantId, { 'email_settings.last_error': reason }).catch(() => {});
+    return { sent: false, channel: 'email', reason };
+  }
+}
+
+/**
+ * Mail servers report failures in their own dialect. These are the four a
+ * business will actually hit, said in words they can act on.
+ */
+function friendlyError(err) {
+  const text = String(err?.message || err || '');
+  if (/Invalid login|535|authentication failed/i.test(text)) {
+    return 'The mail server rejected the username or password. '
+      + 'If the mailbox has two-step verification, you need an app password rather than the everyday one.';
+  }
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return 'That mail server could not be found — check the host name.';
+  if (/ECONNREFUSED|ETIMEDOUT|timed out|Greeting never received/i.test(text)) {
+    return 'The mail server did not answer. Check the port — 587 for most mailboxes, 465 when TLS is on.';
+  }
+  if (/self.signed|certificate/i.test(text)) return 'The mail server’s security certificate could not be verified.';
+  return text || 'The mail server refused the message.';
+}
+
+/** Send a templated email, skipping quietly when the tenant switched it off. */
+async function sendTemplated({ tenantId, to, key, vars = {}, userId }) {
+  const template = await resolveTemplate(tenantId, key);
+  if (!template) return { sent: false, channel: 'email', reason: 'template_disabled' };
+
+  const tenant = await Tenant.findById(tenantId).select('email_settings business_name').lean();
+  const filled = { business_name: tenant?.business_name || '', ...vars };
+
+  return sendEmail({
+    tenantId,
+    to,
+    subject: renderTemplate(template.subject, filled),
+    body: renderTemplate(template.body, filled),
+    templateKey: key,
+    source: key,
+    userId,
+    tenant,
+  });
+}
+
+/** Prove the mailbox works before anything real is sent through it. */
+async function verifyConnection(settings) {
+  const state = readiness(settings);
+  if (!state.configured) return { ok: false, reason: `Missing ${state.missing.join(', ')}.` };
+  try {
+    await buildTransport(settings).verify();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: friendlyError(err) };
+  }
+}
+
+module.exports = {
+  DEFAULT_TEMPLATES,
+  TEMPLATE_VARIABLES,
+  encryptSecret,
+  decryptSecret,
+  friendlyError,
+  fromAddress,
+  listTemplates,
+  looksLikeEmail,
+  readiness,
+  renderTemplate,
+  resolveTemplate,
+  sendEmail,
+  sendTemplated,
+  verifyConnection,
+};

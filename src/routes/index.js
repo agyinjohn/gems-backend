@@ -21,6 +21,7 @@ const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
+const emailSettings = require('../controllers/emailController');
 const projects = require('../controllers/projectController');
 const contracts = require('../controllers/contractController');
 const jobs = require('../controllers/jobController');
@@ -711,6 +712,18 @@ router.post('/sms/templates/:key/reset', authenticate, requireTenant, businessOw
 router.post('/sms/preview',             authenticate, requireTenant, sms.previewTemplate);
 router.get('/sms/messages',             authenticate, requireTenant, sms.listMessages);
 router.post('/sms/send',                authenticate, requireTenant, businessOwnerOnly, sms.sendTest);
+
+// EMAIL — the tenant's own mailbox, their own wording. Nothing is charged for
+// it, so unlike SMS there is nothing to buy and no balance to guard.
+router.get('/email/settings',              authenticate, requireTenant, businessOwnerOnly, emailSettings.getSettings);
+router.put('/email/settings',              authenticate, requireTenant, businessOwnerOnly, emailSettings.updateSettings);
+router.post('/email/verify',               authenticate, requireTenant, businessOwnerOnly, emailSettings.verify);
+router.get('/email/templates',             authenticate, requireTenant, emailSettings.listTemplates);
+router.put('/email/templates/:key',        authenticate, requireTenant, businessOwnerOnly, emailSettings.updateTemplate);
+router.post('/email/templates/:key/reset', authenticate, requireTenant, businessOwnerOnly, emailSettings.resetTemplate);
+router.post('/email/preview',              authenticate, requireTenant, emailSettings.previewTemplate);
+router.get('/email/messages',              authenticate, requireTenant, emailSettings.listMessages);
+router.post('/email/send',                 authenticate, requireTenant, businessOwnerOnly, emailSettings.send);
 
 // Paystack subaccount — opts the tenant into gateway-level payment splitting.
 router.get('/paystack/banks', authenticate, requireTenant, businessOwnerOnly, paystackSubaccount.listBanks);

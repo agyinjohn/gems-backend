@@ -124,6 +124,32 @@ const tenantSchema = new Schema({
     enabled:          { type: Boolean, default: true },
     low_balance_at:   { type: Number, default: 20 },
   },
+  // Email goes out through the tenant's own mailbox rather than the platform's.
+  // A quote from Ama's Prints should arrive from Ama's Prints — mail sent as
+  // somebody else lands in spam, and replies have to reach the business, not us.
+  // Nothing is charged for it, so unlike SMS there are no credits to spend.
+  email_settings: {
+    enabled:    { type: Boolean, default: true },
+    // What the customer sees in their inbox. from_name falls back to the
+    // business name; from_email is what makes sending possible at all.
+    from_name:  { type: String, default: '' },
+    from_email: { type: String, default: '', lowercase: true, trim: true },
+    reply_to:   { type: String, default: '', lowercase: true, trim: true },
+    smtp: {
+      host:     { type: String, default: '', trim: true },
+      port:     { type: Number, default: 587 },
+      // True for port 465, which is TLS from the first byte. 587 starts plain
+      // and upgrades, which is what almost every mailbox wants.
+      secure:   { type: Boolean, default: false },
+      username: { type: String, default: '', trim: true },
+      // Encrypted at rest and never sent back to a browser. See emailService.
+      password: { type: String, default: '' },
+    },
+    // Set when a test send actually succeeded, so the page can say whether this
+    // has ever worked rather than whether it has been filled in.
+    verified_at: { type: Date, default: null },
+    last_error:  { type: String, default: '' },
+  },
   // Paystack subaccount. When set, storefront payments are split at the
   // gateway: the tenant's share settles directly to their own bank account and
   // only the platform's commission reaches the platform account. Tenants
@@ -1362,6 +1388,39 @@ const smsMessageSchema = new Schema({
 }, { timestamps: true });
 smsMessageSchema.index({ tenant_id: 1, createdAt: -1 });
 
+// EMAIL TEMPLATE — the same idea as an SMS template, with a subject line.
+//
+// Kept as its own collection rather than a channel column on the SMS one: the
+// two are written differently. A text is rationed by the segment and reads like
+// a note; an email is free to send and is expected to look like a letter from
+// the business.
+const emailTemplateSchema = new Schema({
+  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  key:        { type: String, required: true },
+  subject:    { type: String, required: true },
+  body:       { type: String, required: true },
+  enabled:    { type: Boolean, default: true },
+  updated_by: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+emailTemplateSchema.index({ tenant_id: 1, key: 1 }, { unique: true });
+
+// EMAIL MESSAGE — one row per attempt, refusals included, so "did the customer
+// get it" has an answer that isn't a shrug.
+const emailMessageSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  to:           { type: String, required: true },
+  subject:      { type: String, default: '' },
+  body:         { type: String, default: '' },
+  template_key: String,
+  status:       { type: String, enum: ['sent', 'failed', 'not_configured', 'disabled'], required: true },
+  error:        String,
+  provider:     String,
+  provider_ref: String,
+  source:       String,
+  sent_by:      { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+emailMessageSchema.index({ tenant_id: 1, createdAt: -1 });
+
 // ── PROJECTS ──────────────────────────────────────────────────────────────
 //
 // Contract work tracked from award to completion. Three numbers have to stay
@@ -1952,6 +2011,7 @@ const allSchemas = [
   jobSchema, jobItemSchema,
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
+  emailTemplateSchema, emailMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
   projectMessageSchema,
@@ -2027,6 +2087,8 @@ module.exports = {
   SmsPurchase:           mongoose.model('SmsPurchase', smsPurchaseSchema),
   SmsTemplate:           mongoose.model('SmsTemplate', smsTemplateSchema),
   SmsMessage:            mongoose.model('SmsMessage', smsMessageSchema),
+  EmailTemplate:         mongoose.model('EmailTemplate', emailTemplateSchema),
+  EmailMessage:          mongoose.model('EmailMessage', emailMessageSchema),
   Project:               mongoose.model('Project', projectSchema),
   ProjectMilestone:      mongoose.model('ProjectMilestone', projectMilestoneSchema),
   ProjectTask:           mongoose.model('ProjectTask', projectTaskSchema),
