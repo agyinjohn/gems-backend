@@ -292,7 +292,14 @@ const getDashboard = async (req, res) => {
       total_products: products, low_stock_items: lowStock,
       total_customers: customers, active_leads: leads,
       total_employees: employees, monthly_expenses: expenses[0]?.total || 0,
-      ...(hrSummary ? { on_leave: hrSummary.on_leave, pending_leave: hrSummary.pending_leave, month_payroll: monthPayrollAgg[0]?.total || 0 } : {}),
+      ...(hrSummary ? {
+        on_leave: hrSummary.on_leave,
+        pending_leave: hrSummary.pending_leave,
+        // Already gathered for the HR manager's own dashboard and never passed
+        // on to the owner's, who is the person most likely to want it.
+        present_today: hrSummary.attendance_today,
+        month_payroll: monthPayrollAgg[0]?.total || 0,
+      } : {}),
     },
     recent_orders: recentOrders, top_products: topProducts, monthly_sales: monthlySales,
     ...(hrSummary ? {

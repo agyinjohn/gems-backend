@@ -1071,7 +1071,14 @@ async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
     }).populate('employee_id', 'name'),
     LeaveRequest.find({ tenant_id: tenantId, ...bf, status: 'pending' })
       .populate('employee_id', 'name').sort({ createdAt: -1 }),
-    Attendance.countDocuments({ tenant_id: tenantId, ...bf, date: today }),
+    // Who is actually at work, not who has been marked one way or the other.
+    // This counted every record for today, so marking somebody absent moved
+    // them into the "present" figure — the one number on the page that has to
+    // match the room.
+    Attendance.countDocuments({
+      tenant_id: tenantId, ...bf, date: today,
+      status: { $in: ['present', 'half_day'] },
+    }),
     PayrollRun.aggregate([
       { $match: { tenant_id: tenantId, ...bf, status: 'approved' } },
       { $group: { _id: null, total: { $sum: '$net_salary' }, runs: { $sum: 1 } } },
