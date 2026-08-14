@@ -9,7 +9,29 @@ const DEFAULTS = {
   announcement: '',
   min_order_amount: 0,
   custom_domain: '',
+  brand_color: '',
+  banner_image: '',
+  tagline: '',
 };
+
+/**
+ * A colour a browser will accept, or nothing.
+ *
+ * Whatever a shop owner types ends up in a stylesheet, so it is checked rather
+ * than trusted: a six-digit hex and nothing else. Anything odd falls back to
+ * the GEMS navy, which is what every storefront looked like anyway.
+ */
+function safeHex(value) {
+  const hex = String(value || '').trim();
+  return /^#[0-9a-fA-F]{6}$/.test(hex) ? hex.toLowerCase() : '';
+}
+
+/** A URL for an image, or nothing. Same reasoning: it is going into a page. */
+function safeImageUrl(value) {
+  const url = String(value || '').trim();
+  if (!url) return '';
+  return /^https?:\/\//i.test(url) ? url : '';
+}
 
 function pickSettings(tenant) {
   const raw = tenant.storefront_settings?.toObject?.() || tenant.storefront_settings || {};
@@ -20,6 +42,9 @@ function pickSettings(tenant) {
     announcement: raw.announcement ?? DEFAULTS.announcement,
     min_order_amount: Number(raw.min_order_amount ?? DEFAULTS.min_order_amount),
     custom_domain: String(raw.custom_domain ?? DEFAULTS.custom_domain).toLowerCase().trim(),
+    brand_color: safeHex(raw.brand_color),
+    banner_image: safeImageUrl(raw.banner_image),
+    tagline: String(raw.tagline ?? DEFAULTS.tagline).slice(0, 120),
   };
 }
 
@@ -66,6 +91,9 @@ const updateMerchantSettings = async (req, res) => {
     announcement,
     min_order_amount,
     custom_domain,
+    brand_color,
+    banner_image,
+    tagline,
   } = req.body;
 
   tenant.storefront_settings = {
@@ -75,6 +103,9 @@ const updateMerchantSettings = async (req, res) => {
     announcement: announcement !== undefined ? String(announcement) : current.announcement,
     min_order_amount: min_order_amount !== undefined ? Number(min_order_amount) : current.min_order_amount,
     custom_domain: custom_domain !== undefined ? String(custom_domain).toLowerCase().trim() : current.custom_domain,
+    brand_color: brand_color !== undefined ? safeHex(brand_color) : current.brand_color,
+    banner_image: banner_image !== undefined ? safeImageUrl(banner_image) : current.banner_image,
+    tagline: tagline !== undefined ? String(tagline).trim().slice(0, 120) : current.tagline,
   };
   tenant.markModified('storefront_settings');
   await tenant.save();

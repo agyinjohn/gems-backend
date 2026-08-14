@@ -112,6 +112,18 @@ const tenantSchema = new Schema({
     custom_domain:             { type: String, default: '', lowercase: true, trim: true },
     tax_rate:                  { type: Number, default: 0 },
     tax_name:                  { type: String, default: 'Tax' },
+    // How the shop looks, rather than how it charges.
+    //
+    // Every GEMS storefront was the same navy, which is fine for a demo and
+    // wrong for a business: the shop a customer lands on should look like that
+    // shop. One colour rather than a palette — the rest is derived from it, so
+    // a shop owner cannot pick six that fight each other.
+    brand_color:               { type: String, default: '' },
+    // The picture across the top. Empty falls back to a wash of the brand
+    // colour, which still looks deliberate.
+    banner_image:              { type: String, default: '' },
+    // One line under the name. What the shop wants said about itself.
+    tagline:                   { type: String, default: '' },
   },
   // Prepaid SMS credits. One credit is one message segment; sending is blocked
   // at zero. Bought from the platform in bundles (PlatformSettings.sms_bundles)
