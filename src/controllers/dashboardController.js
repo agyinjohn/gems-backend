@@ -1,4 +1,67 @@
-const { Order, Product, Customer, Lead, Employee, Expense, PurchaseOrder, Attendance, LeaveRequest, PayrollRun, StockMovement, Supplier } = require('../models');
+const { Order, Product, Customer, Lead, Employee, Expense, PurchaseOrder, Attendance, LeaveRequest, PayrollRun, StockMovement, Supplier, Job, Invoice, Project } = require('../models');
+
+/**
+ * The work in hand, and the money not yet in.
+ *
+ * The dashboard could tell you what you had sold since the beginning of time
+ * and how many products were on the shelf, and nothing at all about the four
+ * things somebody actually opens this app to find out: what came in that nobody
+ * has priced, what is being worked on, what is late, and who owes us.
+ *
+ * All of it is standing state rather than a period figure — "requests waiting"
+ * means waiting now — so none of it answers to the date range, in the same way
+ * the stock and staff counts do not.
+ */
+async function operationsSnapshot({ tid, bf }) {
+  const now = new Date();
+  const startOfToday = new Date(now); startOfToday.setHours(0, 0, 0, 0);
+
+  const [
+    awaitingQuote, quotedAwaitingClient, jobsOpen, jobsOverdue,
+    owedAgg, overdueAgg, takingsToday, activeProjects,
+  ] = await Promise.all([
+    // Somebody asked for work and nobody has put a price on it. The one queue
+    // where a slow day costs a customer.
+    Order.countDocuments({ tenant_id: tid, ...bf, source: 'service_request', quote_status: 'awaiting_quote' }),
+    Order.countDocuments({ tenant_id: tid, ...bf, source: 'service_request', quote_status: 'quoted' }),
+    Job.countDocuments({ tenant_id: tid, ...bf, status: { $in: ['open', 'in_progress'] } }),
+    Job.countDocuments({
+      tenant_id: tid, ...bf,
+      status: { $in: ['open', 'in_progress'] },
+      due_date: { $ne: null, $lt: startOfToday },
+    }),
+    // Invoiced and unpaid. Draft and void are not owed to anybody.
+    Invoice.aggregate([
+      { $match: { tenant_id: tid, ...bf, status: { $in: ['sent', 'partially_paid', 'overdue'] } } },
+      { $group: { _id: null, total: { $sum: '$amount_due' }, count: { $sum: 1 } } },
+    ]),
+    Invoice.aggregate([
+      { $match: { tenant_id: tid, ...bf, status: { $in: ['sent', 'partially_paid', 'overdue'] }, due_date: { $lt: startOfToday } } },
+      { $group: { _id: null, total: { $sum: '$amount_due' }, count: { $sum: 1 } } },
+    ]),
+    // What the business took today, whatever window the page is showing. The
+    // most-asked question in any shop, and it was nowhere on this page.
+    Order.aggregate([
+      { $match: { tenant_id: tid, ...bf, payment_status: 'paid', createdAt: { $gte: startOfToday } } },
+      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } },
+    ]),
+    Project.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
+  ]);
+
+  return {
+    awaiting_quote: awaitingQuote,
+    quoted_awaiting_client: quotedAwaitingClient,
+    jobs_open: jobsOpen,
+    jobs_overdue: jobsOverdue,
+    owed_total: owedAgg[0]?.total || 0,
+    owed_count: owedAgg[0]?.count || 0,
+    overdue_total: overdueAgg[0]?.total || 0,
+    overdue_count: overdueAgg[0]?.count || 0,
+    takings_today: takingsToday[0]?.total || 0,
+    sales_today: takingsToday[0]?.count || 0,
+    active_projects: activeProjects,
+  };
+}
 
 /**
  * The window the money figures cover.
@@ -284,6 +347,11 @@ const getDashboard = async (req, res) => {
       : Promise.resolve([]),
   ]);
 
+  // Never allowed to take the page down with it: a dashboard that shows most of
+  // itself beats one that shows an error because a Job query failed.
+  const operations = await operationsSnapshot({ tid, bf })
+    .catch((err) => { console.error('[Dashboard] operations snapshot failed:', err.message); return null; });
+
   res.json({ success: true, data: {
     role: 'admin',
     range: range ? { from: range.from, to: range.to, grain: trendGrain(range) } : null,
@@ -295,6 +363,7 @@ const getDashboard = async (req, res) => {
       ...(hrSummary ? { on_leave: hrSummary.on_leave, pending_leave: hrSummary.pending_leave, month_payroll: monthPayrollAgg[0]?.total || 0 } : {}),
     },
     recent_orders: recentOrders, top_products: topProducts, monthly_sales: monthlySales,
+    ...(operations ? { operations } : {}),
     ...(hrSummary ? {
       recent_leave: recentLeave.map(l => ({ ...l.toJSON(), employee_name: l.employee_id?.name || 'Unknown' })),
       department_breakdown: hrSummary.department_breakdown,
