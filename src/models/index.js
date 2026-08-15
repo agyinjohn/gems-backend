@@ -330,7 +330,17 @@ const productSchema = new Schema({
   low_stock_threshold: { type: Number, default: 10 },
   unit:                { type: String, default: 'piece' },
   images:              [String],
+  // Values for the custom fields the item's category defines. The category
+  // owns the labels, the types and the order; this owns the answers.
   attributes:          { type: Schema.Types.Mixed, default: {} },
+  // --- storefront copy ---
+  // One line for cards, search results and link previews. The long
+  // description gets truncated into those places today, which reads badly.
+  short_description:   { type: String, default: '' },
+  // Maker or label. A trust signal, and the filter customers ask for first.
+  brand:               { type: String, default: '' },
+  // The three or four reasons to buy, scannable without reading a paragraph.
+  highlights:          { type: [String], default: [] },
   // --- bundle composition (bundle only, ignored for products/services) ---
   bundle_items:        { type: [bundleItemSchema], default: [] },
   location_id:         { type: Schema.Types.ObjectId, ref: 'StorageLocation' },

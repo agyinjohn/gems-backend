@@ -79,13 +79,33 @@ function normalizeCategoryId(value) {
   return str || null;
 }
 
+/**
+ * Shop-authored copy on its way to a public page.
+ *
+ * Trimmed, capped and stripped of empties. The caps are not arbitrary: a
+ * highlight is a scannable line rather than a paragraph, and a short
+ * description that runs long stops being short exactly where it is most
+ * needed — inside a product card.
+ */
+const COPY_LIMITS = { short_description: 200, brand: 60, highlight: 120, highlights: 6 };
+
+const cleanLine = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+
+const cleanHighlights = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(h => cleanLine(h, COPY_LIMITS.highlight))
+    .filter(Boolean)
+    .slice(0, COPY_LIMITS.highlights);
+};
+
 const createProduct = async (req, res) => {
   const {
     name, sku, barcode, description, category_id, price, cost_price,
     stock_qty, low_stock_threshold, unit, images, attributes,
     item_type, unit_type, duration, revenue_account_code, bundle_items,
     pricing_mode, min_price, max_price, service_type, requires_file,
-    sell_online, requestable,
+    sell_online, requestable, short_description, brand, highlights,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
 
@@ -140,6 +160,9 @@ const createProduct = async (req, res) => {
     low_stock_threshold: isService ? 0 : (low_stock_threshold || 10),
     unit:                unit || (isService ? 'service' : 'piece'),
     images:              normalizeImages(images),
+    short_description:   cleanLine(short_description, COPY_LIMITS.short_description),
+    brand:               cleanLine(brand, COPY_LIMITS.brand),
+    highlights:          cleanHighlights(highlights),
     attributes:          attributes || {},
     bundle_items:        isBundle ? (Array.isArray(bundle_items) ? bundle_items : []) : [],
     created_by:          req.user._id,
@@ -171,7 +194,7 @@ const updateProduct = async (req, res) => {
     stock_qty, low_stock_threshold, unit, is_active, images,
     unit_type, duration, revenue_account_code,
     pricing_mode, min_price, max_price, service_type, requires_file,
-    sell_online, requestable,
+    sell_online, requestable, short_description, brand, highlights,
   } = req.body;
 
   const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
@@ -190,6 +213,9 @@ const updateProduct = async (req, res) => {
   if (is_active !== undefined)   update.is_active   = is_active;
   if (images !== undefined)      update.images      = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
+  if (short_description !== undefined) update.short_description = cleanLine(short_description, COPY_LIMITS.short_description);
+  if (brand !== undefined)             update.brand             = cleanLine(brand, COPY_LIMITS.brand);
+  if (highlights !== undefined)        update.highlights        = cleanHighlights(highlights);
   if (existing.item_type === 'bundle' && req.body.bundle_items !== undefined)
     update.bundle_items = Array.isArray(req.body.bundle_items) ? req.body.bundle_items : [];
   // Service-specific fields

@@ -200,6 +200,59 @@ const updateOrderStatus = async (req, res) => {
 
 // Storefront — scoped by tenant slug via query param
 /**
+ * A product's specifications, in the order its category defines them.
+ *
+ * The shape was already here and I nearly built a second one. A category owns
+ * `custom_fields` — an ordered list of `{ label, key, type }` — and a product
+ * stores the answers in `attributes` keyed by those same keys. So the label a
+ * shop typed is already stored; deriving one from the key instead would print
+ * "Fabric width" where the shop wrote "Fabric Width (cm)".
+ *
+ * Anything in `attributes` that the category does not define still shows,
+ * appended after. Categories get edited and products get imported, and a
+ * specification silently disappearing because somebody renamed a field would
+ * be worse than an untidy label.
+ */
+function showableSpec(value) {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'number') return Number.isFinite(value);
+  return typeof value === 'boolean';
+}
+
+function specValue(value) {
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value).trim();
+}
+
+function labelFromKey(key) {
+  const spaced = String(key).replace(/[_-]+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase() : '';
+}
+
+function buildSpecs(attributes, category) {
+  const attrs = attributes && typeof attributes === 'object' && !Array.isArray(attributes) ? attributes : {};
+  const defined = Array.isArray(category?.custom_fields) ? category.custom_fields : [];
+  const rows = [];
+  const claimed = new Set();
+
+  for (const field of defined) {
+    if (!field?.key) continue;
+    claimed.add(field.key);
+    const value = attrs[field.key];
+    if (!showableSpec(value)) continue;
+    rows.push({ label: String(field.label || labelFromKey(field.key)), value: specValue(value) });
+  }
+
+  for (const [key, value] of Object.entries(attrs)) {
+    if (claimed.has(key) || !showableSpec(value)) continue;
+    const label = labelFromKey(key);
+    if (label) rows.push({ label, value: specValue(value) });
+  }
+
+  return rows;
+}
+
+/**
  * What a shop's catalogue looks like to the public.
  *
  * Named field by field rather than spread from the document, and that is the
@@ -240,9 +293,16 @@ function publicProduct(p) {
     // How the thing is measured — "per yard", "per kilo". Stored since the
     // beginning and never sent, so a price by measure read as a price each.
     unit: obj.unit,
-    // The specification table. A free-form bag on the schema that nothing has
-    // ever displayed.
+    // Resolved against the category, so the labels are the ones the shop
+    // typed and the order is the one it chose. attributes still goes out so an
+    // older client — or one talking to a newer catalogue than it knows about —
+    // can still build a table for itself.
+    specs: buildSpecs(obj.attributes, p.category_id),
     attributes: obj.attributes || {},
+
+    short_description: obj.short_description || '',
+    brand: obj.brand || '',
+    highlights: Array.isArray(obj.highlights) ? obj.highlights.filter(Boolean) : [],
 
     // Services.
     service_type: obj.service_type,
@@ -292,7 +352,9 @@ const getStorefrontProducts = async (req, res) => {
   const skip = (parseInt(page) - 1) * parseInt(limit);
   const [products, total] = await Promise.all([
     Product.find(filter)
-      .populate('category_id', 'name')
+      // custom_fields as well as the name: the category is where a
+      // specification's label, type and order are defined.
+      .populate('category_id', 'name custom_fields')
       // A bundle stores only the ids of what is in it, so without this the
       // storefront can price a package but cannot say what is in it.
       .populate('bundle_items.product_id', 'name')
