@@ -576,6 +576,9 @@ router.get('/storefront/:tenantSlug/branches', async (req, res) => {
 });
 
 router.get('/storefront/products', orders.getStorefrontProducts);
+// One product, by the address a customer was given. Declared before the
+// tenant-scoped settings routes below so ':tenantSlug' cannot swallow it.
+router.get('/storefront/:tenantSlug/products/:productSlug', orders.getStorefrontProduct);
 router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
 router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
 // The picture behind the shop's headline. Same guard as the settings it is

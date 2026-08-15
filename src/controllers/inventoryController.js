@@ -99,6 +99,8 @@ const cleanHighlights = (value) => {
     .slice(0, COPY_LIMITS.highlights);
 };
 
+const { uniqueSlug } = require('../utils/slug');
+
 const createProduct = async (req, res) => {
   const {
     name, sku, barcode, description, category_id, price, cost_price,
@@ -133,6 +135,9 @@ const createProduct = async (req, res) => {
     tenant_id:    req.tenant_id,
     branch_id:    branchId,
     name,
+    // Its public address, settled once at creation. See the schema for why it
+    // is not recomputed when a product is renamed.
+    slug:         await uniqueSlug(Product, { tenant_id: req.tenant_id, name, fallback: 'item' }),
     sku:          finalSku,
     barcode:      barcode?.trim() || null,
     description,
@@ -213,6 +218,19 @@ const updateProduct = async (req, res) => {
   if (is_active !== undefined)   update.is_active   = is_active;
   if (images !== undefined)      update.images      = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
+  // Only when asked for by name. Renaming a product must not silently move it
+  // to a new address and break links a shop has already sent to customers.
+  if (req.body.slug !== undefined) {
+    update.slug = await uniqueSlug(Product, {
+      tenant_id: req.tenant_id, name: req.body.slug, fallback: 'item', excludeId: existing._id,
+    });
+  } else if (!existing.slug) {
+    // Created before slugs existed. Give it one the first time it is saved,
+    // so the backfill is not the only way a product gets an address.
+    update.slug = await uniqueSlug(Product, {
+      tenant_id: req.tenant_id, name: name || existing.name, fallback: 'item', excludeId: existing._id,
+    });
+  }
   if (short_description !== undefined) update.short_description = cleanLine(short_description, COPY_LIMITS.short_description);
   if (brand !== undefined)             update.brand             = cleanLine(brand, COPY_LIMITS.brand);
   if (highlights !== undefined)        update.highlights        = cleanHighlights(highlights);

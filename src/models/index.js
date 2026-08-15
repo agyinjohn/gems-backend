@@ -278,6 +278,10 @@ const productSchema = new Schema({
   tenant_id:           { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   branch_id:           { type: Schema.Types.ObjectId, ref: 'Branch' },
   name:                { type: String, required: true },
+  // The product's public address. Generated from the name when it is created
+  // and then left alone: a slug that follows a rename would break every link
+  // a shop had already shared. Editable on purpose, never on accident.
+  slug:                { type: String },
   sku:                 { type: String, sparse: true },
   barcode:             { type: String, sparse: true },
   description:         String,
@@ -348,6 +352,8 @@ const productSchema = new Schema({
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 productSchema.index({ tenant_id: 1, sku: 1 }, UNIQUE_WHEN_SET('sku'));
+// Scoped per tenant: two shops may both sell a kente stole.
+productSchema.index({ tenant_id: 1, slug: 1 }, UNIQUE_WHEN_SET('slug'));
 productSchema.index({ tenant_id: 1, item_type: 1, is_active: 1 });
 
 // STOCK MOVEMENT
