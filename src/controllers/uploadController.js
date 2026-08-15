@@ -9,4 +9,9 @@ const uploadProductImages = async (req, res) => {
   });
 };
 
-module.exports = { uploadProductImages };
+const uploadStorefrontImage = async (req, res) => {
+  const data = await uploadService.uploadStorefrontImage(req.tenant_id, req.file);
+  res.status(201).json({ success: true, message: 'Image uploaded.', data });
+};
+
+module.exports = { uploadProductImages, uploadStorefrontImage };

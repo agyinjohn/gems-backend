@@ -40,6 +40,19 @@ async function uploadProductImages(tenantId, files) {
   return uploadImages(tenantId, files, 'products');
 }
 
+/**
+ * The picture behind a shop's headline.
+ *
+ * Its own folder rather than the product one: this is a single image that gets
+ * replaced rather than a growing set, and a shop owner clearing out product
+ * photographs should never be able to take their shop front down with them.
+ */
+async function uploadStorefrontImage(tenantId, file) {
+  if (!file) throw httpError('No image provided.');
+  const [uploaded] = await uploadImages(tenantId, [file], 'storefront');
+  return uploaded;
+}
+
 async function uploadHrFile(tenantId, employeeId, file) {
   if (!isCloudinaryConfigured()) {
     throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
@@ -94,4 +107,4 @@ async function uploadServiceFile(tenantId, file) {
   return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };
+module.exports = { uploadProductImages, uploadImages, uploadStorefrontImage, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };

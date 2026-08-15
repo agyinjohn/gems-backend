@@ -578,6 +578,16 @@ router.get('/storefront/:tenantSlug/branches', async (req, res) => {
 router.get('/storefront/products', orders.getStorefrontProducts);
 router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
 router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
+// The picture behind the shop's headline. Same guard as the settings it is
+// saved into, so anybody who can change the shop front can supply its image.
+router.post(
+  '/uploads/storefront-image',
+  authenticate,
+  requireTenant,
+  requireFeature('storefront'),
+  imageUpload.single('image'),
+  upload.uploadStorefrontImage,
+);
 
 // Payout methods — a branch manager manages the account their own branch is
 // paid into; a business owner manages those plus the organisation-wide one.
