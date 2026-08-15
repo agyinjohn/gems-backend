@@ -199,6 +199,71 @@ const updateOrderStatus = async (req, res) => {
 };
 
 // Storefront — scoped by tenant slug via query param
+/**
+ * What a shop's catalogue looks like to the public.
+ *
+ * Named field by field rather than spread from the document, and that is the
+ * point of it. Spreading sent every path on the schema to anybody who called
+ * the endpoint — including cost_price, which is what the shop paid. Margins
+ * for a whole catalogue, readable by any customer or competitor with a browser,
+ * and never rendered anywhere: leaked rather than used. A deliberate list also
+ * means the next field added to the schema is not published by accident.
+ *
+ * Everything here is something the storefront actually shows.
+ */
+function publicProduct(p) {
+  const obj = p.toObject();
+  const out = {
+    id: p._id,
+    name: obj.name,
+    description: obj.description,
+    sku: obj.sku,
+    images: obj.images || [],
+    category: p.category_id?.name,
+    category_name: p.category_id?.name,
+    // As a plain id, which is not decoration. The promotion matcher below
+    // compares this against a promotion's category_ids, and populate had
+    // replaced the path with the category document — so String(category_id)
+    // was "[object Object]" and never equalled an ObjectId. Category-wide
+    // promotions have therefore never applied to a storefront. "All" and
+    // per-product ones matched fine, which is why it went unnoticed.
+    category_id: p.category_id?._id ? String(p.category_id._id) : undefined,
+    branch_id: p.branch_id?._id || obj.branch_id,
+    branch_name: p.branch_id?.name,
+    branch_slug: p.branch_id?.slug,
+    is_active: obj.is_active,
+
+    price: obj.price,
+    compare_price: obj.compare_price,
+
+    item_type: obj.item_type,
+    // How the thing is measured — "per yard", "per kilo". Stored since the
+    // beginning and never sent, so a price by measure read as a price each.
+    unit: obj.unit,
+    // The specification table. A free-form bag on the schema that nothing has
+    // ever displayed.
+    attributes: obj.attributes || {},
+
+    // Services.
+    service_type: obj.service_type,
+    unit_type: obj.unit_type,
+    duration: obj.duration,
+    requires_file: obj.requires_file,
+
+    // Bundles: what is actually inside one.
+    bundle_items: (obj.bundle_items || []).map(b => ({
+      quantity: b.quantity,
+      name: b.product_id?.name,
+    })).filter(b => b.name),
+
+    stock_qty: obj.stock_qty,
+    low_stock_threshold: obj.low_stock_threshold,
+  };
+  // A "was" price that is not higher than the price is not a discount.
+  if (!out.compare_price || out.compare_price <= out.price) delete out.compare_price;
+  return out;
+}
+
 const getStorefrontProducts = async (req, res) => {
   const { search, category, page = 1, limit = 12, tenant_slug, branch_slug } = req.query;
   // Open-price items are quoted in person, so they never appear in a
@@ -226,14 +291,18 @@ const getStorefrontProducts = async (req, res) => {
   }
   const skip = (parseInt(page) - 1) * parseInt(limit);
   const [products, total] = await Promise.all([
-    Product.find(filter).populate('category_id', 'name').sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
+    Product.find(filter)
+      .populate('category_id', 'name')
+      // A bundle stores only the ids of what is in it, so without this the
+      // storefront can price a package but cannot say what is in it.
+      .populate('bundle_items.product_id', 'name')
+      // Likewise the branch: the product card has always had a branch badge
+      // and has never been sent a branch name to put in it.
+      .populate('branch_id', 'name slug')
+      .sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
     Product.countDocuments(filter),
   ]);
-  const data = products.map(p => {
-    const obj = { ...p.toObject(), id: p._id, category: p.category_id?.name, category_name: p.category_id?.name };
-    if (!obj.compare_price || obj.compare_price <= obj.price) delete obj.compare_price;
-    return obj;
-  });
+  const data = products.map(p => publicProduct(p));
 
   // Apply active promotions — set compare_price to original and discount price
   if (filter.tenant_id) {
@@ -250,7 +319,7 @@ const getStorefrontProducts = async (req, res) => {
         const promo = promos.find(pr => {
           if (pr.applies_to === 'all') return true;
           if (pr.applies_to === 'category') return pr.category_ids.some(id => String(id) === String(item.category_id));
-          if (pr.applies_to === 'products') return pr.product_ids.some(id => String(id) === String(item._id || item.id));
+          if (pr.applies_to === 'products') return pr.product_ids.some(id => String(id) === String(item.id));
           return false;
         });
         if (!promo) continue;
