@@ -122,8 +122,14 @@ const tenantSchema = new Schema({
     // The picture across the top. Empty falls back to a wash of the brand
     // colour, which still looks deliberate.
     banner_image:              { type: String, default: '' },
-    // One line under the name. What the shop wants said about itself.
+    // One line under the name. What the shop wants said about itself. Empty
+    // falls back to a general line about ordering and paying, so a shop that
+    // has written nothing still advertises rather than saying nothing.
     tagline:                   { type: String, default: '' },
+    // The big line over the picture. Empty falls back to the business name,
+    // which is the right default and always true — but a shop that would
+    // rather sell a season, an offer or a promise can say so instead.
+    hero_headline:             { type: String, default: '' },
   },
   // Prepaid SMS credits. One credit is one message segment; sending is blocked
   // at zero. Bought from the platform in bundles (PlatformSettings.sms_bundles)

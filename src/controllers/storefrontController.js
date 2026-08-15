@@ -12,7 +12,12 @@ const DEFAULTS = {
   brand_color: '',
   banner_image: '',
   tagline: '',
+  hero_headline: '',
 };
+
+/** How long a hero line may be before it stops being a hero line. */
+const HEADLINE_MAX = 70;
+const TAGLINE_MAX = 160;
 
 /**
  * A colour a browser will accept, or nothing.
@@ -44,7 +49,8 @@ function pickSettings(tenant) {
     custom_domain: String(raw.custom_domain ?? DEFAULTS.custom_domain).toLowerCase().trim(),
     brand_color: safeHex(raw.brand_color),
     banner_image: safeImageUrl(raw.banner_image),
-    tagline: String(raw.tagline ?? DEFAULTS.tagline).slice(0, 120),
+    tagline: String(raw.tagline ?? DEFAULTS.tagline).slice(0, TAGLINE_MAX),
+    hero_headline: String(raw.hero_headline ?? DEFAULTS.hero_headline).slice(0, HEADLINE_MAX),
   };
 }
 
@@ -94,6 +100,7 @@ const updateMerchantSettings = async (req, res) => {
     brand_color,
     banner_image,
     tagline,
+    hero_headline,
   } = req.body;
 
   tenant.storefront_settings = {
@@ -105,7 +112,10 @@ const updateMerchantSettings = async (req, res) => {
     custom_domain: custom_domain !== undefined ? String(custom_domain).toLowerCase().trim() : current.custom_domain,
     brand_color: brand_color !== undefined ? safeHex(brand_color) : current.brand_color,
     banner_image: banner_image !== undefined ? safeImageUrl(banner_image) : current.banner_image,
-    tagline: tagline !== undefined ? String(tagline).trim().slice(0, 120) : current.tagline,
+    tagline: tagline !== undefined ? String(tagline).trim().slice(0, TAGLINE_MAX) : current.tagline,
+    hero_headline: hero_headline !== undefined
+      ? String(hero_headline).trim().slice(0, HEADLINE_MAX)
+      : current.hero_headline,
   };
   tenant.markModified('storefront_settings');
   await tenant.save();
