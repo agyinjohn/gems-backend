@@ -1,4 +1,5 @@
 const { Product } = require('../models');
+const variants = require('./variantService');
 
 /**
  * What is actually held on a shelf.
@@ -22,8 +23,19 @@ const isStocked = (product) => (product?.item_type || 'product') === 'product';
 /** A reference is either an id or, once populated, the document itself. */
 const refId = (value) => String((value && value._id) || value || '');
 
-/** On the shelf, less what a pending sale is already holding. */
-const onHand = (product) => Math.max(0, (product.stock_qty || 0) - (product.reserved_qty || 0));
+/**
+ * On the shelf, less what a pending sale is already holding.
+ *
+ * For a product sold in sizes and colours, what is on the shelf is the row the
+ * customer picked — eleven navy mediums, not the forty shirts across every
+ * combination. Without a choice it is the total, which answers "does this shop
+ * have any" and is never what authorises a sale; variantService.variantProblem
+ * is.
+ */
+const onHand = (product, variantKey) => {
+  if (variants.hasVariants(product)) return variants.availableFor(product, variantKey);
+  return Math.max(0, (product.stock_qty || 0) - (product.reserved_qty || 0));
+};
 
 /**
  * The stocked products a line really draws down, and how many of each.
@@ -34,9 +46,19 @@ const onHand = (product) => Math.max(0, (product.stock_qty || 0) - (product.rese
  * solution is left alone rather than followed, which is what every deduction
  * path here has always done.
  */
-async function stockLines({ tenantId, product, quantity }) {
+async function stockLines({ tenantId, product, quantity, variantKey }) {
   if (isStocked(product)) {
-    return [{ product_id: product._id, name: product.name, quantity, product }];
+    // The chosen row is carried through, because a sale of eleven navy mediums
+    // has to come off the navy mediums. A deduction against the product would
+    // leave the size the customer actually took still showing as in stock.
+    const chosen = variants.findVariant(product, variantKey);
+    return [{
+      product_id: product._id,
+      name: chosen ? `${product.name} (${variants.variantLabel(chosen)})` : product.name,
+      quantity,
+      product,
+      variant_key: chosen ? chosen.key : '',
+    }];
   }
   if (product.item_type !== 'bundle') return [];
 
@@ -52,17 +74,24 @@ async function stockLines({ tenantId, product, quantity }) {
       name: comp.name,
       quantity: (Number(part.quantity) || 1) * quantity,
       product: comp,
+      // A package cannot say which size of a thing it contains, so a component
+      // sold in sizes has no row to come off. Flagged rather than guessed at:
+      // deducting the product would leave every size still reading as in stock
+      // while the shelf emptied, and inventory that lies is worse than a
+      // package that refuses to sell.
+      needs_choice: variants.hasVariants(comp),
     });
   }
   return lines;
 }
 
 /** How many of this could be sold right now. UNLIMITED when nothing limits it. */
-async function availableQty({ tenantId, product }) {
+async function availableQty({ tenantId, product, variantKey }) {
   if (!product) return 0;
-  if (isStocked(product)) return onHand(product);
+  if (isStocked(product)) return onHand(product, variantKey);
 
   const lines = await stockLines({ tenantId, product, quantity: 1 });
+  if (lines.some(line => line.needs_choice)) return 0;
   return lines.reduce(
     (limit, line) => Math.min(limit, Math.floor(onHand(line.product) / line.quantity)),
     UNLIMITED,
@@ -73,11 +102,23 @@ async function availableQty({ tenantId, product }) {
  * Null when the line can be sold, otherwise what to tell whoever is selling it.
  * A solution names the part that ran out, since that is the one to reorder.
  */
-async function shortageFor({ tenantId, product, quantity }) {
+async function shortageFor({ tenantId, product, quantity, variantKey }) {
   if (isStocked(product)) {
-    return onHand(product) >= quantity ? null : `Insufficient stock for ${product.name}.`;
+    // A wrong or missing choice is a different complaint from a shortage, and
+    // is worded for whoever has to act on it.
+    const problem = variants.variantProblem(product, variantKey);
+    if (problem) return problem;
+    if (onHand(product, variantKey) >= quantity) return null;
+
+    const chosen = variants.findVariant(product, variantKey);
+    return chosen
+      ? `Insufficient stock for ${product.name} — ${variants.variantLabel(chosen)}.`
+      : `Insufficient stock for ${product.name}.`;
   }
   for (const line of await stockLines({ tenantId, product, quantity })) {
+    if (line.needs_choice) {
+      return `"${line.name}" is sold in options, so it cannot be part of a package. Remove it from ${product.name}.`;
+    }
     if (onHand(line.product) < line.quantity) {
       return `Insufficient stock for bundle component "${line.name}".`;
     }

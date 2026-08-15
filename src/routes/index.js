@@ -18,6 +18,7 @@ const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
 const { availableQty } = require('../services/stockService');
 const { isShopItem } = require('../services/offeringService');
+const variantService = require('../services/variantService');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
@@ -908,7 +909,7 @@ router.get('/storefront/cart/:cartId', async (req, res) => {
 });
 
 router.post('/storefront/cart/add', async (req, res) => {
-  const { cart_id, product_id, quantity = 1, tenant_id } = req.body;
+  const { cart_id, product_id, quantity = 1, tenant_id, variant_key, selections } = req.body;
   if (!product_id) return res.status(400).json({ success: false, message: 'product_id required.' });
   const product = await Product.findOne({ _id: product_id, is_active: true }).populate('category_id', 'name').populate('branch_id', 'name slug');
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
@@ -922,8 +923,20 @@ router.post('/storefront/cart/add', async (req, res) => {
       message: `${product.name} is a service — send a request and we'll price it for you.`,
     });
   }
+  // Which one of it. Accepted either as the key the catalogue handed out or as
+  // the raw selections, because an integration posting {Size:'M'} means exactly
+  // the same thing as the storefront posting the key it was given.
+  const chosenKey = variant_key || variantService.variantKey(selections);
+  const problem = variantService.variantProblem(product, chosenKey);
+  if (problem) return res.status(400).json({ success: false, message: problem });
+  const chosen = variantService.findVariant(product, chosenKey);
+
   const cart = await getOrCreateCart(cart_id, tenant_id || product.tenant_id);
-  const existing = cart.items.find(i => String(i.product_id) === String(product._id));
+  // A line is a product *and* a choice: two navy mediums is one line, but a
+  // navy medium and a white large are two, or a customer buying both would
+  // silently end up with two of whichever the cart happened to record.
+  const existing = cart.items.find(i =>
+    String(i.product_id) === String(product._id) && (i.variant_key || '') === (chosen?.key || ''));
   // How many of this could actually be sold, asked of the one place that knows.
   //
   // This route capped every non-service at its own stock_qty. A bundle keeps no
@@ -931,7 +944,7 @@ router.post('/storefront/cart/add', async (req, res) => {
   // was zero, and adding one to a cart quietly wrote a line for nought of it.
   // stockService has answered this correctly for services and bundles since it
   // was written; the cart was the caller still working it out for itself.
-  const ceiling = await availableQty({ tenantId: product.tenant_id, product });
+  const ceiling = await availableQty({ tenantId: product.tenant_id, product, variantKey: chosen?.key });
   // Nothing left is refused outright rather than added as a zero-quantity line
   // the customer can neither see nor remove.
   if (ceiling < 1) {
@@ -943,7 +956,10 @@ router.post('/storefront/cart/add', async (req, res) => {
     cart.items.push({
       product_id:          product._id,
       product_name:        product.name,
-      price:               product.price,
+      // Priced from the row, so an extra-large that costs more actually does.
+      price:               variantService.priceOf(product, chosen),
+      variant_key:         chosen?.key || '',
+      variant_label:       variantService.variantLabel(chosen),
       quantity:            Math.min(quantity, ceiling),
       images:              product.images,
       category_name:       product.category_id?.name || '',
@@ -964,14 +980,21 @@ router.post('/storefront/cart/add', async (req, res) => {
 });
 
 router.patch('/storefront/cart/update', async (req, res) => {
-  const { cart_id, product_id, quantity } = req.body;
+  const { cart_id, product_id, quantity, variant_key } = req.body;
   if (!cart_id || !product_id) return res.status(400).json({ success: false, message: 'cart_id and product_id required.' });
   const cart = await Cart.findOne({ cart_id });
   if (!cart) return res.status(404).json({ success: false, message: 'Cart not found.' });
+
+  // Product and choice together, the same identity the cart was built with.
+  // Keyed on the product alone, changing the quantity of a navy medium would
+  // have found whichever polo shirt line came first and changed that instead.
+  const wanted = variant_key || '';
+  const isLine = i => String(i.product_id) === String(product_id) && (i.variant_key || '') === wanted;
+
   if (quantity <= 0) {
-    cart.items = cart.items.filter(i => String(i.product_id) !== String(product_id));
+    cart.items = cart.items.filter(i => !isLine(i));
   } else {
-    const item = cart.items.find(i => String(i.product_id) === String(product_id));
+    const item = cart.items.find(isLine);
     if (item) item.quantity = quantity;
   }
   await cart.save();

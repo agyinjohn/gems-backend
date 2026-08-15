@@ -2,6 +2,7 @@ const { Category, Product, StockMovement } = require('../models');
 const serviceTypes = require('../config/serviceTypes');
 const audit = require('../utils/audit');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
+const variants = require('../services/variantService');
 
 const getCategories = async (req, res) => {
   let tenantId = req.tenant_id;
@@ -17,19 +18,53 @@ const getCategories = async (req, res) => {
   res.json({ success: true, data });
 };
 
+/**
+ * The choices this kind of thing comes in.
+ *
+ * Cleaned rather than trusted: a blank option name, or a value typed twice with
+ * different capitals, would each become a size customers can pick and nobody
+ * stocks. Order is kept, because "S, M, L, XL" is not alphabetical and a shop
+ * that typed it that way meant it.
+ */
+function cleanOptions(input) {
+  if (!Array.isArray(input)) return undefined;
+  const out = [];
+  for (const raw of input.slice(0, 5)) {
+    const name = String(raw?.name || '').trim().slice(0, 40);
+    if (!name || out.some(o => o.name.toLowerCase() === name.toLowerCase())) continue;
+
+    const values = [];
+    for (const v of (Array.isArray(raw?.values) ? raw.values : []).slice(0, 50)) {
+      const value = String(v || '').trim().slice(0, 40);
+      if (value && !values.some(x => x.toLowerCase() === value.toLowerCase())) values.push(value);
+    }
+    if (values.length) out.push({ name, values });
+  }
+  return out;
+}
+
 const createCategory = async (req, res) => {
-  const { name, description, scope } = req.body;
+  const { name, description, scope, options } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'Category name is required.' });
-  const cat = await Category.create({ tenant_id: req.tenant_id, name, description, scope: scope || 'product' });
+  const cat = await Category.create({
+    tenant_id: req.tenant_id, name, description, scope: scope || 'product',
+    options: cleanOptions(options) || [],
+  });
   res.status(201).json({ success: true, data: cat });
 };
 
 const updateCategory = async (req, res) => {
-  const { name, description, scope } = req.body;
+  const { name, description, scope, options, custom_fields } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'Category name is required.' });
+  const cleanedOptions = cleanOptions(options);
   const cat = await Category.findOneAndUpdate(
     { _id: req.params.id, tenant_id: req.tenant_id },
-    { name, description, ...(scope !== undefined && { scope }) },
+    {
+      name, description,
+      ...(scope !== undefined && { scope }),
+      ...(cleanedOptions !== undefined && { options: cleanedOptions }),
+      ...(custom_fields !== undefined && { custom_fields }),
+    },
     { new: true }
   );
   if (!cat) return res.status(404).json({ success: false, message: 'Category not found.' });
@@ -108,6 +143,7 @@ const createProduct = async (req, res) => {
     item_type, unit_type, duration, revenue_account_code, bundle_items,
     pricing_mode, min_price, max_price, service_type, requires_file,
     sell_online, requestable, short_description, brand, highlights,
+    option_values,
   } = req.body;
   if (!name || price === undefined) return res.status(400).json({ success: false, message: 'name and price are required.' });
 
@@ -169,6 +205,11 @@ const createProduct = async (req, res) => {
     brand:               cleanLine(brand, COPY_LIMITS.brand),
     highlights:          cleanHighlights(highlights),
     attributes:          attributes || {},
+    // The shop ticks which values it stocks — { Size: ['S','M'], Colour:
+    // ['Navy'] } — and the combinations are worked out from that. Typing the
+    // cross product by hand is how a shirt ends up with a navy medium and no
+    // navy small, silently.
+    variants:            isService || isBundle ? [] : variants.buildVariants(option_values),
     bundle_items:        isBundle ? (Array.isArray(bundle_items) ? bundle_items : []) : [],
     created_by:          req.user._id,
   });
@@ -200,6 +241,7 @@ const updateProduct = async (req, res) => {
     unit_type, duration, revenue_account_code,
     pricing_mode, min_price, max_price, service_type, requires_file,
     sell_online, requestable, short_description, brand, highlights,
+    option_values, variant_stock,
   } = req.body;
 
   const existing = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
@@ -218,6 +260,28 @@ const updateProduct = async (req, res) => {
   if (is_active !== undefined)   update.is_active   = is_active;
   if (images !== undefined)      update.images      = normalizeImages(images);
   if (req.body.attributes !== undefined) update.attributes = req.body.attributes;
+
+  // Options, and the stock behind each combination.
+  //
+  // Rebuilt from what the shop has ticked, carrying over the count and any
+  // price difference already recorded against a combination that survives the
+  // edit — adding extra-large to a shirt must not reset the eleven navy
+  // mediums somebody counted last week.
+  if (option_values !== undefined && !isService && !isBundle) {
+    const rebuilt = variants.buildVariants(option_values, existing.variants);
+    for (const row of rebuilt) {
+      const counted = variant_stock?.[row.key];
+      if (counted && typeof counted === 'object') {
+        if (counted.stock_qty !== undefined) row.stock_qty = Math.max(0, Number(counted.stock_qty) || 0);
+        if (counted.price_delta !== undefined) row.price_delta = Number(counted.price_delta) || 0;
+        if (counted.sku !== undefined) row.sku = String(counted.sku || '').trim();
+      }
+    }
+    update.variants = rebuilt;
+    // stock_qty for a product sold in options is the sum of its rows, not a
+    // figure of its own, so it is derived here rather than accepted.
+    if (rebuilt.length) update.stock_qty = variants.totalStock({ variants: rebuilt });
+  }
   // Only when asked for by name. Renaming a product must not silently move it
   // to a new address and break links a shop has already sent to customers.
   if (req.body.slug !== undefined) {

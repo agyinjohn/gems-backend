@@ -8,6 +8,7 @@ const {
 } = require('../models');
 const { seedChartOfAccounts } = require('../services/accountingService');
 const { slugify } = require('../utils/slug');
+const variants = require('../services/variantService');
 
 // helpers
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
@@ -156,12 +157,26 @@ const seed = async () => {
     ],
   };
 
+  // What a customer has to choose before they can order. Distinct from the
+  // custom_fields above: a custom field describes the shirt, an option decides
+  // which shirt — and the shop has a different number of each one on the shelf.
+  const CATEGORY_OPTIONS = {
+    'Clothing': [
+      { name: 'Size', values: ['S', 'M', 'L', 'XL', '2XL'] },
+      { name: 'Colour', values: ['Navy', 'White', 'Black'] },
+    ],
+  };
+
   const catNames = ['Electronics', 'Office Supplies', 'Furniture', 'Clothing', 'Food & Beverage', 'Tools & Equipment'];
   const catMap = {};
   for (const name of catNames) {
     const cat = await Category.findOneAndUpdate(
       { tenant_id: tenant._id, name },
-      { $set: { name, scope: 'product', custom_fields: CATEGORY_FIELDS[name] || [] } },
+      { $set: {
+        name, scope: 'product',
+        custom_fields: CATEGORY_FIELDS[name] || [],
+        options: CATEGORY_OPTIONS[name] || [],
+      } },
       { upsert: true, new: true },
     );
     catMap[name] = cat._id;
@@ -510,10 +525,46 @@ const seed = async () => {
     return slug;
   };
 
+  /**
+   * The sizes and colours each clothing line actually comes in.
+   *
+   * Only some of what the category lists: the category knows every size the
+   * shop ever sells, and a hi-vis vest comes one way. Offering a customer a
+   * size that was never made is worse than offering one that has sold out.
+   *
+   * Stock is uneven on purpose. A shop with forty shirts does not have eight of
+   * every size, and a storefront that cannot show the difference is exactly the
+   * thing this exists to demonstrate — including the combination that has run
+   * out, which should be visibly unpickable rather than quietly sellable.
+   */
+  const PRODUCT_OPTIONS = {
+    'CLO-001': { Size: ['S', 'M', 'L', 'XL', '2XL'], Colour: ['Navy', 'White', 'Black'] },
+    'CLO-004': { Size: ['S', 'M', 'L', 'XL'], Colour: ['White'] },
+    'CLO-005': { Size: ['M', 'L', 'XL'], Colour: ['Navy', 'Black'] },
+    'CLO-006': { Size: ['S', 'M', 'L', 'XL', '2XL'], Colour: ['Black', 'Navy'] },
+    'CLO-008': { Size: ['S', 'M', 'L', 'XL'] },
+  };
+
+  /** A believable count for one combination: common sizes deeper than the ends. */
+  const stockFor = (selections) => {
+    const size = selections.find(s => s.name === 'Size')?.value;
+    const colour = selections.find(s => s.name === 'Colour')?.value;
+    const depth = { S: 6, M: 14, L: 12, XL: 7, '2XL': 3 }[size] ?? 10;
+    const shade = { Navy: 1, Black: 0.8, White: 0.6 }[colour] ?? 1;
+    const qty = Math.round(depth * shade);
+    // One combination deliberately sold out, so the storefront has a value it
+    // must show as unpickable.
+    if (size === '2XL' && colour === 'White') return 0;
+    return qty;
+  };
+
   const productMap = {};
   for (const p of productDefs) {
     const { sku, cat, item_type: itype, unit_type: utype, ...rest } = p;
     const isService = itype === 'service';
+    const variantRows = PRODUCT_OPTIONS[sku]
+      ? variants.buildVariants(PRODUCT_OPTIONS[sku]).map(row => ({ ...row, stock_qty: stockFor(row.selections) }))
+      : [];
     const prod = await Product.findOneAndUpdate(
       { tenant_id: tenant._id, sku },
       { $set: {
@@ -527,7 +578,12 @@ const seed = async () => {
         item_type:           itype || 'product',
         unit_type:           utype || 'fixed',
         low_stock_threshold: isService ? 0 : 10,
-        stock_qty:           isService ? 0 : (rest.stock_qty || 0),
+        // For a product sold in sizes, the count is the sum of them rather than
+        // a figure of its own — the two must never be able to disagree.
+        variants:            variantRows,
+        stock_qty:           isService ? 0
+          : variantRows.length ? variants.totalStock({ variants: variantRows })
+          : (rest.stock_qty || 0),
       }},
       { upsert: true, new: true },
     );

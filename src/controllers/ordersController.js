@@ -11,6 +11,7 @@ const splitService = require('../services/splitService');
 const { resolveUnitPrice } = require('../services/pricingService');
 const { stockLines, shortageFor } = require('../services/stockService');
 const { SHOP_TYPES, shopFilter, isShopItem } = require('../services/offeringService');
+const variants = require('../services/variantService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -21,8 +22,24 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
   if (!sold) return;
   const isBundle = sold.item_type === 'bundle';
 
-  for (const line of await stockLines({ tenantId, product: sold, quantity: item.quantity })) {
-    await Product.findByIdAndUpdate(line.product_id, { $inc: { stock_qty: -line.quantity } });
+  const lines = await stockLines({
+    tenantId, product: sold, quantity: item.quantity, variantKey: item.variant_key,
+  });
+
+  for (const line of lines) {
+    if (line.variant_key) {
+      // Off the row the customer actually chose, and the product's own figure
+      // moved with it. For a product sold in options, stock_qty is the sum of
+      // its rows rather than a count of its own, so the two have to travel
+      // together or the catalogue starts disagreeing with the shelf.
+      await Product.updateOne(
+        { _id: line.product_id, 'variants.key': line.variant_key },
+        { $inc: { 'variants.$.stock_qty': -line.quantity, stock_qty: -line.quantity } },
+      );
+    } else {
+      await Product.findByIdAndUpdate(line.product_id, { $inc: { stock_qty: -line.quantity } });
+    }
+
     await StockMovement.create({
       tenant_id:  tenantId,
       branch_id:  branchId,
@@ -30,6 +47,9 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
       type:       'sale',
       quantity:   -line.quantity,
       reference:  orderNumber,
+      // Which one went, so a stock report says "Polo Shirt (Size: M · Colour:
+      // Navy)" rather than leaving somebody to work it out from the order.
+      ...(line.variant_key ? { notes: line.name } : {}),
       ...(isBundle ? { notes: `Bundle: ${sold.name}` } : {}),
       created_by: createdBy,
     });
@@ -67,15 +87,20 @@ const createOrder = async (req, res) => {
 
     const isService = p.item_type === 'service';
 
-    const shortage = await shortageFor({ tenantId: req.tenant_id, product: p, quantity: item.quantity });
+    // Which one of it — the same question the storefront asks, because a sale
+    // rung up at the counter comes off the same shelf.
+    const variantKey = item.variant_key || variants.variantKey(item.selections);
+    const shortage = await shortageFor({ tenantId: req.tenant_id, product: p, quantity: item.quantity, variantKey });
     if (shortage) throw { status: 400, message: shortage };
+    const variant = variants.findVariant(p, variantKey);
 
     if (isService) hasServiceItems = true;
     else hasPhysicalItems = true;
 
     // Staff raise these orders themselves, so an open-price job can be quoted
     // here; fixed-price items still ignore anything the client sends.
-    const { unit_price } = resolveUnitPrice({ product: p, proposed: item.unit_price });
+    const { unit_price: base } = resolveUnitPrice({ product: p, proposed: item.unit_price });
+    const unit_price = variant && !item.unit_price ? variants.priceOf(p, variant) : base;
     const total = Math.round(unit_price * item.quantity * 100) / 100;
     subtotal += total;
     enrichedItems.push({
@@ -85,6 +110,8 @@ const createOrder = async (req, res) => {
       unit_price,
       total,
       item_type:            p.item_type || 'product',
+      variant_key:          variant?.key || '',
+      variant_label:        variants.variantLabel(variant),
       revenue_account_code: p.revenue_account_code || null,
     });
   }
@@ -361,7 +388,23 @@ function publicProduct(p) {
       name: b.product_id?.name,
     })).filter(b => b.name),
 
-    stock_qty: obj.stock_qty,
+    // What the customer has to choose before they can order, and which values
+    // are still available. Empty for the great majority of products.
+    options: variants.optionMatrix(obj),
+    // Only what the storefront needs to price and gate a choice: the key, the
+    // selections, what it costs and whether there is one. Not the cost, not
+    // the reservation — the same rule as the rest of this DTO.
+    variants: variants.liveVariants(obj).map(v => ({
+      key: v.key,
+      selections: (v.selections || []).map(s => ({ name: s.name, value: s.value })),
+      price: variants.priceOf(obj, v),
+      available: variants.onHand(v),
+      sku: v.sku || undefined,
+    })),
+
+    // For a product sold in options this is the sum across them, which is what
+    // "how many shirts are there" means.
+    stock_qty: variants.totalStock(obj),
     low_stock_threshold: obj.low_stock_threshold,
   };
   // A "was" price that is not higher than the price is not a discount.
@@ -472,12 +515,16 @@ const initiateCheckout = async (req, res) => {
   for (const item of items) {
     const p = await Product.findOne({ _id: item.product_id, is_active: true });
     if (!p) throw { status: 400, message: `Product ${item.product_id} not found.` };
-    const shortage = await shortageFor({ tenantId: p.tenant_id, product: p, quantity: item.quantity });
+    // Which one of it, re-derived here rather than trusted: the cart is on the
+    // client's side of the wire, and what comes off the shelf and what the shop
+    // is owed both depend on this answer.
+    const variantKey = item.variant_key || variants.variantKey(item.selections);
+    const shortage = await shortageFor({ tenantId: p.tenant_id, product: p, quantity: item.quantity, variantKey });
     if (shortage) throw { status: 400, message: shortage };
     if (!resolvedTenantId) resolvedTenantId = p.tenant_id;
     const bId = String(item.branch_id || p.branch_id || 'default');
     if (!branchGroups[bId]) branchGroups[bId] = { branch_id: item.branch_id || p.branch_id || null, branch_name: item.branch_name || 'Main Branch', items: [] };
-    branchGroups[bId].items.push({ product: p, quantity: item.quantity });
+    branchGroups[bId].items.push({ product: p, quantity: item.quantity, variant: variants.findVariant(p, variantKey) });
   }
 
   const tenantDoc = resolvedTenantId ? await Tenant.findById(resolvedTenantId) : null;
@@ -491,11 +538,11 @@ const initiateCheckout = async (req, res) => {
 
   let cartSubtotal = 0;
   for (const [, group] of Object.entries(branchGroups)) {
-    for (const { product: p, quantity } of group.items) {
+    for (const { product: p, quantity, variant } of group.items) {
       // Self-service checkout: an open-price job has no amount to charge, so
       // it is refused rather than sold at a guessed price.
       const { unit_price } = resolveUnitPrice({ product: p, allowOverride: false });
-      cartSubtotal += unit_price * quantity;
+      cartSubtotal += (variant ? variants.priceOf(p, variant) : unit_price) * quantity;
     }
   }
   if (storeSettings && cartSubtotal < storeSettings.min_order_amount) {
@@ -538,8 +585,9 @@ const initiateCheckout = async (req, res) => {
   for (const [, group] of Object.entries(branchGroups)) {
     let subtotal = 0;
     const enrichedItems = [];
-    for (const { product: p, quantity } of group.items) {
-      const { unit_price } = resolveUnitPrice({ product: p, allowOverride: false });
+    for (const { product: p, quantity, variant } of group.items) {
+      const { unit_price: base } = resolveUnitPrice({ product: p, allowOverride: false });
+      const unit_price = variant ? variants.priceOf(p, variant) : base;
       const total = Math.round(unit_price * quantity * 100) / 100;
       subtotal += total;
       enrichedItems.push({
@@ -549,6 +597,10 @@ const initiateCheckout = async (req, res) => {
         unit_price,
         total,
         item_type:            p.item_type || 'product',
+        // Written onto the line rather than looked up later: a shop that drops
+        // navy mediums next month must not change what this invoice says.
+        variant_key:          variant?.key || '',
+        variant_label:        variants.variantLabel(variant),
         revenue_account_code: p.revenue_account_code || null,
       });
     }

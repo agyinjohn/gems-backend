@@ -254,14 +254,68 @@ const categoryFieldSchema = new Schema({
   required: { type: Boolean, default: false },
 }, { _id: false });
 
+/**
+ * A choice a customer has to make before they can order.
+ *
+ * Distinct from custom_fields above, and the difference is what the answer is
+ * for. A custom field describes: "Material: cotton" tells you about the shirt.
+ * An option decides: "Size: M" says which shirt you are buying, and the shop
+ * has a different number of each one on the shelf.
+ *
+ * Defined on the category so a shop that sells forty clothing lines types
+ * "S, M, L, XL" once rather than forty times — and so the fortieth product
+ * cannot quietly be given "Medium" where the other thirty-nine say "M".
+ */
+const categoryOptionSchema = new Schema({
+  name:   { type: String, required: true },   // "Size"
+  values: { type: [String], default: [] },    // ["S", "M", "L", "XL"]
+}, { _id: false });
+
 const categorySchema = new Schema({
   tenant_id:     { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   name:          { type: String, required: true },
   description:   String,
   scope:         { type: String, enum: ['product', 'service'], default: 'product' },
   custom_fields: { type: [categoryFieldSchema], default: [] },
+  // What a customer must choose. The category owns the vocabulary; each
+  // product says which of the values it actually stocks.
+  options:       { type: [categoryOptionSchema], default: [] },
 }, { timestamps: true });
 categorySchema.index({ tenant_id: 1, name: 1 }, { unique: true });
+
+/**
+ * One buyable combination of a product's options.
+ *
+ * A navy medium polo shirt. It has its own stock, because that is the whole
+ * point: a shop with forty shirts does not have forty of every size, and a
+ * storefront that only knows "forty shirts" will happily sell the medium it
+ * ran out of on Tuesday.
+ *
+ * Stored on the product rather than as products of its own. Six sizes in four
+ * colours is twenty-four rows in a catalogue if each is its own product, and
+ * every one of them needs a name, a photograph and a description that are all
+ * the same. Here it is one product with twenty-four numbers under it.
+ *
+ * key is the canonical identity — option names and values, lower-cased and
+ * sorted, joined. It is generated rather than typed, so the same combination
+ * always resolves to the same row no matter what order the client sent the
+ * selections in. See services/variantService.
+ */
+const variantSchema = new Schema({
+  key:         { type: String, required: true },
+  // The selections in full, so a cart line, an invoice and a picking list can
+  // print "Size: M, Colour: Navy" without having to parse the key back apart.
+  selections:  { type: [{ name: String, value: String, _id: false }], default: [] },
+  sku:         { type: String, default: '' },
+  // Added to the product's price. A difference rather than a price, because a
+  // shop that raises the price of a shirt should not then have to re-enter it
+  // once per size — and because zero, the common case, means "same as the
+  // product" and stays right on its own.
+  price_delta: { type: Number, default: 0 },
+  stock_qty:   { type: Number, default: 0 },
+  reserved_qty: { type: Number, default: 0 },
+  is_active:   { type: Boolean, default: true },
+}, { _id: false });
 
 // BUNDLE COMPONENT — one line inside a bundle's composition
 const bundleItemSchema = new Schema({
@@ -345,6 +399,11 @@ const productSchema = new Schema({
   brand:               { type: String, default: '' },
   // The three or four reasons to buy, scannable without reading a paragraph.
   highlights:          { type: [String], default: [] },
+  // --- options a customer chooses between (products only) ---
+  // Empty for the great majority of products, which come one way. When it is
+  // not empty, stock_qty above is the sum of these rather than a figure of its
+  // own, and nothing can be ordered without naming one of them.
+  variants:            { type: [variantSchema], default: [] },
   // --- bundle composition (bundle only, ignored for products/services) ---
   bundle_items:        { type: [bundleItemSchema], default: [] },
   location_id:         { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
@@ -408,6 +467,13 @@ const contactHistorySchema = new Schema({
 
 // ORDER
 const orderItemSchema = new Schema({
+  // Which one of it. Empty for anything sold one way, which is most things.
+  // Carried on the line rather than looked up later, because a shop that stops
+  // stocking navy mediums next month must not thereby change what an invoice
+  // from today says was sold.
+  variant_key:   { type: String, default: '' },
+  variant_label: { type: String, default: '' },
+
   product_id:   { type: Schema.Types.ObjectId, ref: 'Product' },
   product_name: { type: String, required: true },
   quantity:     { type: Number, required: true },
@@ -1101,6 +1167,13 @@ const chatMessageSchema = new Schema({
 }, { timestamps: true });
 chatMessageSchema.index({ conversation_id: 1, createdAt: 1 });
 const cartItemSchema = new Schema({
+  // Which one of it. Empty for anything sold one way, which is most things.
+  // Carried on the line rather than looked up later, because a shop that stops
+  // stocking navy mediums next month must not thereby change what an invoice
+  // from today says was sold.
+  variant_key:   { type: String, default: '' },
+  variant_label: { type: String, default: '' },
+
   product_id:          { type: Schema.Types.ObjectId, ref: 'Product', required: true },
   product_name:        String,
   price:               Number,
