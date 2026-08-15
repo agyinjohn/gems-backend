@@ -17,6 +17,7 @@ const { imageUpload, hrDocUpload, serviceUpload } = require('../middleware/uploa
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
 const { availableQty } = require('../services/stockService');
+const { isShopItem } = require('../services/offeringService');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
@@ -911,6 +912,16 @@ router.post('/storefront/cart/add', async (req, res) => {
   if (!product_id) return res.status(400).json({ success: false, message: 'product_id required.' });
   const product = await Product.findOne({ _id: product_id, is_active: true }).populate('category_id', 'name').populate('branch_id', 'name slug');
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
+  // A cart is for things that are bought. Work is asked for, looked at and
+  // quoted before anybody commits to a price, which is what the request desk
+  // is for — so a service cannot be put in a basket even by a client that
+  // still has yesterday's catalogue open.
+  if (!(await isShopItem(product))) {
+    return res.status(409).json({
+      success: false,
+      message: `${product.name} is a service — send a request and we'll price it for you.`,
+    });
+  }
   const cart = await getOrCreateCart(cart_id, tenant_id || product.tenant_id);
   const existing = cart.items.find(i => String(i.product_id) === String(product._id));
   // How many of this could actually be sold, asked of the one place that knows.

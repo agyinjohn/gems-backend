@@ -10,6 +10,7 @@ const { uploadServiceFile } = require('../services/uploadService');
 const types = require('../config/serviceTypes');
 const jobs = require('../services/jobService');
 const audit = require('../utils/audit');
+const { requestFilter } = require('../services/offeringService');
 
 /**
  * Service requests.
@@ -45,9 +46,6 @@ async function findStore(slug) {
   return Tenant.findOne({ slug, is_active: true }).select('_id business_name slug phone email logo').lean();
 }
 
-/** What a client may ask for: work, and packages of work. Not stock. */
-const OFFERABLE = ['service', 'bundle'];
-
 /**
  * The offerings a client may choose from.
  *
@@ -55,6 +53,11 @@ const OFFERABLE = ['service', 'bundle'];
  * together — but never a plain product, because a request is for something to
  * be done rather than something to be shipped. Only active ones, only those
  * marked requestable, and only from this shop.
+ *
+ * Which bundles count is worked out from what is inside them. This used to
+ * offer every bundle, which was right while every bundle was a package of
+ * work; a shop that packages five products and a discount was then asking
+ * clients to request a quote for a box it could have simply sold them.
  */
 const publicServices = async (req, res) => {
   const store = await findStore(req.params.tenantSlug);
@@ -62,10 +65,11 @@ const publicServices = async (req, res) => {
 
   const services = await Product.find({
     tenant_id: store._id,
-    item_type: { $in: OFFERABLE },
+    ...(await requestFilter(store._id)),
     is_active: { $ne: false },
     requestable: { $ne: false },
-  }).select('name description price unit_type pricing_mode min_price max_price category_id service_type requires_file item_type')
+  }).select('name slug description short_description highlights images price unit_type pricing_mode min_price max_price category_id service_type requires_file item_type')
+    .populate('category_id', 'name')
     .sort({ name: 1 }).lean();
 
   res.json({
@@ -76,6 +80,13 @@ const publicServices = async (req, res) => {
         id: String(s._id),
         name: s.name,
         description: s.description || '',
+        // The shop's own words and picture, so a service can be shown on the
+        // shop front as something worth looking at rather than as a line on a
+        // price list. The request form still shows the plain list.
+        short_description: s.short_description || '',
+        highlights: Array.isArray(s.highlights) ? s.highlights.filter(Boolean) : [],
+        images: Array.isArray(s.images) ? s.images.filter(Boolean) : [],
+        category_name: s.category_id?.name || '',
         unit_type: s.unit_type || 'unit',
         // A solution is a package rather than a single piece of work. Told to
         // the client so the form can say so, not so it can price it differently.
@@ -126,7 +137,10 @@ const submitRequest = async (req, res) => {
   const services = await Product.find({
     _id: { $in: ids },
     tenant_id: store._id,
-    item_type: { $in: OFFERABLE },
+    // The same rule the list applies, so a request cannot name something the
+    // list would never have offered — a plain product, or a package of goods
+    // that belongs in a cart rather than on a job sheet.
+    ...(await requestFilter(store._id)),
     is_active: { $ne: false },
     requestable: { $ne: false },
   }).lean();

@@ -10,6 +10,7 @@ const { getActiveSalesTaxRate, calcTaxAmount } = require('../services/taxService
 const splitService = require('../services/splitService');
 const { resolveUnitPrice } = require('../services/pricingService');
 const { stockLines, shortageFor } = require('../services/stockService');
+const { SHOP_TYPES, shopFilter, isShopItem } = require('../services/offeringService');
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -390,12 +391,18 @@ const getStorefrontProduct = async (req, res) => {
     is_active: true,
     pricing_mode: { $ne: 'open' },
     sell_online: { $ne: false },
+    // Work is not bought from a shelf, so a service has no shop page even by
+    // its address. It is offered at the request desk instead, and a link to
+    // one that used to open a buy button now correctly finds nothing here.
+    item_type: { $in: SHOP_TYPES },
   })
     .populate('category_id', 'name custom_fields')
     .populate('bundle_items.product_id', 'name')
     .populate('branch_id', 'name slug');
 
-  if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
+  if (!product || !(await isShopItem(product))) {
+    return res.status(404).json({ success: false, message: 'Product not found.' });
+  }
 
   const [data] = await applyPromotions(tenant._id, [publicProduct(product)]);
   res.json({ success: true, data });
@@ -418,6 +425,14 @@ const getStorefrontProducts = async (req, res) => {
       const b = await Branch.findOne({ tenant_id: t._id, slug: branch_slug });
       if (b) filter.branch_id = b._id;
     }
+    // The catalogue is what can be bought. Everything that has to be quoted
+    // first is offered at the request desk, which has its own endpoint — see
+    // services/offeringService for why a bundle can go either way.
+    Object.assign(filter, await shopFilter(t._id));
+  } else {
+    // Without a shop there is no bundle to look inside, so this falls back to
+    // the part of the rule that needs no lookup.
+    filter.item_type = { $in: SHOP_TYPES };
   }
 
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { description: new RegExp(search, 'i') }];

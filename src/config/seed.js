@@ -569,6 +569,23 @@ const seed = async () => {
       images: ['https://images.unsplash.com/photo-1568667256549-094345857637?w=600&auto=format&fit=crop'],
       items: [['OFF-001', 5], ['OFF-002', 2], ['OFF-005', 2], ['OFF-003', 1], ['OFF-006', 1]],
     },
+    // A package with work in it is a different animal: it cannot be put in a
+    // basket, because somebody has to look at the job before there is a price.
+    // The catalogue works that out from the contents rather than from a flag —
+    // see services/offeringService — so this needs no marking beyond naming a
+    // service among its parts. Priced on request, which is the honest answer
+    // for a job whose size nobody knows until they have seen the space.
+    {
+      name: 'Office Move & Setup', sku: 'BUN-003', cat: 'Installation & Maintenance',
+      pricing_mode: 'open', price: 0,
+      description: 'We deliver the furniture and equipment, put it where you want it, set it up and take the packaging away. Priced once we have seen the space.',
+      short_description: 'Delivered, assembled, positioned and tested — one job, one bill.',
+      brand: 'GEMS',
+      highlights: ['Delivery and installation together', 'Tested before we leave', 'Packaging taken away'],
+      attributes: { coverage: 'Greater Accra', turnaround: '1–2 days' },
+      images: ['https://images.unsplash.com/photo-1504148455328-c376907d081c?w=600&auto=format&fit=crop'],
+      items: [['SVC-006', 1], ['SVC-007', 1], ['FURN-002', 1], ['FURN-001', 2]],
+    },
   ];
 
   const bundleMap = {};
