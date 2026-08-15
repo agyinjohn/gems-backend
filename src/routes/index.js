@@ -16,6 +16,7 @@ const upload = require('../controllers/uploadController');
 const { imageUpload, hrDocUpload, serviceUpload } = require('../middleware/uploadMiddleware');
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
+const { availableQty } = require('../services/stockService');
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
@@ -912,15 +913,27 @@ router.post('/storefront/cart/add', async (req, res) => {
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
   const cart = await getOrCreateCart(cart_id, tenant_id || product.tenant_id);
   const existing = cart.items.find(i => String(i.product_id) === String(product._id));
-  const isService = product.item_type === 'service';
+  // How many of this could actually be sold, asked of the one place that knows.
+  //
+  // This route capped every non-service at its own stock_qty. A bundle keeps no
+  // stock of its own — what limits it is the scarcest of its parts — so the cap
+  // was zero, and adding one to a cart quietly wrote a line for nought of it.
+  // stockService has answered this correctly for services and bundles since it
+  // was written; the cart was the caller still working it out for itself.
+  const ceiling = await availableQty({ tenantId: product.tenant_id, product });
+  // Nothing left is refused outright rather than added as a zero-quantity line
+  // the customer can neither see nor remove.
+  if (ceiling < 1) {
+    return res.status(409).json({ success: false, message: `${product.name} is out of stock.` });
+  }
   if (existing) {
-    existing.quantity = isService ? existing.quantity + quantity : Math.min(existing.quantity + quantity, product.stock_qty);
+    existing.quantity = Math.min(existing.quantity + quantity, ceiling);
   } else {
     cart.items.push({
       product_id:          product._id,
       product_name:        product.name,
       price:               product.price,
-      quantity:            isService ? quantity : Math.min(quantity, product.stock_qty),
+      quantity:            Math.min(quantity, ceiling),
       images:              product.images,
       category_name:       product.category_id?.name || '',
       stock_qty:           product.stock_qty,

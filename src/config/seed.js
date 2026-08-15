@@ -7,6 +7,7 @@ const {
   Attendance, LeaveRequest,
 } = require('../models');
 const { seedChartOfAccounts } = require('../services/accountingService');
+const { slugify } = require('../utils/slug');
 
 // helpers
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
@@ -97,17 +98,83 @@ const seed = async () => {
   const salesUser = await User.findOne({ email: 'sales@gthink.com' });
 
   // Categories
+  //
+  // custom_fields is what makes a specification table possible: the category
+  // owns each row's label, type and order, and a product fills in the answers
+  // against those keys. Without them a seeded catalogue looks like production
+  // in every respect except the one this exists to demonstrate.
+  const CATEGORY_FIELDS = {
+    'Electronics': [
+      { label: 'Warranty', key: 'warranty', type: 'text' },
+      { label: 'Connectivity', key: 'connectivity', type: 'text' },
+      { label: 'Power', key: 'power', type: 'text' },
+      { label: 'Colour', key: 'colour', type: 'text' },
+    ],
+    'Furniture': [
+      { label: 'Material', key: 'material', type: 'text' },
+      { label: 'Dimensions', key: 'dimensions', type: 'text' },
+      { label: 'Colour', key: 'colour', type: 'text' },
+      { label: 'Assembly required', key: 'assembly_required', type: 'boolean' },
+    ],
+    'Office Supplies': [
+      { label: 'Pack size', key: 'pack_size', type: 'text' },
+      { label: 'Material', key: 'material', type: 'text' },
+      { label: 'Dimensions', key: 'dimensions', type: 'text' },
+    ],
+    'Clothing': [
+      { label: 'Sizes available', key: 'sizes', type: 'text' },
+      { label: 'Material', key: 'material', type: 'text' },
+      { label: 'Colour', key: 'colour', type: 'text' },
+      { label: 'Care', key: 'care', type: 'text' },
+    ],
+    'Food & Beverage': [
+      { label: 'Net weight', key: 'net_weight', type: 'text' },
+      { label: 'Storage', key: 'storage', type: 'text' },
+      { label: 'Shelf life', key: 'shelf_life', type: 'text' },
+    ],
+    'Tools & Equipment': [
+      { label: 'Power', key: 'power', type: 'text' },
+      { label: 'Standard', key: 'standard', type: 'text' },
+      { label: 'Warranty', key: 'warranty', type: 'text' },
+      { label: 'Weight', key: 'weight', type: 'text' },
+    ],
+    'Printing & Copying': [
+      { label: 'Paper size', key: 'paper_size', type: 'text' },
+      { label: 'Turnaround', key: 'turnaround', type: 'text' },
+    ],
+    'IT Services': [
+      { label: 'Coverage', key: 'coverage', type: 'text' },
+      { label: 'Response time', key: 'response_time', type: 'text' },
+    ],
+    'Delivery & Logistics': [
+      { label: 'Coverage', key: 'coverage', type: 'text' },
+      { label: 'Turnaround', key: 'turnaround', type: 'text' },
+    ],
+    'Installation & Maintenance': [
+      { label: 'Coverage', key: 'coverage', type: 'text' },
+      { label: 'Turnaround', key: 'turnaround', type: 'text' },
+    ],
+  };
+
   const catNames = ['Electronics', 'Office Supplies', 'Furniture', 'Clothing', 'Food & Beverage', 'Tools & Equipment'];
   const catMap = {};
   for (const name of catNames) {
-    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name, scope: 'product' } }, { upsert: true, new: true });
+    const cat = await Category.findOneAndUpdate(
+      { tenant_id: tenant._id, name },
+      { $set: { name, scope: 'product', custom_fields: CATEGORY_FIELDS[name] || [] } },
+      { upsert: true, new: true },
+    );
     catMap[name] = cat._id;
   }
 
   // Service categories
   const serviceCatNames = ['Printing & Copying', 'IT Services', 'Delivery & Logistics', 'Installation & Maintenance'];
   for (const name of serviceCatNames) {
-    const cat = await Category.findOneAndUpdate({ tenant_id: tenant._id, name }, { $set: { name, scope: 'service' } }, { upsert: true, new: true });
+    const cat = await Category.findOneAndUpdate(
+      { tenant_id: tenant._id, name },
+      { $set: { name, scope: 'service', custom_fields: CATEGORY_FIELDS[name] || [] } },
+      { upsert: true, new: true },
+    );
     catMap[name] = cat._id;
   }
 
@@ -187,6 +254,262 @@ const seed = async () => {
     { name: 'Equipment Installation',       sku: 'SVC-007', cat: 'Installation & Maintenance', item_type: 'service', unit_type: 'fixed', price: 200,  cost_price: 60,  description: 'Professional setup and installation of office equipment and furniture.', images: ['https://images.unsplash.com/photo-1504148455328-c376907d081c?w=600&auto=format&fit=crop'] },
     { name: 'Annual Maintenance Contract',  sku: 'SVC-008', cat: 'Installation & Maintenance', item_type: 'service', unit_type: 'fixed', price: 1200, cost_price: 400, description: 'Yearly maintenance plan covering all purchased equipment and devices.',   images: ['https://images.unsplash.com/photo-1581244277943-fe4a9c777189?w=600&auto=format&fit=crop'] },
   ];
+
+  /**
+   * What a shop would have typed in for each item.
+   *
+   * Seed data, so this is invented — but invented to look like a catalogue a
+   * real shop maintained rather than like filler. The attribute keys line up
+   * with the category's custom_fields above, which is what turns them into a
+   * labelled specification table instead of a guess at what a key meant.
+   *
+   * Anything not listed here simply has less to show, which is also realistic:
+   * no shop fills in every field on every product.
+   */
+  const COPY = {
+    // ── Electronics ──
+    'ELEC-001': { brand: 'Lenovo', short_description: 'A full working machine, not a browsing laptop.',
+      highlights: ['Intel Core i7, 16GB RAM', '512GB NVMe SSD', 'Two-year warranty'],
+      attributes: { warranty: '2 years', connectivity: 'Wi-Fi 6, Bluetooth 5.2, 2× USB-C', power: '65W USB-C', colour: 'Graphite' } },
+    'ELEC-002': { brand: 'Logitech', short_description: 'Quiet, light, and it does not eat batteries.',
+      highlights: ['18-month battery life', 'Silent click', 'Works on glass'],
+      attributes: { warranty: '1 year', connectivity: '2.4GHz USB receiver', power: '1× AA', colour: 'Black' } },
+    'ELEC-003': { brand: 'Anker', short_description: 'One cable to a monitor, a drive and power.',
+      highlights: ['4K HDMI output', '100W pass-through charging', 'SD and microSD readers'],
+      attributes: { warranty: '18 months', connectivity: 'USB-C, HDMI, 3× USB 3.0', power: '100W PD pass-through', colour: 'Space grey' } },
+    'ELEC-004': { brand: 'Keychron', short_description: 'Typing you can hear from the next desk.',
+      highlights: ['Hot-swappable blue switches', 'Per-key RGB', 'Detachable USB-C cable'],
+      attributes: { warranty: '1 year', connectivity: 'USB-C, Bluetooth', power: 'Rechargeable 4000mAh', colour: 'Black' } },
+    'ELEC-005': { brand: 'Dell', short_description: 'Enough desk space for two documents side by side.',
+      highlights: ['4K IPS, 99% sRGB', 'Single-cable USB-C', 'Height and pivot adjustable'],
+      attributes: { warranty: '3 years', connectivity: 'USB-C, 2× HDMI, DisplayPort', power: '90W USB-C delivery', colour: 'Silver' } },
+    'ELEC-006': { brand: 'Sony', short_description: 'Turns an open-plan office into a quiet one.',
+      highlights: ['Active noise cancelling', '30-hour battery', 'Folds flat for a bag'],
+      attributes: { warranty: '1 year', connectivity: 'Bluetooth 5.2, 3.5mm', power: 'USB-C, 30h per charge', colour: 'Midnight blue' } },
+    'ELEC-007': { brand: 'Logitech', short_description: 'Meetings where people can see your face properly.',
+      highlights: ['1080p at 30fps', 'Auto light correction', 'Stereo microphones'],
+      attributes: { warranty: '2 years', connectivity: 'USB-A', power: 'Bus powered', colour: 'Black' } },
+    'ELEC-008': { brand: 'Samsung', short_description: 'A terabyte that fits in a shirt pocket.',
+      highlights: ['1050MB/s read', 'Shock resistant to 2 metres', 'Hardware encryption'],
+      attributes: { warranty: '3 years', connectivity: 'USB 3.2 Gen 2 Type-C', power: 'Bus powered', colour: 'Titan grey' } },
+    'ELEC-009': { brand: 'Xiaomi', short_description: 'Light that does not tire your eyes by four o\'clock.',
+      highlights: ['Five colour temperatures', 'USB charging port in the base', 'Flicker-free'],
+      attributes: { warranty: '1 year', connectivity: 'USB-A output', power: '12W adapter', colour: 'White' } },
+    'ELEC-010': { brand: 'Logitech', short_description: 'Present without standing next to the laptop.',
+      highlights: ['30-metre range', 'Red laser pointer', 'No software to install'],
+      attributes: { warranty: '1 year', connectivity: '2.4GHz USB receiver', power: '2× AAA', colour: 'Black' } },
+
+    // ── Furniture ──
+    'FURN-001': { brand: 'Ergohaus', short_description: 'The chair people stop complaining about.',
+      highlights: ['Adjustable lumbar support', 'Breathable mesh back', 'Rated for 8-hour days'],
+      attributes: { material: 'Mesh and nylon', dimensions: '65 × 65 × 110–120 cm', colour: 'Black', assembly_required: true } },
+    'FURN-002': { brand: 'Ergohaus', short_description: 'Sit or stand, remembered at the touch of a button.',
+      highlights: ['Four memory presets', '70–118cm travel', '80kg lift capacity'],
+      attributes: { material: 'Laminate top, steel frame', dimensions: '120 × 60 cm', colour: 'Oak and white', assembly_required: true } },
+    'FURN-003': { brand: 'Bisley', short_description: 'Four drawers that will outlast the office.',
+      highlights: ['Central locking', 'Anti-tilt mechanism', 'Takes A4 and foolscap'],
+      attributes: { material: 'Powder-coated steel', dimensions: '47 × 62 × 132 cm', colour: 'Grey', assembly_required: false } },
+    'FURN-004': { brand: 'Woodline', short_description: 'Solid wood, not veneer over board.',
+      highlights: ['Five adjustable tiers', 'Solid walnut finish', 'Wall anchor included'],
+      attributes: { material: 'Solid wood', dimensions: '80 × 30 × 180 cm', colour: 'Walnut', assembly_required: true } },
+    'FURN-005': { brand: 'Woodline', short_description: 'Eight people and their laptops, cables hidden.',
+      highlights: ['Seats eight comfortably', 'Two cable grommets', 'Scratch-resistant top'],
+      attributes: { material: 'Engineered wood', dimensions: '240 × 120 × 75 cm', colour: 'Dark oak', assembly_required: true } },
+    'FURN-006': { brand: 'Ergohaus', short_description: 'Two chairs for the other side of the desk.',
+      highlights: ['Sold as a pair', 'Chrome cantilever frame', 'Stackable'],
+      attributes: { material: 'Fabric and chrome', dimensions: '55 × 60 × 85 cm', colour: 'Charcoal', assembly_required: false } },
+    'FURN-007': { brand: 'Woodline', short_description: 'The first thing a visitor sees.',
+      highlights: ['L-shaped with a raised counter', 'Lockable drawer unit', 'Cable tray fitted'],
+      attributes: { material: 'Laminate and steel', dimensions: '180 × 90 × 110 cm', colour: 'White and oak', assembly_required: true } },
+    'FURN-008': { brand: 'Bisley', short_description: 'Somewhere for staff to leave their things.',
+      highlights: ['Six lockable doors', 'Ventilated', 'Two keys per door'],
+      attributes: { material: 'Powder-coated steel', dimensions: '90 × 45 × 180 cm', colour: 'Light grey', assembly_required: false } },
+
+    // ── Office Supplies ──
+    'OFF-001': { brand: 'Double A', short_description: 'Paper that does not jam the printer.',
+      highlights: ['80gsm, high brightness', '500 sheets a ream', 'Works in every laser and inkjet'],
+      attributes: { pack_size: '500 sheets', material: '80gsm wood-free', dimensions: 'A4 (210 × 297 mm)' }, unit: 'ream' },
+    'OFF-002': { brand: 'BIC', short_description: 'Fifty pens, so the drawer stays stocked.',
+      highlights: ['Box of 50', 'Smooth 1.0mm tip', 'Blue ink'],
+      attributes: { pack_size: '50 pens', material: 'Plastic barrel', dimensions: '1.0 mm tip' }, unit: 'box' },
+    'OFF-003': { brand: 'Rapesco', short_description: 'Staples fifty sheets without a fight.',
+      highlights: ['50-sheet capacity', '1000 staples included', 'All-metal body'],
+      attributes: { pack_size: '1 stapler + 1000 staples', material: 'Steel', dimensions: '24/6 and 26/6 staples' } },
+    'OFF-004': { brand: 'Nobo', short_description: 'Magnetic, so notes stay where you put them.',
+      highlights: ['Magnetic dry-erase surface', 'Aluminium frame', 'Pen tray included'],
+      attributes: { pack_size: '1 board', material: 'Lacquered steel', dimensions: '120 × 90 cm' } },
+    'OFF-005': { brand: 'Post-it', short_description: 'Twelve pads in colours you can tell apart.',
+      highlights: ['12 pads of 100 sheets', 'Six assorted colours', 'Sticks and re-sticks'],
+      attributes: { pack_size: '12 pads', material: 'Recycled paper', dimensions: '76 × 76 mm' }, unit: 'pack' },
+    'OFF-006': { brand: 'Bamboo Co', short_description: 'The desk, minus the pile.',
+      highlights: ['Five pieces', 'Solid bamboo', 'Pen holder and file tray'],
+      attributes: { pack_size: '5 pieces', material: 'Bamboo', dimensions: '32 × 24 × 12 cm' }, unit: 'set' },
+    'OFF-007': { brand: 'HP', short_description: 'High-yield, so it lasts a quarter not a month.',
+      highlights: ['Around 2,500 pages', 'Genuine cartridge', 'Fits the LaserJet series'],
+      attributes: { pack_size: '1 cartridge', material: 'Black toner', dimensions: 'Approx. 2,500 pages' } },
+    'OFF-008': { brand: 'Fellowes', short_description: 'Cross-cut, so nothing can be pieced back together.',
+      highlights: ['P-4 security level', 'Eight sheets a pass', 'Shreds staples and cards'],
+      attributes: { pack_size: '1 shredder', material: 'Steel cutters', dimensions: '18-litre bin' } },
+
+    // ── Clothing ──
+    'CLO-001': { brand: 'Gildan', short_description: 'Branded staff shirts that survive washing.',
+      highlights: ['Sizes S to 3XL', 'Embroidery area on the chest', 'Colourfast pique cotton'],
+      attributes: { sizes: 'S–3XL', material: '100% pique cotton', colour: 'Navy, white, black', care: 'Machine wash 40°C' } },
+    'CLO-002': { brand: 'Safejogger', short_description: 'Steel toe, and light enough to wear all day.',
+      highlights: ['Steel toe cap', 'Slip-resistant outsole', 'Sizes 38–46'],
+      attributes: { sizes: '38–46', material: 'Leather and rubber', colour: 'Brown', care: 'Wipe clean' } },
+    'CLO-003': { brand: 'Portwest', short_description: 'Seen from a distance, which is the point.',
+      highlights: ['EN ISO 20471 Class 2', 'Two reflective bands', 'One size fits most'],
+      attributes: { sizes: 'One size', material: 'Polyester mesh', colour: 'Hi-vis yellow', care: 'Machine wash 30°C' } },
+    'CLO-004': { brand: 'Van Heusen', short_description: 'Wrinkle-resistant, so it survives the commute.',
+      highlights: ['Slim fit', 'Wrinkle resistant', 'Sizes S to 2XL'],
+      attributes: { sizes: 'S–2XL', material: '100% cotton', colour: 'White, sky blue', care: 'Machine wash 40°C, warm iron' } },
+    'CLO-005': { brand: 'Portwest', short_description: 'Pockets where you actually need them.',
+      highlights: ['Reinforced knees', 'Six pockets', 'Triple-stitched seams'],
+      attributes: { sizes: '30–40 waist', material: 'Polycotton canvas', colour: 'Navy, black', care: 'Machine wash 40°C' } },
+    'CLO-006': { brand: 'Regatta', short_description: 'For the cold mornings and the cold server room.',
+      highlights: ['Anti-pill fleece', 'Full-length zip', 'Two zipped side pockets'],
+      attributes: { sizes: 'S–3XL', material: '280gsm polyester fleece', colour: 'Black, navy', care: 'Machine wash 30°C' } },
+    'CLO-007': { brand: 'Beechfield', short_description: 'Six panels, one adjustable strap, room for a logo.',
+      highlights: ['Structured six-panel crown', 'Adjustable metal buckle', 'Embroidery area on the front'],
+      attributes: { sizes: 'One size', material: 'Brushed cotton twill', colour: 'Black, navy, white', care: 'Hand wash' } },
+    'CLO-008': { brand: 'Sempercare', short_description: 'Powder-free nitrile, a hundred to a box.',
+      highlights: ['Box of 100', 'Powder free', 'Sizes S to XL'],
+      attributes: { sizes: 'S–XL', material: 'Nitrile', colour: 'Blue', care: 'Single use' }, unit: 'box' },
+
+    // ── Food & Beverage ──
+    'FB-001': { brand: 'Nescafé', short_description: 'The tin that keeps the office running.',
+      highlights: ['Freeze-dried, not spray-dried', '500g resealable tin', 'Around 250 cups'],
+      attributes: { net_weight: '500 g', storage: 'Cool and dry, reseal after opening', shelf_life: '24 months' } },
+    'FB-002': { brand: 'Lipton', short_description: 'Individually wrapped, so they stay fresh.',
+      highlights: ['100 bags', 'Individually wrapped', 'Pure green tea'],
+      attributes: { net_weight: '150 g', storage: 'Cool and dry', shelf_life: '18 months' }, unit: 'box' },
+    'FB-003': { brand: 'Voltic', short_description: 'A case, so the fridge is never empty.',
+      highlights: ['12 × 1.5L bottles', 'Natural mineral water', 'FDA Ghana approved'],
+      attributes: { net_weight: '18 L', storage: 'Out of direct sunlight', shelf_life: '12 months' }, unit: 'case' },
+    'FB-004': { brand: 'Danish', short_description: 'For meetings that run past four.',
+      highlights: ['500g assorted tin', 'Four varieties', 'Resealable lid'],
+      attributes: { net_weight: '500 g', storage: 'Cool and dry', shelf_life: '12 months' } },
+    'FB-005': { brand: 'Nestlé', short_description: 'Malt drink, and the tin everyone recognises.',
+      highlights: ['400g tin', 'Added vitamins and minerals', 'Hot or cold'],
+      attributes: { net_weight: '400 g', storage: 'Cool and dry, reseal after opening', shelf_life: '18 months' } },
+    'FB-006': { brand: 'Ceres', short_description: 'Six cartons, no added sugar.',
+      highlights: ['6 × 1L cartons', '100% juice', 'No added sugar'],
+      attributes: { net_weight: '6 L', storage: 'Refrigerate after opening', shelf_life: '9 months' }, unit: 'pack' },
+    'FB-007': { brand: 'Sweet Valley', short_description: 'A kilo, because the small packs never last.',
+      highlights: ['1kg pack', 'Refined white sugar', 'Resealable'],
+      attributes: { net_weight: '1 kg', storage: 'Cool and dry', shelf_life: '24 months' } },
+    'FB-008': { brand: 'Coffee-Mate', short_description: 'Dissolves without lumps, which is the whole job.',
+      highlights: ['400g tin', 'Non-dairy', 'Dissolves instantly'],
+      attributes: { net_weight: '400 g', storage: 'Cool and dry', shelf_life: '18 months' } },
+
+    // ── Tools & Equipment ──
+    'TOOL-001': { brand: '3M', short_description: 'Certified, adjustable, and actually comfortable.',
+      highlights: ['EN 397 certified', 'Ratchet suspension', 'Vented shell'],
+      attributes: { standard: 'EN 397', warranty: '2 years', weight: '380 g' } },
+    'TOOL-002': { brand: 'Makita', short_description: 'Two batteries, so one is always charged.',
+      highlights: ['18V with two batteries', '20-piece bit set', 'Charger and case included'],
+      attributes: { power: '18V cordless', standard: 'IEC 62841', warranty: '3 years', weight: '1.6 kg' }, unit: 'set' },
+    'TOOL-003': { brand: 'Bosch', short_description: '850 watts, with a guard you can move one-handed.',
+      highlights: ['850W motor', 'Tool-free guard adjustment', 'Spindle lock'],
+      attributes: { power: '850W mains', standard: 'IEC 62841', warranty: '2 years', weight: '2.1 kg' } },
+    'TOOL-004': { brand: 'Stanley', short_description: 'Opens out, so you can see everything at once.',
+      highlights: ['Three cantilever trays', 'Metal latches', '22-inch'],
+      attributes: { warranty: '1 year', weight: '2.8 kg' } },
+    'TOOL-005': { brand: 'Stanley', short_description: 'Locks where you leave it.',
+      highlights: ['8-metre blade', 'Magnetic hook', 'Belt clip'],
+      attributes: { standard: 'EC Class II', warranty: '1 year', weight: '260 g' } },
+    'TOOL-006': { brand: 'Masterplug', short_description: 'Four sockets, each with its own switch.',
+      highlights: ['10-metre cable', 'Surge protected', 'Individually switched'],
+      attributes: { power: '13A / 3250W', standard: 'BS 1363', warranty: '2 years', weight: '1.4 kg' } },
+    'TOOL-007': { brand: 'Werner', short_description: 'Light to carry, steady to stand on.',
+      highlights: ['Six steps', 'Rated to 150kg', 'Non-slip feet'],
+      attributes: { standard: 'EN 131', warranty: '3 years', weight: '6.2 kg' } },
+    'TOOL-008': { brand: 'Firemaster', short_description: 'ABC powder, with the bracket in the box.',
+      highlights: ['2kg ABC dry powder', 'Wall bracket included', 'Pressure gauge'],
+      attributes: { standard: 'EN 3', warranty: '5 years', weight: '3.4 kg' } },
+
+    // ── Services ──
+    'SVC-001': { short_description: 'Black and white A4, priced by the page.',
+      highlights: ['Same-day for most jobs', 'A4 and A3 available', 'Bulk rates over 500 pages'],
+      attributes: { paper_size: 'A4 and A3', turnaround: 'Same day' }, unit: 'page' },
+    'SVC-002': { short_description: 'Full colour, on glossy or matte.',
+      highlights: ['Glossy or matte finish', 'Colour-matched proofs', 'Same-day for most jobs'],
+      attributes: { paper_size: 'A4 and A3', turnaround: 'Same day' }, unit: 'page' },
+    'SVC-003': { short_description: 'Hot lamination for anything that gets handled.',
+      highlights: ['A4 and ID card sizes', 'Gloss or matte film', 'While you wait'],
+      attributes: { paper_size: 'A4, A5, ID card', turnaround: 'While you wait' }, unit: 'sheet' },
+    'SVC-004': { short_description: 'Spiral or comb, up to 300 pages.',
+      highlights: ['Spiral or comb binding', 'Clear or card covers', 'Up to 300 pages'],
+      attributes: { paper_size: 'A4', turnaround: 'Same day' } },
+    'SVC-005': { short_description: 'On site or remote, billed by the hour.',
+      highlights: ['On-site or remote', 'Same-day response in Accra', 'No call-out fee'],
+      attributes: { coverage: 'Greater Accra', response_time: 'Same day' }, unit: 'hour' },
+    'SVC-006': { short_description: 'Same-day delivery anywhere in Accra.',
+      highlights: ['Same-day within Accra', 'Tracked to the door', 'Fragile handling'],
+      attributes: { coverage: 'Greater Accra', turnaround: 'Same day' } },
+    'SVC-007': { short_description: 'Assembled, positioned and tested.',
+      highlights: ['Assembly and positioning', 'Tested before we leave', 'Packaging taken away'],
+      attributes: { coverage: 'Greater Accra', turnaround: '1–2 days' } },
+    'SVC-008': { short_description: 'A year of servicing, priced up front.',
+      highlights: ['Two scheduled services a year', 'Priority call-outs', 'Parts at cost'],
+      attributes: { coverage: 'Greater Accra', turnaround: '48 hours' } },
+  };
+
+  /**
+   * The two settings only a service has.
+   *
+   * service_type decides the stages a request runs through and the words the
+   * client is shown while it is being worked on. requires_file decides whether
+   * the shop is waiting on the client before it can start at all — printing
+   * cannot begin without artwork, and a delivery has nothing to attach. It sits
+   * per service rather than per type because one shop's site survey wants
+   * photos and another's does not.
+   */
+  const SERVICE_SETUP = {
+    'SVC-001': { service_type: 'printing',     requires_file: true  },
+    'SVC-002': { service_type: 'printing',     requires_file: true  },
+    'SVC-003': { service_type: 'printing',     requires_file: false },
+    'SVC-004': { service_type: 'printing',     requires_file: true  },
+    'SVC-005': { service_type: 'repair',       requires_file: false },
+    'SVC-006': { service_type: 'general',      requires_file: false },
+    'SVC-007': { service_type: 'installation', requires_file: false },
+    'SVC-008': { service_type: 'repair',       requires_file: false },
+  };
+
+  /**
+   * What a few things used to cost.
+   *
+   * compare_price is what puts a sale badge on a card and a struck-through
+   * price beside the new one. Six of fifty-six, because a catalogue where
+   * everything is reduced is a catalogue nobody believes.
+   */
+  const WAS_PRICE = {
+    'ELEC-003': 240, 'ELEC-006': 850, 'FURN-004': 450,
+    'OFF-008':  395, 'CLO-006':  220, 'TOOL-007': 450,
+  };
+
+  /**
+   * A public address for a seeded item.
+   *
+   * Products created through the app get their slug from the controller, but
+   * these are upserted straight past it. Without this every seeded product
+   * would sit in the grid and 404 the moment somebody opened it — which is
+   * precisely the thing a demo catalogue exists to let you check.
+   *
+   * Deterministic, because the demo tenant is wiped and re-seeded: the same
+   * name yields the same address every run, so a link that worked yesterday
+   * still works today.
+   */
+  const usedSlugs = new Set();
+  const seedSlug = (name) => {
+    const base = slugify(name) || 'item';
+    let slug = base;
+    for (let n = 2; usedSlugs.has(slug); n++) slug = `${base}-${n}`;
+    usedSlugs.add(slug);
+    return slug;
+  };
+
   const productMap = {};
   for (const p of productDefs) {
     const { sku, cat, item_type: itype, unit_type: utype, ...rest } = p;
@@ -195,6 +518,10 @@ const seed = async () => {
       { tenant_id: tenant._id, sku },
       { $set: {
         ...rest,
+        ...(COPY[sku] || {}),
+        ...(isService ? (SERVICE_SETUP[sku] || {}) : {}),
+        ...(WAS_PRICE[sku] ? { compare_price: WAS_PRICE[sku] } : {}),
+        slug:                seedSlug(rest.name),
         branch_id:           branch._id,
         category_id:         catMap[cat],
         item_type:           itype || 'product',
@@ -205,6 +532,67 @@ const seed = async () => {
       { upsert: true, new: true },
     );
     productMap[sku] = prod;
+  }
+
+  // ── Bundles ────────────────────────────────────────────────────────────────
+  //
+  // A bundle is the third thing the catalogue can hold and nothing in the seed
+  // had ever been one, so the panel that lists what a package contains had
+  // nothing to draw. These reference products seeded just above, which is why
+  // they are created after the loop rather than inside productDefs.
+  //
+  // Deliberately kept out of productMap. That map is what the orders, purchase
+  // orders and stock movements below draw from, and a bundle has no stock of
+  // its own — putting one in would book stock movements against a package
+  // rather than the things inside it.
+  const bundleDefs = [
+    {
+      name: 'Complete Desk Setup', sku: 'BUN-001', cat: 'Electronics',
+      // Priced under the sum of its parts, which is the reason to sell one.
+      price: 6450, compare_price: 7020, cost_price: 5100,
+      description: 'Everything one person needs to start work: laptop, monitor, keyboard, mouse and a chair that will not ruin their back.',
+      short_description: 'One order, one delivery, one desk ready to work at.',
+      brand: 'GEMS',
+      highlights: ['Five items, one price', 'Saves GHS 570 against buying separately', 'Delivered and set up together'],
+      attributes: { warranty: '2 years on the laptop and monitor', connectivity: 'USB-C throughout', power: 'Mains and USB-C', colour: 'Black and graphite' },
+      images: ['https://images.unsplash.com/photo-1593642632559-0c6d3fc62b89?w=600&auto=format&fit=crop'],
+      items: [['ELEC-001', 1], ['ELEC-005', 1], ['ELEC-004', 1], ['ELEC-002', 1], ['FURN-001', 1]],
+    },
+    {
+      name: 'Office Stationery Pack', sku: 'BUN-002', cat: 'Office Supplies',
+      price: 445, compare_price: 501, cost_price: 330,
+      description: 'The restock a small office runs through in a quarter — paper, pens, sticky notes, a stapler and something to keep the desk in order.',
+      short_description: 'The quarterly restock, in one line on the invoice.',
+      brand: 'GEMS',
+      highlights: ['Eleven items in one pack', 'Saves GHS 56 against buying separately', 'Enough paper for a full quarter'],
+      attributes: { pack_size: '11 items', material: 'Paper, plastic and bamboo' },
+      images: ['https://images.unsplash.com/photo-1568667256549-094345857637?w=600&auto=format&fit=crop'],
+      items: [['OFF-001', 5], ['OFF-002', 2], ['OFF-005', 2], ['OFF-003', 1], ['OFF-006', 1]],
+    },
+  ];
+
+  const bundleMap = {};
+  for (const b of bundleDefs) {
+    const { sku, cat, items, ...rest } = b;
+    const composition = items
+      .filter(([componentSku]) => productMap[componentSku])
+      .map(([componentSku, quantity]) => ({ product_id: productMap[componentSku]._id, quantity }));
+    bundleMap[sku] = await Product.findOneAndUpdate(
+      { tenant_id: tenant._id, sku },
+      { $set: {
+        ...rest,
+        slug:          seedSlug(rest.name),
+        branch_id:     branch._id,
+        category_id:   catMap[cat],
+        item_type:     'bundle',
+        bundle_items:  composition,
+        // A bundle is available while its parts are, so it carries no stock
+        // figure of its own and never reads as low.
+        stock_qty:           0,
+        low_stock_threshold: 0,
+      }},
+      { upsert: true, new: true },
+    );
   }
 
   // ── Chart of Accounts ──────────────────────────────────────────────────────
@@ -697,6 +1085,12 @@ const seed = async () => {
   console.log('   Procurement    → procurement@gthink.com / Staff@1234');
   console.log('\n  --- Storefront ---');
   console.log('   Visit: http://localhost:3000/store/gems-store');
+  // Named rather than described, because the point of a seeded catalogue is
+  // that you can go and look at it. A bundle is the item with the most on its
+  // page — specifications, highlights, a "was" price and a contents list.
+  if (bundleMap['BUN-001']?.slug) {
+    console.log(`   A product page: http://localhost:3000/store/gems-store/${bundleMap['BUN-001'].slug}`);
+  }
   process.exit(0);
 };
 
