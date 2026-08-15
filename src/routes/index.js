@@ -588,6 +588,15 @@ router.post(
   imageUpload.single('image'),
   upload.uploadStorefrontImage,
 );
+// The shop's mark. Same guard, same shape.
+router.post(
+  '/uploads/logo',
+  authenticate,
+  requireTenant,
+  requireFeature('storefront'),
+  imageUpload.single('image'),
+  upload.uploadLogo,
+);
 
 // Payout methods — a branch manager manages the account their own branch is
 // paid into; a business owner manages those plus the organisation-wide one.

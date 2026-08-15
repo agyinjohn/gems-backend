@@ -53,6 +53,13 @@ async function uploadStorefrontImage(tenantId, file) {
   return uploaded;
 }
 
+/** The shop's mark. Its own folder for the same reason the hero has one. */
+async function uploadLogo(tenantId, file) {
+  if (!file) throw httpError('No image provided.');
+  const [uploaded] = await uploadImages(tenantId, [file], 'logo');
+  return uploaded;
+}
+
 async function uploadHrFile(tenantId, employeeId, file) {
   if (!isCloudinaryConfigured()) {
     throw httpError('File upload is not configured. Set Cloudinary environment variables.', 503);
@@ -107,4 +114,4 @@ async function uploadServiceFile(tenantId, file) {
   return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadStorefrontImage, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };
+module.exports = { uploadProductImages, uploadImages, uploadStorefrontImage, uploadLogo, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };

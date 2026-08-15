@@ -79,10 +79,24 @@ const getPublicSettings = async (req, res) => {
   });
 };
 
+/**
+ * The shop's logo travels with these settings, but is not one of them.
+ *
+ * It lives on the tenant rather than in storefront_settings because five other
+ * surfaces read it from there — the marketplace card, the services page, order
+ * tracking, the storefront's link preview and the payment certificate — and a
+ * logo that appeared in the shop but not on a customer's receipt would be a
+ * bug nobody would think to look for.
+ *
+ * It is carried on this endpoint anyway because this screen is where a shop
+ * owner edits how their business looks in public, and until now nothing let
+ * them set it at all: the field has been on the tenant since the beginning and
+ * only a platform administrator could ever write to it.
+ */
 const getMerchantSettings = async (req, res) => {
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
-  res.json({ success: true, data: pickSettings(tenant) });
+  res.json({ success: true, data: { ...pickSettings(tenant), logo: tenant.logo || '' } });
 };
 
 const updateMerchantSettings = async (req, res) => {
@@ -101,7 +115,12 @@ const updateMerchantSettings = async (req, res) => {
     banner_image,
     tagline,
     hero_headline,
+    logo,
   } = req.body;
+
+  // Not part of storefront_settings — see getMerchantSettings for why it is
+  // on the tenant, and why it is nonetheless edited from here.
+  if (logo !== undefined) tenant.logo = safeImageUrl(logo);
 
   tenant.storefront_settings = {
     delivery_fee: delivery_fee !== undefined ? Number(delivery_fee) : current.delivery_fee,
@@ -119,7 +138,7 @@ const updateMerchantSettings = async (req, res) => {
   };
   tenant.markModified('storefront_settings');
   await tenant.save();
-  res.json({ success: true, data: pickSettings(tenant) });
+  res.json({ success: true, data: { ...pickSettings(tenant), logo: tenant.logo || '' } });
 };
 
 const trackOrder = async (req, res) => {
