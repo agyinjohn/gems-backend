@@ -119,6 +119,10 @@ function publicReview(r) {
     body: r.is_hidden ? '' : (r.body || ''),
     hidden: !!r.is_hidden,
     variant_label: r.variant_label || '',
+    // The shop's answer, if it gave one. Shown even under a hidden review —
+    // taking the text down does not take down the apology.
+    reply: r.reply || '',
+    replied_at: r.replied_at || null,
     // Every one of them, because every one of them had to be.
     verified: true,
     created_at: r.createdAt,

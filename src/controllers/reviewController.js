@@ -1,6 +1,7 @@
 const { Product, Review, Tenant } = require('../models');
 const reviews = require('../services/reviewService');
 const variants = require('../services/variantService');
+const audit = require('../utils/audit');
 
 /**
  * Reading and writing what customers thought.
@@ -134,4 +135,124 @@ const createReview = async (req, res) => {
   res.status(201).json({ success: true, message: 'Thank you — your review is up.', data: totals });
 };
 
-module.exports = { listReviews, reviewEligibility, createReview };
+/* ── The shop's side ──────────────────────────────────────────────────────── */
+
+const MERCHANT_PAGE = 25;
+const REPLY_MAX = 1000;
+
+/**
+ * Everything customers have said about this shop.
+ *
+ * Scoped to the tenant by the middleware, filtered by whatever the owner is
+ * looking for, and carrying the product name — a list of ratings with no
+ * indication of what was rated is not something anybody can act on.
+ *
+ * The email comes through here where it does not on the public side: a shop
+ * dealing with a complaint needs to be able to reach the person who made it.
+ */
+const merchantReviews = async (req, res) => {
+  const { rating, hidden, product_id, search, page = 1 } = req.query;
+
+  const filter = { tenant_id: req.tenant_id };
+  if (rating) filter.rating = Number(rating);
+  if (hidden === 'true') filter.is_hidden = true;
+  if (hidden === 'false') filter.is_hidden = { $ne: true };
+  if (product_id) filter.product_id = product_id;
+  if (search) {
+    filter.$or = [
+      { customer_name: new RegExp(search, 'i') },
+      { body: new RegExp(search, 'i') },
+    ];
+  }
+
+  const current = Math.max(1, parseInt(page, 10) || 1);
+  const [rows, total, all] = await Promise.all([
+    Review.find(filter)
+      .populate('product_id', 'name slug images')
+      .populate('order_id', 'order_number')
+      .sort({ createdAt: -1 })
+      .skip((current - 1) * MERCHANT_PAGE).limit(MERCHANT_PAGE).lean(),
+    Review.countDocuments(filter),
+    // The shop-wide picture is of every review, not of the filtered page —
+    // an owner looking at the one-star filter still wants to know the average
+    // is 4.4, or the page tells them their shop is in trouble when it is not.
+    Review.find({ tenant_id: req.tenant_id }).select('rating is_hidden reply').lean(),
+  ]);
+
+  const count = all.length;
+  const summary = {
+    total: count,
+    rating_avg: count ? reviews.round1(all.reduce((t, r) => t + r.rating, 0) / count) : 0,
+    breakdown: reviews.breakdownOf(all),
+    hidden: all.filter(r => r.is_hidden).length,
+    // What is waiting on the shop: a poor review nobody has answered.
+    needs_reply: all.filter(r => r.rating <= 3 && !String(r.reply || '').trim()).length,
+  };
+
+  res.json({
+    success: true,
+    data: {
+      reviews: rows.map(r => ({
+        id: String(r._id),
+        product_id: String(r.product_id?._id || r.product_id || ''),
+        product_name: r.product_id?.name || 'A product that has since been removed',
+        product_slug: r.product_id?.slug || '',
+        product_image: (r.product_id?.images || [])[0] || '',
+        order_number: r.order_id?.order_number || '',
+        customer_name: r.customer_name,
+        // Shown to the shop and to nobody else, so a complaint can be answered
+        // off the page as well as on it.
+        customer_email: r.customer_email,
+        variant_label: r.variant_label || '',
+        rating: r.rating,
+        body: r.body || '',
+        reply: r.reply || '',
+        replied_at: r.replied_at || null,
+        is_hidden: !!r.is_hidden,
+        created_at: r.createdAt,
+      })),
+      total,
+      page: current,
+      has_more: current * MERCHANT_PAGE < total,
+      summary,
+    },
+  });
+};
+
+/**
+ * Take a review down, put it back, or answer it.
+ *
+ * There is no delete, and that is deliberate. Hiding a review removes its text
+ * from the shop front and leaves its rating in the average, so a shop can deal
+ * with something abusive or that names a person without being able to improve
+ * its own score by deleting the two-star reviews. A shop that could delete them
+ * would have a rating worth nothing, which is the thing this whole feature is
+ * for.
+ */
+const updateReviewByShop = async (req, res) => {
+  const review = await Review.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!review) return res.status(404).json({ success: false, message: 'Review not found.' });
+
+  if (req.body.is_hidden !== undefined) review.is_hidden = !!req.body.is_hidden;
+
+  if (req.body.reply !== undefined) {
+    const reply = String(req.body.reply || '').trim().slice(0, REPLY_MAX);
+    review.reply = reply;
+    // Cleared rather than kept when a reply is removed, so "replied 3 weeks
+    // ago" cannot outlive the reply it was describing.
+    review.replied_at = reply ? new Date() : null;
+  }
+
+  await review.save();
+  await audit(req, 'UPDATE_REVIEW', 'storefront',
+    `${req.user.name} ${req.body.is_hidden !== undefined ? (review.is_hidden ? 'hid' : 'restored') : 'replied to'} a review`,
+    { review_id: String(review._id), rating: review.rating, hidden: review.is_hidden },
+  );
+
+  res.json({ success: true, message: review.is_hidden ? 'Review hidden.' : 'Saved.', data: { id: String(review._id) } });
+};
+
+module.exports = {
+  listReviews, reviewEligibility, createReview,
+  merchantReviews, updateReviewByShop,
+};

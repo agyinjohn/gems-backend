@@ -740,6 +740,12 @@ router.get('/projects/:id/documents',                   authenticate, requireTen
 router.post('/projects/:id/documents',                  authenticate, requireTenant, requireFeature('projects'), hrDocUpload.single('file'), projects.uploadDocument);
 router.delete('/projects/:id/documents/:documentId',    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDocument);
 
+// What customers said, for the shop that sold it to them. No delete route:
+// hiding takes the text down and leaves the rating in the average, so a shop
+// cannot improve its own score — see the controller.
+router.get('/reviews',        authenticate, requireTenant, serviceManagers, productReviews.merchantReviews);
+router.patch('/reviews/:id',  authenticate, requireTenant, serviceManagers, productReviews.updateReviewByShop);
+
 router.get('/service-requests/types',         authenticate, requireTenant, serviceManagers, serviceRequests.typeCatalogue);
 router.get('/service-requests',               authenticate, requireTenant, serviceManagers, serviceRequests.list);
 router.get('/service-requests/:id',           authenticate, requireTenant, serviceManagers, serviceRequests.get);

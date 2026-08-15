@@ -453,6 +453,14 @@ const reviewSchema = new Schema({
   // take down a review for being two stars — hidden reviews still count toward
   // the average, so hiding one changes nothing about the score.
   is_hidden:   { type: Boolean, default: false },
+  // The shop's answer, shown under the review.
+  //
+  // The one thing a business can actually do about a bad review, and the reason
+  // this is worth having: a two-star review with "sorry — we've refunded the
+  // postage and sent a replacement" under it reads better to the next customer
+  // than four stars with nothing.
+  reply:       { type: String, default: '', maxlength: 1000 },
+  replied_at:  { type: Date, default: null },
 }, { timestamps: true });
 // One review per customer per product per order.
 reviewSchema.index({ tenant_id: 1, product_id: 1, order_id: 1, customer_email: 1 }, { unique: true });
