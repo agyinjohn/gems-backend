@@ -1,4 +1,4 @@
-const { Product, Review, Tenant } = require('../models');
+const { Order, Product, Review, Tenant } = require('../models');
 const reviews = require('../services/reviewService');
 const variants = require('../services/variantService');
 const audit = require('../utils/audit');
@@ -135,6 +135,126 @@ const createReview = async (req, res) => {
   res.status(201).json({ success: true, message: 'Thank you — your review is up.', data: totals });
 };
 
+/* ── The customer's own ───────────────────────────────────────────────────── */
+
+/**
+ * What this customer has said, and what they have not said yet.
+ *
+ * Both halves matter. The first is theirs to look back at — and to correct,
+ * which is why it can be edited: a one-star review left before the shop put the
+ * problem right is a complaint the customer has no way to withdraw, and a
+ * rating nobody can update is a rating that slowly stops being true.
+ *
+ * The second is the useful half for everybody. A customer who bought three
+ * things and reviewed one is not refusing to review the others; they have
+ * forgotten. Listing them where they will be seen is how a shop with four
+ * reviews becomes a shop with forty.
+ */
+const myReviews = async (req, res) => {
+  const customer = req.storeCustomer;
+
+  const [mine, orders] = await Promise.all([
+    Review.find({ tenant_id: customer.tenant_id, customer_email: customer.email })
+      .populate('product_id', 'name slug images')
+      .sort({ createdAt: -1 }).lean(),
+    Order.find({
+      tenant_id: customer.tenant_id,
+      customer_email: customer.email,
+      payment_status: 'paid',
+    }).select('_id order_number items createdAt').sort({ createdAt: -1 }).limit(50).lean(),
+  ]);
+
+  const reviewed = new Set(mine.map(r => `${r.product_id?._id || r.product_id}|${r.order_id}`));
+
+  // Everything bought and not yet spoken about. A product bought twice and
+  // reviewed once still has one waiting, which is the same rule the write path
+  // applies — the two must agree or this list offers something the save
+  // refuses.
+  const awaiting = [];
+  const seen = new Set();
+  for (const order of orders) {
+    for (const line of order.items || []) {
+      if (!line.product_id) continue;
+      // Work is requested and quoted rather than bought off a shelf, and is
+      // not rated here.
+      if (line.item_type === 'service') continue;
+      const key = `${line.product_id}|${order._id}`;
+      if (reviewed.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      awaiting.push({
+        product_id: String(line.product_id),
+        product_name: line.product_name,
+        variant_label: line.variant_label || '',
+        order_number: order.order_number,
+        bought_at: order.createdAt,
+      });
+    }
+  }
+
+  // The addresses, so each row can link to the page that takes the review.
+  const slugs = new Map();
+  if (awaiting.length) {
+    const products = await Product.find({ _id: { $in: awaiting.map(a => a.product_id) } })
+      .select('slug images').lean();
+    for (const p of products) slugs.set(String(p._id), { slug: p.slug || '', image: (p.images || [])[0] || '' });
+  }
+
+  res.json({
+    success: true,
+    data: {
+      written: mine.map(r => ({
+        id: String(r._id),
+        product_name: r.product_id?.name || 'A product that has since been removed',
+        product_slug: r.product_id?.slug || '',
+        product_image: (r.product_id?.images || [])[0] || '',
+        variant_label: r.variant_label || '',
+        rating: r.rating,
+        body: r.body || '',
+        // The shop's answer, which is the reason to come back and look.
+        reply: r.reply || '',
+        replied_at: r.replied_at || null,
+        // Said plainly rather than hidden from them: their words are off the
+        // shop front, and their rating still counts.
+        is_hidden: !!r.is_hidden,
+        created_at: r.createdAt,
+      })),
+      awaiting: awaiting.slice(0, 20).map(a => ({
+        ...a,
+        product_slug: slugs.get(a.product_id)?.slug || '',
+        product_image: slugs.get(a.product_id)?.image || '',
+      })),
+    },
+  });
+};
+
+/** Change your mind about something you said. */
+const updateMyReview = async (req, res) => {
+  const customer = req.storeCustomer;
+  const review = await Review.findOne({
+    _id: req.params.id,
+    tenant_id: customer.tenant_id,
+    // Their own, and only their own. The id alone is not authorisation.
+    customer_email: customer.email,
+  });
+  if (!review) return res.status(404).json({ success: false, message: 'Review not found.' });
+
+  if (req.body.rating !== undefined) {
+    const rating = Math.round(Number(req.body.rating));
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, message: 'Choose between one and five stars.' });
+    }
+    review.rating = rating;
+  }
+  if (req.body.body !== undefined) review.body = String(req.body.body || '').trim().slice(0, BODY_MAX);
+
+  await review.save();
+  // The score follows, because the rating may have moved.
+  const totals = await reviews.recomputeRating({
+    tenantId: customer.tenant_id, productId: review.product_id,
+  });
+  res.json({ success: true, message: 'Updated.', data: totals });
+};
+
 /* ── The shop's side ──────────────────────────────────────────────────────── */
 
 const MERCHANT_PAGE = 25;
@@ -254,5 +374,6 @@ const updateReviewByShop = async (req, res) => {
 
 module.exports = {
   listReviews, reviewEligibility, createReview,
+  myReviews, updateMyReview,
   merchantReviews, updateReviewByShop,
 };

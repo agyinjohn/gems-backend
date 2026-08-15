@@ -837,6 +837,10 @@ router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
 router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);
 router.get('/storefront/customer/me', authenticateStoreCustomer, storeCustomer.getMe);
 router.get('/storefront/customer/orders', authenticateStoreCustomer, storeCustomer.getMyOrders);
+// What this customer has said, and what they bought and have not said anything
+// about yet. Editing is limited to their own by the query, not by the id.
+router.get('/storefront/customer/reviews', authenticateStoreCustomer, productReviews.myReviews);
+router.patch('/storefront/customer/reviews/:id', authenticateStoreCustomer, productReviews.updateMyReview);
 router.post('/storefront/coupons/validate', async (req, res) => {
   const { code, subtotal, tenant_id, tenant_slug } = req.body;
   if (!code) return res.status(400).json({ success: false, message: 'code required.' });
