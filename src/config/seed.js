@@ -4,7 +4,7 @@ const connectDB = require('./db');
 const {
   Tenant, Branch, User, Category, Department, Product, Account, Supplier, Customer,
   Order, Lead, Employee, Expense, PurchaseOrder, StockMovement, JournalEntry,
-  Attendance, LeaveRequest,
+  Attendance, LeaveRequest, Review,
 } = require('../models');
 const { seedChartOfAccounts } = require('../services/accountingService');
 const { slugify } = require('../utils/slug');
@@ -41,6 +41,9 @@ const seed = async () => {
     const tid = existingTenant._id;
     await Promise.all([
       Order.deleteMany({ tenant_id: tid }),
+      // With the orders, because a review is tied to one — leaving them would
+      // orphan every review against an order that no longer exists.
+      Review.deleteMany({ tenant_id: tid }),
       PurchaseOrder.deleteMany({ tenant_id: tid }),
       Expense.deleteMany({ tenant_id: tid }),
       JournalEntry.deleteMany({ tenant_id: tid }),
@@ -773,6 +776,134 @@ const seed = async () => {
   // A few pending/failed for realism
   for (let i = 0; i < 5; i++) await makeOrder(0, rand(1, 10), 'pending');
   for (let i = 0; i < 2; i++) await makeOrder(0, rand(1, 5), 'failed');
+
+  // ── Reviews ────────────────────────────────────────────────────────────────
+  //
+  // Written against the orders above rather than invented alongside them,
+  // because that is the only way one can exist: a review is tied to a paid
+  // order containing the product, and there is no path in the application that
+  // creates one any other way. Seeding them loosely would produce a demo that
+  // demonstrates something the software does not do.
+  //
+  // Not every customer reviews what they bought — most people never do — so
+  // this walks the paid orders and takes a minority of the lines. Products
+  // therefore end up unevenly reviewed, which is what a real catalogue looks
+  // like: a few things with a dozen opinions, most with none.
+  await Review.deleteMany({ tenant_id: tenant._id });
+
+  /**
+   * What somebody actually types, by how many stars they gave.
+   *
+   * Written per band rather than per product so the words match the score. A
+   * five-star review that reads "does the job, nothing special" is the thing
+   * that makes seeded data obvious, and a shop showing this to a customer
+   * would rather it did not.
+   *
+   * A blank entry is a rating with no words, which is most of them.
+   */
+  const REVIEW_TEXT = {
+    5: [
+      'Exactly what I needed. Arrived the next day.',
+      'Second one I have bought. No complaints at all.',
+      'Better than I expected for the price.',
+      'Been using it every day for a month now. Still perfect.',
+      'Delivery was quick and it was well packed.',
+      '', '',
+    ],
+    4: [
+      'Good quality. Took a few days longer than I expected.',
+      'Does the job well. Slightly smaller than I pictured.',
+      'Happy with it. Would buy again.',
+      '',
+    ],
+    3: [
+      'It is fine. Not bad, not remarkable.',
+      'Works, but the finish could be better for the money.',
+      '',
+    ],
+    2: [
+      'Arrived with a scratch. The shop sorted it out but I had to chase them.',
+      'Not quite what the photo suggested.',
+    ],
+    1: [
+      'Stopped working after two weeks. Would not buy again.',
+    ],
+  };
+
+  /**
+   * The star somebody gives.
+   *
+   * Weighted the way real ratings sit — heavily toward four and five, with a
+   * thin tail — because an even spread across one to five would give every
+   * product an average near three and make the whole panel look broken.
+   */
+  const pickRating = () => {
+    const roll = Math.random();
+    if (roll < 0.52) return 5;
+    if (roll < 0.80) return 4;
+    if (roll < 0.92) return 3;
+    if (roll < 0.98) return 2;
+    return 1;
+  };
+
+  const paidOrders = await Order.find({ tenant_id: tenant._id, payment_status: 'paid' })
+    .select('_id customer_name customer_email items createdAt').lean();
+
+  const reviewDocs = [];
+  // One per customer per product per order, so what has already been written
+  // is tracked as it goes rather than left to the unique index to reject.
+  const written = new Set();
+
+  for (const order of paidOrders) {
+    for (const line of order.items || []) {
+      // Roughly one line in three. A catalogue where everything is reviewed is
+      // a catalogue nobody believes either.
+      if (Math.random() > 0.34) continue;
+      if (!order.customer_email) continue;
+
+      const key = `${line.product_id}|${order.customer_email}|${order._id}`;
+      if (written.has(key)) continue;
+      written.add(key);
+
+      const rating = pickRating();
+      reviewDocs.push({
+        tenant_id: tenant._id,
+        product_id: line.product_id,
+        order_id: order._id,
+        variant_label: line.variant_label || '',
+        customer_name: order.customer_name,
+        customer_email: String(order.customer_email).toLowerCase(),
+        rating,
+        body: pick(REVIEW_TEXT[rating]),
+        // Written some days after the order, never before it — a review dated
+        // before the purchase it came from is the sort of detail that makes a
+        // demo stop being believable.
+        createdAt: new Date(new Date(order.createdAt).getTime() + rand(2, 21) * 86400000),
+      });
+    }
+  }
+
+  if (reviewDocs.length) await Review.insertMany(reviewDocs, { ordered: false });
+
+  // The score lives on the product so a page of cards is one query, which means
+  // it has to be recounted here rather than left at zero.
+  const scored = new Map();
+  for (const r of reviewDocs) {
+    const key = String(r.product_id);
+    const row = scored.get(key) || { total: 0, count: 0 };
+    row.total += r.rating;
+    row.count += 1;
+    scored.set(key, row);
+  }
+  // Everything back to nothing first, so a re-seed with fewer reviews does not
+  // leave last run's score on a product that no longer has any.
+  await Product.updateMany({ tenant_id: tenant._id }, { $set: { rating_avg: 0, rating_count: 0 } });
+  for (const [productId, { total, count }] of scored) {
+    await Product.updateOne({ _id: productId }, {
+      $set: { rating_avg: Math.round((total / count) * 10) / 10, rating_count: count },
+    });
+  }
+  console.log(`   ${reviewDocs.length} reviews across ${scored.size} products.`);
 
   // ── Employees ──────────────────────────────────────────────────────────────
   const employeeDefs = [
