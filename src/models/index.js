@@ -399,6 +399,13 @@ const productSchema = new Schema({
   brand:               { type: String, default: '' },
   // The three or four reasons to buy, scannable without reading a paragraph.
   highlights:          { type: [String], default: [] },
+  // --- what customers said ---
+  // Kept on the product rather than counted on read: a grid of twenty-four
+  // cards would otherwise be twenty-four aggregations to draw two decimal
+  // places and a number. Recomputed whenever a review lands — see
+  // services/reviewService.
+  rating_avg:          { type: Number, default: 0 },
+  rating_count:        { type: Number, default: 0 },
   // --- options a customer chooses between (products only) ---
   // Empty for the great majority of products, which come one way. When it is
   // not empty, stock_qty above is the sum of these rather than a figure of its
@@ -414,6 +421,42 @@ productSchema.index({ tenant_id: 1, sku: 1 }, UNIQUE_WHEN_SET('sku'));
 // Scoped per tenant: two shops may both sell a kente stole.
 productSchema.index({ tenant_id: 1, slug: 1 }, UNIQUE_WHEN_SET('slug'));
 productSchema.index({ tenant_id: 1, item_type: 1, is_active: 1 });
+
+/**
+ * What a customer thought of something they bought.
+ *
+ * Every review is tied to the order it came from, and that is not bookkeeping —
+ * it is the whole design. A star rating anybody can post is worth nothing to
+ * the customer reading it and worth a great deal to whoever is willing to write
+ * forty of them, so there is no path here that does not start with a paid order
+ * containing the product. "Verified purchase" is not a badge some reviews earn;
+ * it is the only kind that exists.
+ *
+ * One per customer per product per order: buying the same shirt twice is two
+ * chances to speak, buying it once is one.
+ */
+const reviewSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  product_id:  { type: Schema.Types.ObjectId, ref: 'Product', required: true },
+  // The proof. Without it there is no review.
+  order_id:    { type: Schema.Types.ObjectId, ref: 'Order', required: true },
+  // Which one of it they bought, when the product is sold in options — a
+  // review of the 2XL is useful in a way a review of "the shirt" is not.
+  variant_label: { type: String, default: '' },
+  customer_name:  { type: String, required: true },
+  // Never published. Kept to identify the reviewer and to stop a second review
+  // of the same line.
+  customer_email: { type: String, required: true, lowercase: true, trim: true },
+  rating:      { type: Number, required: true, min: 1, max: 5 },
+  body:        { type: String, default: '', maxlength: 1500 },
+  // A shop can take down a review that is abusive or names somebody. It cannot
+  // take down a review for being two stars — hidden reviews still count toward
+  // the average, so hiding one changes nothing about the score.
+  is_hidden:   { type: Boolean, default: false },
+}, { timestamps: true });
+// One review per customer per product per order.
+reviewSchema.index({ tenant_id: 1, product_id: 1, order_id: 1, customer_email: 1 }, { unique: true });
+reviewSchema.index({ tenant_id: 1, product_id: 1, createdAt: -1 });
 
 // STOCK MOVEMENT
 const stockMovementSchema = new Schema({
@@ -2151,6 +2194,7 @@ module.exports = {
   User:           mongoose.model('User', userSchema),
   Category:       mongoose.model('Category', categorySchema),
   Product:        mongoose.model('Product', productSchema),
+  Review:         mongoose.model('Review', reviewSchema),
   StockMovement:  mongoose.model('StockMovement', stockMovementSchema),
   Customer:       mongoose.model('Customer', customerSchema),
   Lead:           mongoose.model('Lead', leadSchema),

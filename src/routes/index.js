@@ -19,6 +19,35 @@ const { deductItemStock } = require('../controllers/ordersController');
 const { availableQty } = require('../services/stockService');
 const { isShopItem } = require('../services/offeringService');
 const variantService = require('../services/variantService');
+const productReviews = require('../controllers/reviewController');
+
+/**
+ * Attach the store customer when there is one, and carry on when there is not.
+ *
+ * Reviews work either way: signed in, the shop knows who you are; as a guest,
+ * you give the email your receipt went to and the order lookup proves it.
+ *
+ * So this cannot delegate to authenticateStoreCustomer, which answers 401 for a
+ * missing or expired token — a customer whose session lapsed while reading a
+ * product page would be refused rather than quietly falling back to the guest
+ * path, which needs no token at all. It verifies for itself and never fails the
+ * request: no token, a bad one, or an expired one all mean the same thing here,
+ * which is that entitlement has to come from the order lookup instead.
+ */
+const maybeStoreCustomer = async (req, res, next) => {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return next();
+  try {
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET);
+    if (decoded.type === 'store_customer') {
+      const { StoreCustomer } = require('../models');
+      const customer = await StoreCustomer.findById(decoded.id);
+      if (customer) req.storeCustomer = customer;
+    }
+  } catch { /* A guest with a stale token is still a guest. */ }
+  next();
+};
 const procurement = require('../controllers/procurementController');
 const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
@@ -775,6 +804,13 @@ router.get('/track/:token', async (req, res) => {
   if (!data) return res.status(404).json({ success: false, message: 'That link is not valid, or has been withdrawn.' });
   res.json({ success: true, data });
 });
+
+// What customers said. Reading is open; leaving one requires having bought it,
+// which is established from a paid order rather than from a claim — see
+// services/reviewService.
+router.get('/storefront/:tenantSlug/products/:productSlug/reviews', productReviews.listReviews);
+router.get('/storefront/:tenantSlug/products/:productSlug/reviews/eligibility', maybeStoreCustomer, productReviews.reviewEligibility);
+router.post('/storefront/:tenantSlug/products/:productSlug/reviews', maybeStoreCustomer, productReviews.createReview);
 
 router.get('/service-requests/:tenantSlug/services', serviceRequests.publicServices);
 router.post('/service-requests/:tenantSlug', serviceUpload.array('files', 10), serviceRequests.submitRequest);

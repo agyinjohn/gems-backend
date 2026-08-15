@@ -402,6 +402,11 @@ function publicProduct(p) {
       sku: v.sku || undefined,
     })),
 
+    // What customers said. Kept on the product rather than counted here, so a
+    // page of twenty-four cards is one query rather than twenty-five.
+    rating_avg: obj.rating_avg || 0,
+    rating_count: obj.rating_count || 0,
+
     // For a product sold in options this is the sum across them, which is what
     // "how many shirts are there" means.
     stock_qty: variants.totalStock(obj),
