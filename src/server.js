@@ -68,6 +68,14 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', system: 'GEMS', version: '1.0.0', timestamp: new Date() });
 });
 
+// ── SWAGGER DOCS ─────────────────────────────────────────────────────────────
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./swagger/spec');
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customSiteTitle: 'GEMS ERP API Docs',
+}));
+app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
+
 // ── API ROUTES ────────────────────────────────────────────────────────────────
 app.use('/api', routes);
 
