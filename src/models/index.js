@@ -138,9 +138,15 @@ const tenantSchema = new Schema({
   sms_settings: {
     // Shown as the message sender. Falls back to the platform default.
     sender_id:        { type: String, default: '' },
+    // 'none' = not set, 'pending' = submitted to mNotify awaiting approval,
+    // 'approved' = cleared to send, 'rejected' = mNotify declined it.
+    // Sends are blocked unless approved or sender_id is empty (uses platform default).
+    sender_id_status: { type: String, enum: ['none','pending','approved','rejected'], default: 'none' },
     // Per-event switches live on the templates themselves; this is the master.
     enabled:          { type: Boolean, default: true },
     low_balance_at:   { type: Number, default: 20 },
+    // Set when a low-balance alert was last fired, so we don't spam the owner.
+    low_balance_alerted_at: { type: Date, default: null },
   },
   // Email goes out through the tenant's own mailbox rather than the platform's.
   // A quote from Ama's Prints should arrive from Ama's Prints — mail sent as
@@ -1549,7 +1555,12 @@ const smsMessageSchema = new Schema({
   error:         String,
   provider:      String,
   provider_ref:  String,
+  // Updated by the mNotify delivery webhook. 'pending' = accepted but not yet
+  // delivered, 'delivered' = handset confirmed, 'failed' = undeliverable.
+  delivery_status: { type: String, enum: ['pending','delivered','failed'], default: null },
+  delivered_at:  Date,
   source:        String,                                       // e.g. 'order_confirmed', 'campaign'
+  campaign_id:   String,                                       // groups bulk sends together
   sent_by:       { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 smsMessageSchema.index({ tenant_id: 1, createdAt: -1 });

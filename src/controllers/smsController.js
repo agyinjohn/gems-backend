@@ -44,6 +44,7 @@ const getBalance = async (req, res) => {
       low_balance_at: lowAt,
       enabled: tenant?.sms_settings?.enabled !== false,
       sender_id: tenant?.sms_settings?.sender_id || '',
+      sender_id_status: tenant?.sms_settings?.sender_id_status || 'none',
       messages_sent: sent,
       messages_blocked: blocked,
       bundles: await getBundles(),
@@ -56,11 +57,16 @@ const updateSettings = async (req, res) => {
   const update = {};
   if (sender_id !== undefined) {
     const id = String(sender_id).trim();
-    // Alphanumeric sender IDs are capped at 11 characters by the GSM spec.
     if (id.length > 11) {
       return res.status(400).json({ success: false, message: 'Sender ID cannot be longer than 11 characters.' });
     }
     update['sms_settings.sender_id'] = id;
+    // Changing the sender ID resets approval — the new name needs its own approval.
+    if (id) {
+      update['sms_settings.sender_id_status'] = 'pending';
+    } else {
+      update['sms_settings.sender_id_status'] = 'none';
+    }
   }
   if (enabled !== undefined) update['sms_settings.enabled'] = !!enabled;
   if (low_balance_at !== undefined) {
@@ -282,6 +288,77 @@ const sendTest = async (req, res) => {
   res.json({ success: true, data: result });
 };
 
+/**
+ * Send one message to a list of recipients (campaign / broadcast).
+ * Accepts either a raw phone list or a CRM segment filter.
+ */
+const sendCampaign = async (req, res) => {
+  const { recipients, body, name } = req.body;
+  if (!Array.isArray(recipients) || !recipients.length) {
+    return res.status(400).json({ success: false, message: 'recipients must be a non-empty array of phone numbers.' });
+  }
+  if (!body?.trim()) {
+    return res.status(400).json({ success: false, message: 'Message body is required.' });
+  }
+  if (recipients.length > 500) {
+    return res.status(400).json({ success: false, message: 'Maximum 500 recipients per campaign.' });
+  }
+
+  const result = await sms.sendCampaign({
+    tenantId: req.tenant_id,
+    recipients,
+    body: body.trim(),
+    userId: req.user._id,
+    campaignName: name || '',
+  });
+
+  res.json({ success: true, data: result });
+};
+
+/**
+ * mNotify delivery receipt webhook.
+ * mNotify POSTs to this URL when a message is delivered or fails.
+ * Configure the callback URL in your mNotify dashboard.
+ */
+const deliveryWebhook = async (req, res) => {
+  // mNotify sends either query params or a JSON body depending on version.
+  const payload = req.body || {};
+  const messageId = payload.message_id || payload.msg_id || payload.id;
+  const status    = String(payload.status || payload.delivery_status || '').toLowerCase();
+
+  if (!messageId) return res.status(200).json({ received: true }); // ack unknown
+
+  const deliveryStatus = status.includes('deliver') ? 'delivered'
+    : (status.includes('fail') || status.includes('undeliver')) ? 'failed'
+    : null;
+
+  if (deliveryStatus) {
+    await SmsMessage.findOneAndUpdate(
+      { provider_ref: String(messageId) },
+      {
+        delivery_status: deliveryStatus,
+        ...(deliveryStatus === 'delivered' ? { delivered_at: new Date() } : {}),
+      },
+    );
+  }
+
+  res.status(200).json({ received: true });
+};
+
+/**
+ * Platform admin: approve or reject a tenant's sender ID.
+ * In production you'd also call mNotify's registration endpoint here.
+ */
+const approveSenderId = async (req, res) => {
+  const { tenantId } = req.params;
+  const { status } = req.body; // 'approved' | 'rejected'
+  if (!['approved', 'rejected'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'status must be approved or rejected.' });
+  }
+  await Tenant.findByIdAndUpdate(tenantId, { 'sms_settings.sender_id_status': status });
+  res.json({ success: true, message: `Sender ID ${status}.` });
+};
+
 module.exports = {
   getBalance,
   updateSettings,
@@ -294,4 +371,7 @@ module.exports = {
   previewTemplate,
   listMessages,
   sendTest,
+  sendCampaign,
+  deliveryWebhook,
+  approveSenderId,
 };

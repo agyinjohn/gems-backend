@@ -345,7 +345,7 @@ async function getProviderBalance() {
  * Returns a result rather than throwing, so a failed notification never breaks
  * the order flow that triggered it. Every outcome is logged.
  */
-async function sendSms({ tenantId, to, body, templateKey, source, userId }) {
+async function sendSms({ tenantId, to, body, templateKey, source, userId, campaignId }) {
   const phone = normalisePhone(to);
   const log = async (status, extra = {}) => SmsMessage.create({
     tenant_id: tenantId,
@@ -353,6 +353,7 @@ async function sendSms({ tenantId, to, body, templateKey, source, userId }) {
     body: body || '',
     template_key: templateKey,
     source,
+    campaign_id: campaignId || null,
     sent_by: userId || null,
     ...extra,
     status,
@@ -365,6 +366,20 @@ async function sendSms({ tenantId, to, body, templateKey, source, userId }) {
   if (tenant?.sms_settings?.enabled === false) {
     await log('disabled', { segments: countSegments(body), credits_used: 0 });
     return { sent: false, reason: 'sms_disabled' };
+  }
+
+  // Block sends when the tenant has set a custom sender ID that hasn't been
+  // approved yet. An empty sender_id falls through to the platform default,
+  // which is always approved.
+  const senderIdStatus = tenant?.sms_settings?.sender_id_status || 'none';
+  const hasCustomSender = !!tenant?.sms_settings?.sender_id;
+  if (hasCustomSender && senderIdStatus === 'pending') {
+    await log('failed', { segments: countSegments(body), credits_used: 0, error: 'Sender ID is pending approval.' });
+    return { sent: false, reason: 'sender_id_pending' };
+  }
+  if (hasCustomSender && senderIdStatus === 'rejected') {
+    await log('failed', { segments: countSegments(body), credits_used: 0, error: 'Sender ID was rejected. Update it in Messaging settings.' });
+    return { sent: false, reason: 'sender_id_rejected' };
   }
 
   const segments = countSegments(body);
@@ -382,8 +397,34 @@ async function sendSms({ tenantId, to, body, templateKey, source, userId }) {
     return { sent: false, reason: 'insufficient_credits', segments };
   }
 
+  // Fire a low-balance alert if the tenant just crossed their threshold and
+  // hasn't been alerted in the last 24 hours.
+  const lowAt = debited.sms_settings?.low_balance_at ?? 20;
+  const lastAlerted = debited.sms_settings?.low_balance_alerted_at;
+  const alertCooldownPassed = !lastAlerted || (Date.now() - new Date(lastAlerted).getTime()) > 24 * 60 * 60 * 1000;
+  if (debited.sms_credits <= lowAt && alertCooldownPassed) {
+    // Fire-and-forget — never block the send on this.
+    Tenant.findByIdAndUpdate(tenantId, { 'sms_settings.low_balance_alerted_at': new Date() }).catch(() => {});
+    // Notify the business owner via email if configured.
+    const { User } = require('../models');
+    User.findOne({ tenant_id: tenantId, role: 'business_owner' }).select('email name').lean()
+      .then(owner => {
+        if (!owner?.email) return;
+        const { sendEmail } = require('./emailService');
+        sendEmail({
+          tenantId,
+          to: owner.email,
+          subject: 'SMS credits running low',
+          body: `Hi ${owner.name || 'there'},\n\nYour SMS credit balance has dropped to ${debited.sms_credits} credits — below your alert threshold of ${lowAt}.\n\nTop up on the Messaging page to keep customer notifications going out.\n\nGEMS`,
+          source: 'low_balance_alert',
+        }).catch(() => {});
+      }).catch(() => {});
+  }
+
   const settings = await PlatformSettings.findOne().select('sms_sender_id').lean();
-  const senderId = tenant?.sms_settings?.sender_id || settings?.sms_sender_id || 'GEMS';
+  const senderId = (hasCustomSender && senderIdStatus === 'approved')
+    ? tenant.sms_settings.sender_id
+    : (settings?.sms_sender_id || 'GEMS');
 
   try {
     const result = await dispatchToProvider({ to: phone, body, senderId });
@@ -399,6 +440,7 @@ async function sendSms({ tenantId, to, body, templateKey, source, userId }) {
       credits_used: segments,
       provider: result.provider,
       provider_ref: result.provider_ref,
+      delivery_status: result.provider_ref ? 'pending' : null,
     });
     return { sent: true, segments, credits_remaining: debited.sms_credits };
   } catch (err) {
@@ -419,6 +461,35 @@ async function sendTemplated({ tenantId, to, key, vars, userId }) {
   return sendSms({ tenantId, to, body, templateKey: key, source: key, userId });
 }
 
+/**
+ * Send one message to many recipients on a tenant's credit balance.
+ *
+ * Each recipient is a separate send so the log shows individual delivery
+ * status. All share a campaign_id so the history can be filtered by campaign.
+ * Returns a summary rather than an array of results — callers don't need to
+ * iterate, and the response stays small even for large lists.
+ */
+async function sendCampaign({ tenantId, recipients, body, userId, campaignName }) {
+  if (!recipients?.length) return { sent: 0, failed: 0, total: 0 };
+  if (!body?.trim()) return { sent: 0, failed: 0, total: 0, reason: 'empty_body' };
+
+  const campaignId = `CAMP-${Date.now().toString(36).toUpperCase()}`;
+  const source = campaignName ? `campaign:${campaignName}` : 'campaign';
+
+  let sent = 0, failed = 0;
+  for (const to of recipients) {
+    const result = await sendSms({ tenantId, to, body, source, userId, campaignId });
+    if (result.sent) sent++; else failed++;
+    // Stop early if we run out of credits — no point continuing.
+    if (result.reason === 'insufficient_credits') {
+      failed += recipients.length - sent - failed - 1;
+      break;
+    }
+  }
+
+  return { sent, failed, total: recipients.length, campaign_id: campaignId };
+}
+
 module.exports = {
   DEFAULT_TEMPLATES,
   formatForMnotify,
@@ -432,4 +503,5 @@ module.exports = {
   resolveTemplate,
   sendSms,
   sendTemplated,
+  sendCampaign,
 };

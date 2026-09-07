@@ -825,6 +825,11 @@ router.post('/sms/templates/:key/reset', authenticate, requireTenant, businessOw
 router.post('/sms/preview',             authenticate, requireTenant, sms.previewTemplate);
 router.get('/sms/messages',             authenticate, requireTenant, sms.listMessages);
 router.post('/sms/send',                authenticate, requireTenant, businessOwnerOnly, sms.sendTest);
+router.post('/sms/campaign',            authenticate, requireTenant, businessOwnerOnly, sms.sendCampaign);
+// Public — mNotify POSTs delivery receipts here, no auth token.
+router.post('/webhooks/mnotify',        sms.deliveryWebhook);
+// Platform admin: approve/reject a tenant's custom sender ID.
+router.patch('/platform/tenants/:tenantId/sms/sender-id', authenticate, platformAdminOnly, sms.approveSenderId);
 
 // EMAIL — the tenant's own mailbox, their own wording. Nothing is charged for
 // it, so unlike SMS there is nothing to buy and no balance to guard.
