@@ -14,6 +14,7 @@ const inventory = require('../controllers/inventoryController');
 const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
 const { imageUpload, hrDocUpload, serviceUpload } = require('../middleware/uploadMiddleware');
+const { StoreBanner } = require('../models');
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
 const { availableQty } = require('../services/stockService');
@@ -632,6 +633,58 @@ router.post(
   imageUpload.single('image'),
   upload.uploadLogo,
 );
+
+// STORE BANNERS — inline ad images injected between products in the storefront grid
+router.get('/banners', authenticate, requireTenant, requireFeature('storefront'), async (req, res) => {
+  const data = await StoreBanner.find({ tenant_id: req.tenant_id }).sort({ createdAt: -1 });
+  res.json({ success: true, data });
+});
+router.post(
+  '/banners',
+  authenticate,
+  requireTenant,
+  requireFeature('storefront'),
+  businessOwnerOnly,
+  imageUpload.single('image'),
+  async (req, res) => {
+    const uploadSvc = require('../services/uploadService');
+    const { title, link_url, position } = req.body;
+    if (!req.file) return res.status(400).json({ success: false, message: 'image required.' });
+    const { url } = await uploadSvc.uploadBannerImage(req.tenant_id, req.file);
+    const data = await StoreBanner.create({
+      tenant_id: req.tenant_id,
+      title: title || '',
+      image_url: url,
+      link_url: link_url || '',
+      position: parseInt(position, 10) || 8,
+      created_by: req.user._id,
+    });
+    res.status(201).json({ success: true, data });
+  },
+);
+router.patch('/banners/:id', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  const { title, link_url, position, is_active } = req.body;
+  const update = {};
+  if (title !== undefined) update.title = title;
+  if (link_url !== undefined) update.link_url = link_url;
+  if (position !== undefined) update.position = parseInt(position, 10) || 8;
+  if (is_active !== undefined) update.is_active = is_active;
+  const data = await StoreBanner.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true });
+  if (!data) return res.status(404).json({ success: false, message: 'Banner not found.' });
+  res.json({ success: true, data });
+});
+router.delete('/banners/:id', authenticate, requireTenant, requireFeature('storefront'), businessOwnerOnly, async (req, res) => {
+  await StoreBanner.findOneAndDelete({ _id: req.params.id, tenant_id: req.tenant_id });
+  res.json({ success: true });
+});
+// Public: storefront fetches active banners for a tenant
+router.get('/storefront/:tenantSlug/banners', async (req, res) => {
+  const { Tenant } = require('../models');
+  const tenant = await Tenant.findOne({ slug: req.params.tenantSlug, is_active: true });
+  if (!tenant) return res.status(404).json({ success: false, message: 'Store not found.' });
+  const data = await StoreBanner.find({ tenant_id: tenant._id, is_active: true }).sort({ createdAt: 1 });
+  res.json({ success: true, data });
+});
 
 // Payout methods — a branch manager manages the account their own branch is
 // paid into; a business owner manages those plus the organisation-wide one.

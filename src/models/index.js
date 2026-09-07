@@ -2005,6 +2005,18 @@ payoutSchema.index(
   { unique: true, partialFilterExpression: { is_open: true } },
 );
 
+// STORE BANNER — inline promotional image injected between products in the storefront grid
+const storeBannerSchema = new Schema({
+  tenant_id: { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  title:     { type: String, default: '' },
+  image_url: { type: String, required: true },
+  link_url:  { type: String, default: '' },
+  position:  { type: Number, default: 8 },   // inject after every N products
+  is_active: { type: Boolean, default: true },
+  created_by:{ type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+storeBannerSchema.index({ tenant_id: 1, is_active: 1 });
+
 // COUPON
 const couponSchema = new Schema({
   tenant_id:         { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -2173,7 +2185,7 @@ const allSchemas = [
   invoiceSchema, creditNoteSchema, accountingPeriodSchema, vendorBillSchema, bankReconciliationSchema,
   chatConversationSchema, chatMessageSchema, roleSchema,
   storageLocationSchema, assetCategorySchema, assetSchema, assetLogSchema,
-  posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, couponSchema, promotionSchema,
+  posShiftSchema, posCustomerDisplaySchema, storeCustomerSchema, storeBannerSchema, couponSchema, promotionSchema,
   jobSchema, jobItemSchema,
   payoutMethodSchema, payoutSchema,
   smsPurchaseSchema, smsTemplateSchema, smsMessageSchema,
@@ -2247,6 +2259,7 @@ module.exports = {
   PosShift:              mongoose.model('PosShift', posShiftSchema),
   PosCustomerDisplay:    mongoose.model('PosCustomerDisplay', posCustomerDisplaySchema),
   StoreCustomer:         mongoose.model('StoreCustomer', storeCustomerSchema),
+  StoreBanner:           mongoose.model('StoreBanner', storeBannerSchema),
   Coupon:                mongoose.model('Coupon', couponSchema),
   Promotion:             mongoose.model('Promotion', promotionSchema),
   PayoutMethod:          mongoose.model('PayoutMethod', payoutMethodSchema),

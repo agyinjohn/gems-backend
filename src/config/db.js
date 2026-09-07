@@ -3,8 +3,9 @@ const { repairIndexes } = require('./indexRepair');
 
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/gthink_erp');
-    console.log('mongo uri: ', process.env.MONGO_URI || 'mongodb://localhost:27017/gthink_erp');
+    const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/gthink_erp';
+    console.log('🔌 Connecting to MongoDB:', uri.replace(/:([^@]+)@/, ':****@'));
+    await mongoose.connect(uri);
     console.log('✅ Connected to MongoDB');
     // Indexes an older release declared wrongly, which stop writes rather than
     // slow them. Silent when there is nothing to put right, and never a reason
@@ -12,7 +13,11 @@ const connectDB = async () => {
     // promised.
     await repairIndexes().catch((e) => console.error('⚠️  Index check failed:', e.message));
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err.message);
+    console.error('❌ MongoDB connection error:');
+    console.error('   Message :', err.message);
+    console.error('   Code    :', err.code ?? err.codeName ?? 'N/A');
+    console.error('   Reason  :', err.reason?.toString() ?? 'N/A');
+    console.error('   Stack   :', err.stack);
     process.exit(1);
   }
 };

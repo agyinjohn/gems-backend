@@ -114,4 +114,11 @@ async function uploadServiceFile(tenantId, file) {
   return { url: result.secure_url, public_id: result.public_id, size: result.bytes };
 }
 
-module.exports = { uploadProductImages, uploadImages, uploadStorefrontImage, uploadLogo, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };
+/** Ad banners uploaded by a business owner for their storefront. */
+async function uploadBannerImage(tenantId, file) {
+  if (!file) throw httpError('No image provided.');
+  const [uploaded] = await uploadImages(tenantId, [file], 'banners');
+  return uploaded;
+}
+
+module.exports = { uploadProductImages, uploadImages, uploadStorefrontImage, uploadLogo, uploadBannerImage, uploadHrFile, uploadProjectFile, uploadContractFile, uploadServiceFile, isCloudinaryConfigured };

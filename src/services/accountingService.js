@@ -3,42 +3,42 @@ const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, Purcha
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const STANDARD_COA = [
-  { code: '1000', name: 'Assets',               type: 'asset',     level: 1, is_group: true,  parent_code: null },
-  { code: '1100', name: 'Current Assets',        type: 'asset',     level: 2, is_group: true,  parent_code: '1000' },
-  { code: '1001', name: 'Cash & Bank',           type: 'asset',     level: 3, is_group: false, parent_code: '1100' },
-  { code: '1110', name: 'Accounts Receivable',   type: 'asset',     level: 3, is_group: false, parent_code: '1100' },
-  { code: '1120', name: 'Inventory',             type: 'asset',     level: 3, is_group: false, parent_code: '1100' },
-  { code: '1130', name: 'Prepaid Expenses',      type: 'asset',     level: 3, is_group: false, parent_code: '1100' },
-  { code: '1135', name: 'VAT Input',             type: 'asset',     level: 3, is_group: false, parent_code: '1100' },
-  { code: '1200', name: 'Non-Current Assets',    type: 'asset',     level: 2, is_group: true,  parent_code: '1000' },
-  { code: '1210', name: 'Property & Equipment',  type: 'asset',     level: 3, is_group: false, parent_code: '1200' },
-  { code: '1220', name: 'Accumulated Depreciation', type: 'asset',  level: 3, is_group: false, parent_code: '1200' },
-  { code: '2000', name: 'Liabilities',           type: 'liability', level: 1, is_group: true,  parent_code: null },
-  { code: '2100', name: 'Current Liabilities',   type: 'liability', level: 2, is_group: true,  parent_code: '2000' },
-  { code: '2001', name: 'Accounts Payable',      type: 'liability', level: 3, is_group: false, parent_code: '2100' },
-  { code: '2110', name: 'VAT Payable',           type: 'liability', level: 3, is_group: false, parent_code: '2100' },
-  { code: '2120', name: 'Accrued Liabilities',   type: 'liability', level: 3, is_group: false, parent_code: '2100' },
-  { code: '2130', name: 'Salaries Payable',      type: 'liability', level: 3, is_group: false, parent_code: '2100' },
-  { code: '2140', name: 'SSNIT Payable',         type: 'liability', level: 3, is_group: false, parent_code: '2100' },
-  { code: '2141', name: 'PAYE Payable',          type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '1000', name: 'Assets', type: 'asset', level: 1, is_group: true, parent_code: null },
+  { code: '1100', name: 'Current Assets', type: 'asset', level: 2, is_group: true, parent_code: '1000' },
+  { code: '1001', name: 'Cash & Bank', type: 'asset', level: 3, is_group: false, parent_code: '1100' },
+  { code: '1110', name: 'Accounts Receivable', type: 'asset', level: 3, is_group: false, parent_code: '1100' },
+  { code: '1120', name: 'Inventory', type: 'asset', level: 3, is_group: false, parent_code: '1100' },
+  { code: '1130', name: 'Prepaid Expenses', type: 'asset', level: 3, is_group: false, parent_code: '1100' },
+  { code: '1135', name: 'VAT Input', type: 'asset', level: 3, is_group: false, parent_code: '1100' },
+  { code: '1200', name: 'Non-Current Assets', type: 'asset', level: 2, is_group: true, parent_code: '1000' },
+  { code: '1210', name: 'Property & Equipment', type: 'asset', level: 3, is_group: false, parent_code: '1200' },
+  { code: '1220', name: 'Accumulated Depreciation', type: 'asset', level: 3, is_group: false, parent_code: '1200' },
+  { code: '2000', name: 'Liabilities', type: 'liability', level: 1, is_group: true, parent_code: null },
+  { code: '2100', name: 'Current Liabilities', type: 'liability', level: 2, is_group: true, parent_code: '2000' },
+  { code: '2001', name: 'Accounts Payable', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '2110', name: 'VAT Payable', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '2120', name: 'Accrued Liabilities', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '2130', name: 'Salaries Payable', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '2140', name: 'SSNIT Payable', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
+  { code: '2141', name: 'PAYE Payable', type: 'liability', level: 3, is_group: false, parent_code: '2100' },
   { code: '2200', name: 'Non-Current Liabilities', type: 'liability', level: 2, is_group: true, parent_code: '2000' },
-  { code: '2210', name: 'Long-Term Loans',       type: 'liability', level: 3, is_group: false, parent_code: '2200' },
-  { code: '3000', name: 'Equity',                type: 'equity',    level: 1, is_group: true,  parent_code: null },
-  { code: '3001', name: "Owner's Equity",        type: 'equity',    level: 3, is_group: false, parent_code: '3000' },
-  { code: '3900', name: 'Retained Earnings',     type: 'equity',    level: 3, is_group: false, parent_code: '3000' },
-  { code: '4000', name: 'Revenue',               type: 'revenue',   level: 1, is_group: true,  parent_code: null },
-  { code: '4001', name: 'Sales Revenue',         type: 'revenue',   level: 3, is_group: false, parent_code: '4000' },
-  { code: '4010', name: 'Service Revenue',       type: 'revenue',   level: 3, is_group: false, parent_code: '4000' },
-  { code: '4900', name: 'Other Income',          type: 'revenue',   level: 3, is_group: false, parent_code: '4000' },
-  { code: '5000', name: 'Expenses',              type: 'expense',   level: 1, is_group: true,  parent_code: null },
-  { code: '5001', name: 'Cost of Goods Sold',    type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
-  { code: '5100', name: 'Salaries & Wages',      type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
-  { code: '5200', name: 'Office Expenses',       type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
-  { code: '5300', name: 'Rent & Utilities',      type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
+  { code: '2210', name: 'Long-Term Loans', type: 'liability', level: 3, is_group: false, parent_code: '2200' },
+  { code: '3000', name: 'Equity', type: 'equity', level: 1, is_group: true, parent_code: null },
+  { code: '3001', name: "Owner's Equity", type: 'equity', level: 3, is_group: false, parent_code: '3000' },
+  { code: '3900', name: 'Retained Earnings', type: 'equity', level: 3, is_group: false, parent_code: '3000' },
+  { code: '4000', name: 'Revenue', type: 'revenue', level: 1, is_group: true, parent_code: null },
+  { code: '4001', name: 'Sales Revenue', type: 'revenue', level: 3, is_group: false, parent_code: '4000' },
+  { code: '4010', name: 'Service Revenue', type: 'revenue', level: 3, is_group: false, parent_code: '4000' },
+  { code: '4900', name: 'Other Income', type: 'revenue', level: 3, is_group: false, parent_code: '4000' },
+  { code: '5000', name: 'Expenses', type: 'expense', level: 1, is_group: true, parent_code: null },
+  { code: '5001', name: 'Cost of Goods Sold', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
+  { code: '5100', name: 'Salaries & Wages', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
+  { code: '5200', name: 'Office Expenses', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
+  { code: '5300', name: 'Rent & Utilities', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
   { code: '5400', name: 'Marketing & Advertising', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
-  { code: '5500', name: 'Depreciation',          type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
-  { code: '5600', name: 'Bank Charges',          type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
-  { code: '5900', name: 'Other Expenses',        type: 'expense',   level: 3, is_group: false, parent_code: '5000' },
+  { code: '5500', name: 'Depreciation', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
+  { code: '5600', name: 'Bank Charges', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
+  { code: '5900', name: 'Other Expenses', type: 'expense', level: 3, is_group: false, parent_code: '5000' },
 ];
 
 function round2(n) {
@@ -122,21 +122,25 @@ async function buildAccountsCoaView(tenantId, options = {}) {
     JournalEntry.aggregate([
       { $match: { tenant_id: tenantId, status: { $ne: 'voided' } } },
       { $unwind: '$lines' },
-      { $group: {
-        _id: '$lines.account_id',
-        balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } },
-        debit_total: { $sum: '$lines.debit' },
-        credit_total: { $sum: '$lines.credit' },
-        entry_ids: { $addToSet: '$_id' },
-        last_activity: { $max: '$entry_date' },
-      }},
-      { $project: {
-        balance: 1,
-        debit_total: 1,
-        credit_total: 1,
-        last_activity: 1,
-        entry_count: { $size: '$entry_ids' },
-      }},
+      {
+        $group: {
+          _id: '$lines.account_id',
+          balance: { $sum: { $subtract: ['$lines.debit', '$lines.credit'] } },
+          debit_total: { $sum: '$lines.debit' },
+          credit_total: { $sum: '$lines.credit' },
+          entry_ids: { $addToSet: '$_id' },
+          last_activity: { $max: '$entry_date' },
+        }
+      },
+      {
+        $project: {
+          balance: 1,
+          debit_total: 1,
+          credit_total: 1,
+          last_activity: 1,
+          entry_count: { $size: '$entry_ids' },
+        }
+      },
     ]),
   ]);
 
@@ -1156,11 +1160,13 @@ async function getGlBalanceMap(tenantId, asOf = null) {
     { $unwind: '$lines' },
     { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
     { $unwind: '$acc' },
-    { $group: {
-      _id: { code: '$acc.code', type: '$acc.type', name: '$acc.name', is_group: '$acc.is_group' },
-      debit: { $sum: '$lines.debit' },
-      credit: { $sum: '$lines.credit' },
-    }},
+    {
+      $group: {
+        _id: { code: '$acc.code', type: '$acc.type', name: '$acc.name', is_group: '$acc.is_group' },
+        debit: { $sum: '$lines.debit' },
+        credit: { $sum: '$lines.credit' },
+      }
+    },
   ]);
   const map = {};
   for (const r of rows) {
@@ -1543,10 +1549,12 @@ async function buildGlMonthlyRevenueInRange(tenantId, from, to) {
     { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
     { $unwind: '$acc' },
     { $match: { 'acc.type': 'revenue', 'acc.is_group': { $ne: true } } },
-    { $group: {
-      _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
-      revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
-    }},
+    {
+      $group: {
+        _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
+        revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
+      }
+    },
     { $sort: { '_id.year': 1, '_id.month': 1 } },
   ]);
 
@@ -1588,12 +1596,14 @@ async function buildOrdersPl(tenantId, from, to) {
       { $match: match },
       { $group: { _id: { month: { $month: '$createdAt' }, year: { $year: '$createdAt' } }, revenue: { $sum: '$total' } } },
       { $sort: { '_id.year': 1, '_id.month': 1 } },
-      { $project: {
-        month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] },
-        year: '$_id.year',
-        label: { $concat: [{ $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, ' ', { $toString: '$_id.year' }] },
-        revenue: 1,
-      } },
+      {
+        $project: {
+          month: { $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] },
+          year: '$_id.year',
+          label: { $concat: [{ $arrayElemAt: [['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], '$_id.month'] }, ' ', { $toString: '$_id.year' }] },
+          revenue: 1,
+        }
+      },
     ]),
   ]);
 
@@ -1687,10 +1697,12 @@ async function buildGlMonthlyRevenue(tenantId, months = 6) {
     { $lookup: { from: 'accounts', localField: 'lines.account_id', foreignField: '_id', as: 'acc' } },
     { $unwind: '$acc' },
     { $match: { 'acc.type': 'revenue', 'acc.is_group': { $ne: true } } },
-    { $group: {
-      _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
-      revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
-    }},
+    {
+      $group: {
+        _id: { month: { $month: '$entry_date' }, year: { $year: '$entry_date' } },
+        revenue: { $sum: { $subtract: ['$lines.credit', '$lines.debit'] } },
+      }
+    },
     { $sort: { '_id.year': 1, '_id.month': 1 } },
   ]);
 
@@ -1858,16 +1870,18 @@ async function buildPayablesView(tenantId, options = {}) {
     { $match: { tenant_id: tenantId, status: { $ne: 'voided' } } },
     { $unwind: '$lines' },
     { $match: { 'lines.account_id': apAccount._id } },
-    { $group: {
-      _id: '$_id',
-      reference: { $first: '$reference' },
-      description: { $first: '$description' },
-      entry_date: { $first: '$entry_date' },
-      source: { $first: '$source' },
-      source_id: { $first: '$source_id' },
-      debit: { $sum: '$lines.debit' },
-      credit: { $sum: '$lines.credit' },
-    }},
+    {
+      $group: {
+        _id: '$_id',
+        reference: { $first: '$reference' },
+        description: { $first: '$description' },
+        entry_date: { $first: '$entry_date' },
+        source: { $first: '$source' },
+        source_id: { $first: '$source_id' },
+        debit: { $sum: '$lines.debit' },
+        credit: { $sum: '$lines.credit' },
+      }
+    },
     { $sort: { entry_date: -1 } },
   ]);
 
@@ -2678,12 +2692,12 @@ async function buildAccountingOverview(tenantId, options = {}) {
     recent_expenses: recentExpenses,
     current_period: currentPeriod
       ? {
-          id: currentPeriod._id,
-          name: currentPeriod.name,
-          status: currentPeriod.status,
-          start_date: currentPeriod.start_date,
-          end_date: currentPeriod.end_date,
-        }
+        id: currentPeriod._id,
+        name: currentPeriod.name,
+        status: currentPeriod.status,
+        start_date: currentPeriod.start_date,
+        end_date: currentPeriod.end_date,
+      }
       : null,
     accounts_by_type: accountsByType,
     // Legacy fields for backward compatibility

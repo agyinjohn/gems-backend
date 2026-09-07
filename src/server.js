@@ -10,8 +10,6 @@ const connectDB = require('./config/db');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 
-connectDB();
-
 const app = express();
 // Trust the hosting proxy (Render/Vercel/etc.) so req.ip reflects the real
 // client address for audit logging, not the proxy's.
@@ -88,7 +86,8 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 // ── START ─────────────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
+  await connectDB();
   const { startBillingCron } = require('./utils/billingCron');
   startBillingCron();
   console.log('');

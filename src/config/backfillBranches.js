@@ -109,6 +109,6 @@ async function run() {
 
 run().catch(async (err) => {
   console.error('❌ Backfill failed:', err);
-  try { await mongoose.disconnect(); } catch {}
+  try { await mongoose.disconnect(); } catch { }
   process.exit(1);
 });

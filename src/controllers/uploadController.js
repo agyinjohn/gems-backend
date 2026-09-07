@@ -19,4 +19,9 @@ const uploadLogo = async (req, res) => {
   res.status(201).json({ success: true, message: 'Logo uploaded.', data });
 };
 
-module.exports = { uploadProductImages, uploadStorefrontImage, uploadLogo };
+const uploadBannerImage = async (req, res) => {
+  const data = await uploadService.uploadBannerImage(req.tenant_id, req.file);
+  res.status(201).json({ success: true, message: 'Banner image uploaded.', data });
+};
+
+module.exports = { uploadProductImages, uploadStorefrontImage, uploadLogo, uploadBannerImage };

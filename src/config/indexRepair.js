@@ -58,7 +58,7 @@ async function repairIndex(connection, spec) {
     // the collection with no guard at all, and let the error travel.
     if (current) {
       const { v, name, key, ...options } = current;
-      await collection.createIndex(key, { name, ...options }).catch(() => {});
+      await collection.createIndex(key, { name, ...options }).catch(() => { });
     }
     throw err;
   }
