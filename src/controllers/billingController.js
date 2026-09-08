@@ -162,7 +162,7 @@ const authorizeCard = async (req, res) => {
 
   const https = require('node:https');
   const payload = JSON.stringify({
-    email: tenant.email, amount: 50, currency: 'GHS',
+    email: tenant.email, amount: 5000, currency: 'GHS',
     channels: ['card'],
     metadata: { tenant_id: String(req.tenant_id), user_id: String(req.user._id), purpose: 'card_authorization' },
     callback_url: `${process.env.FRONTEND_URL}/billing?card_saved=true`,
