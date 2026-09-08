@@ -241,7 +241,7 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
       status: 'success',
       payer_name: order.customer_name,
       payer_email: order.customer_email,
-      description: `${isPrint ? 'Print job' : 'Storefront order'} ${order.order_number}`,
+      description: `Storefront order ${order.order_number}`,
       source_id: order._id,
     });
 

@@ -208,9 +208,10 @@ const updateOrderStatus = async (req, res) => {
 
   // SMS notifications — service orders use 'completed', product orders use 'delivered'
   const notifiable = {
+    processing: 'order_confirmed',
     shipped:    'order_shipped',
     delivered:  'order_delivered',
-    completed:  'order_delivered',  // reuse delivered template for service completion
+    completed:  'order_delivered',
     cancelled:  'order_cancelled',
   };
   if (notifiable[status] && order.customer_phone) {

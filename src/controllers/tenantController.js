@@ -32,6 +32,7 @@ const sendOtp = async (req, res) => {
 
   if (!result.sent) {
     console.log(`[OTP] ${normalised} -> ${otp}`);
+    return res.status(503).json({ success: false, message: 'SMS service is not available. Please try again later.' });
   }
 
   res.json({ success: true, message: 'OTP sent.' });
