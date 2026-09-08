@@ -492,6 +492,7 @@ async function sendCampaign({ tenantId, recipients, body, userId, campaignName }
 
 module.exports = {
   DEFAULT_TEMPLATES,
+  dispatchToProvider,
   formatForMnotify,
   getProviderBalance,
   TEMPLATE_VARIABLES,
