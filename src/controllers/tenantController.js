@@ -1,11 +1,76 @@
 const bcrypt = require('bcryptjs');
-const { Tenant, Branch, User } = require('../models');
+const crypto = require('crypto');
+const { Tenant, Branch, User, OtpVerification } = require('../models');
 const { seedChartOfAccounts } = require('../services/accountingService');
+const { dispatchToProvider, normalisePhone } = require('../services/smsService');
+const { PlatformSettings } = require('../models');
+
+// POST /api/tenants/send-otp — public
+const sendOtp = async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ success: false, message: 'phone is required.' });
+  const normalised = normalisePhone(phone);
+  if (!normalised) return res.status(400).json({ success: false, message: 'Invalid phone number.' });
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires_at = new Date(Date.now() + 10 * 60 * 1000);
+
+  await OtpVerification.findOneAndUpdate(
+    { phone: normalised },
+    { otp, verified: false, expires_at },
+    { upsert: true, new: true },
+  );
+
+  const settings = await PlatformSettings.findOne().select('sms_sender_id').lean();
+  const senderId = settings?.sms_sender_id || 'GEMS';
+
+  const result = await dispatchToProvider({
+    to: normalised,
+    body: `Your GEMS verification code is ${otp}. It expires in 10 minutes.`,
+    senderId,
+  });
+
+  if (!result.sent) {
+    console.log(`[OTP] ${normalised} -> ${otp}`);
+  }
+
+  res.json({ success: true, message: 'OTP sent.' });
+};
+
+// POST /api/tenants/verify-otp — public
+const verifyOtp = async (req, res) => {
+  const { phone, otp } = req.body;
+  if (!phone || !otp) return res.status(400).json({ success: false, message: 'phone and otp are required.' });
+  const normalised = normalisePhone(phone);
+  const entry = await OtpVerification.findOne({ phone: normalised });
+
+  if (!entry) return res.status(400).json({ success: false, message: 'No OTP found for this number. Please request a new one.' });
+  if (new Date() > entry.expires_at) {
+    await OtpVerification.deleteOne({ phone: normalised });
+    return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+  }
+  if (entry.otp !== String(otp).trim()) {
+    return res.status(400).json({ success: false, message: 'Incorrect OTP.' });
+  }
+
+  entry.verified = true;
+  await entry.save();
+  res.json({ success: true, message: 'Phone number verified.' });
+};
 
 // POST /api/tenants/register — public, creates tenant + business owner account
 const registerTenant = async (req, res) => {
   const { business_name, email, password, phone, address } = req.body;
   if (!business_name || !email || !password || !phone || !address) return res.status(400).json({ success: false, message: 'business_name, email, password, phone and address are required.' });
+
+  // Enforce phone verification
+  const { normalisePhone } = require('../services/smsService');
+  const normalised = normalisePhone(phone);
+  const otpEntry = await OtpVerification.findOne({ phone: normalised });
+  if (!otpEntry?.verified) {
+    return res.status(400).json({ success: false, message: 'Phone number not verified. Please verify your number before registering.' });
+  }
+  await OtpVerification.deleteOne({ phone: normalised }); // consume it
 
   const existing = await Tenant.findOne({ email: email.toLowerCase().trim() });
   if (existing) return res.status(400).json({ success: false, message: 'A business with this email already exists.' });
@@ -131,4 +196,4 @@ const getMyTenant = async (req, res) => {
   res.json({ success: true, data: { ...tenant.toJSON(), branches, user_count: userCount } });
 };
 
-module.exports = { registerTenant, getAllTenants, getTenant, updateTenant, suspendTenant, activateTenant, getMyTenant };
+module.exports = { sendOtp, verifyOtp, registerTenant, getAllTenants, getTenant, updateTenant, suspendTenant, activateTenant, getMyTenant };
