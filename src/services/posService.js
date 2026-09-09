@@ -6,6 +6,7 @@ const { verifyPaystackTransaction } = require('./paymentService');
 const { clearCustomerDisplayByOrderId, setPaidDisplayFlash } = require('./posDisplayService');
 const { resolveUnitPrice } = require('./pricingService');
 const { stockLines, shortageFor } = require('./stockService');
+const { adjustBranchStock } = require('../utils/branchStock');
 
 async function getOpenShift(tenantId, userId, branchId) {
   const filter = { tenant_id: tenantId, opened_by: userId, status: 'open' };
@@ -130,16 +131,19 @@ async function completePosSale({
     // solution comes back as its stocked parts.
     for (const line of await stockLines({ tenantId, product: sold, quantity: item.quantity })) {
       const stockUpdate = fromReservation
-        ? { $inc: { stock_qty: -line.quantity, reserved_qty: -line.quantity } }
-        : { $inc: { stock_qty: -line.quantity } };
-      const updated = await Product.findOneAndUpdate(
-        { _id: line.product_id, tenant_id: tenantId },
-        stockUpdate,
-        { new: true },
-      );
-      if (updated && updated.reserved_qty < 0) {
-        await Product.findByIdAndUpdate(updated._id, { reserved_qty: 0 });
+        ? { $inc: { reserved_qty: -line.quantity } }
+        : {};
+      if (Object.keys(stockUpdate).length) {
+        const updated = await Product.findOneAndUpdate(
+          { _id: line.product_id, tenant_id: tenantId },
+          stockUpdate,
+          { new: true },
+        );
+        if (updated && updated.reserved_qty < 0) {
+          await Product.findByIdAndUpdate(updated._id, { reserved_qty: 0 });
+        }
       }
+      await adjustBranchStock(Product, line.product_id, branchId, -line.quantity);
       await StockMovement.create({
         tenant_id: tenantId,
         product_id: line.product_id,

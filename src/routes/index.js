@@ -67,6 +67,7 @@ const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
 const audit = require('../utils/audit');
+const { adjustBranchStock, setBranchStock, branchQty } = require('../utils/branchStock');
 const pos = require('../controllers/posController');
 const storeCustomer = require('../controllers/storeCustomerController');
 const { validateCoupon } = require('../services/couponService');
@@ -415,13 +416,16 @@ router.post('/inventory/transfer', authenticate, requireTenant, authorize('busin
 
   const source = await Product.findOne({ _id: product_id, tenant_id: req.tenant_id, is_active: true, item_type: 'product' });
   if (!source) return res.status(404).json({ success: false, message: 'Product not found.' });
-  if (source.stock_qty < qty)
-    return res.status(400).json({ success: false, message: `Insufficient stock — only ${source.stock_qty} ${source.unit} available at ${fromBranch.name}.` });
+
+  // Check stock at the source branch specifically, not the total across all branches.
+  const availableAtSource = branchQty(source, fromBranch._id);
+  if (availableAtSource < qty)
+    return res.status(400).json({ success: false, message: `Insufficient stock — only ${availableAtSource} ${source.unit} available at ${fromBranch.name}.` });
 
   const ref = `TRF-${Date.now()}`;
 
-  // Deduct from source
-  await Product.findByIdAndUpdate(source._id, { $inc: { stock_qty: -qty } });
+  // Deduct from source branch
+  await adjustBranchStock(Product, source._id, fromBranch._id, -qty);
   await StockMovement.create({
     tenant_id:  req.tenant_id,
     branch_id:  fromBranch._id,
@@ -434,25 +438,12 @@ router.post('/inventory/transfer', authenticate, requireTenant, authorize('busin
     created_by: req.user._id,
   });
 
-  // Add to destination — find or create the product record there
-  let dest = await Product.findOne({ tenant_id: req.tenant_id, branch_id: toBranch._id, sku: source.sku, is_active: true });
-  if (!dest) {
-    // Same product, different branch — clone the record
-    const { uniqueSlug } = require('../utils/slug');
-    const clone = source.toObject();
-    delete clone._id;
-    clone.branch_id  = toBranch._id;
-    clone.stock_qty  = qty;
-    clone.slug       = await uniqueSlug(Product, { tenant_id: req.tenant_id, name: source.name, fallback: 'item' });
-    clone.created_by = req.user._id;
-    dest = await Product.create(clone);
-  } else {
-    await Product.findByIdAndUpdate(dest._id, { $inc: { stock_qty: qty } });
-  }
+  // Add to destination branch
+  await adjustBranchStock(Product, source._id, toBranch._id, qty);
   await StockMovement.create({
     tenant_id:  req.tenant_id,
     branch_id:  toBranch._id,
-    product_id: dest._id,
+    product_id: source._id,
     type:       'adjustment',
     source:     'manual',
     quantity:   qty,
@@ -484,7 +475,8 @@ router.post('/inventory/reconcile', authenticate, requireTenant, authorize('busi
     const variance = qty - product.stock_qty;
     if (variance === 0) { results.push({ product_id: product._id, name: product.name, system_qty: product.stock_qty, physical_qty: qty, variance: 0, adjusted: false }); continue; }
 
-    await Product.findByIdAndUpdate(product._id, { stock_qty: qty });
+    const branchId = product.branch_id || null;
+    await setBranchStock(Product, product._id, branchId, qty);
     await StockMovement.create({
       tenant_id:  req.tenant_id,
       branch_id:  product.branch_id || null,
@@ -639,7 +631,7 @@ router.post('/pos/refund', authenticate, requireTenant, requireFeature('pos'), a
     orderItem.refunded_qty = (orderItem.refunded_qty || 0) + qty;
     refundedItems.push({ product_id: p._id, product_name: orderItem.product_name, quantity: qty, amount: lineTotal });
 
-    await Product.findByIdAndUpdate(p._id, { $inc: { stock_qty: qty } });
+    await adjustBranchStock(Product, p._id, order.branch_id, qty);
     await StockMovement.create({
       tenant_id: req.tenant_id,
       branch_id: order.branch_id || null,

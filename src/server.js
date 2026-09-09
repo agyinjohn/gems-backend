@@ -90,6 +90,20 @@ server.listen(PORT, async () => {
   await connectDB();
   const { startBillingCron } = require('./utils/billingCron');
   startBillingCron();
+
+  // ── ONE-TIME MIGRATION: backfill branch_stock ─────────────────────────────
+  // Runs on every boot but is a no-op once all products have branch_stock.
+  // Remove this block after confirming all products are migrated.
+  try {
+    const migrate = require('./config/migrateBranchStockFn');
+    const count = await migrate();
+    if (count > 0) console.log(`[migration] branch_stock backfilled for ${count} products.`);
+    else console.log('[migration] branch_stock: all products already up to date.');
+  } catch (err) {
+    console.error('[migration] branch_stock failed:', err.message);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   console.log('');
   console.log('╔══════════════════════════════════════╗');
   console.log('║         GEMS — Backend         ║');

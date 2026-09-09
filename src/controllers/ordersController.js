@@ -2,6 +2,7 @@ const { Order, Product, StockMovement, Tenant } = require('../models');
 const { pickSettings, calcDeliveryFee } = require('./storefrontController');
 const audit = require('../utils/audit');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
+const { adjustBranchStock } = require('../utils/branchStock');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
 const { verifyPaystackTransaction, fulfillStorefrontOrders, failStorefrontOrders } = require('../services/paymentService');
@@ -30,11 +31,10 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
     if (line.variant_key) {
       await Product.updateOne(
         { _id: line.product_id, 'variants.key': line.variant_key },
-        { $inc: { 'variants.$.stock_qty': -line.quantity, stock_qty: -line.quantity } },
+        { $inc: { 'variants.$.stock_qty': -line.quantity } },
       );
-    } else {
-      await Product.findByIdAndUpdate(line.product_id, { $inc: { stock_qty: -line.quantity } });
     }
+    await adjustBranchStock(Product, line.product_id, branchId, -line.quantity);
 
     await StockMovement.create({
       tenant_id:  tenantId,

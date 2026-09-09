@@ -1,6 +1,7 @@
 const { Supplier, PurchaseOrder, Product, StockMovement } = require('../models');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
+const { adjustBranchStock } = require('../utils/branchStock');
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -205,9 +206,10 @@ async function receiveGoods(tenantId, userId, id, items) {
     receivedTotal += qty * (line.unit_cost || 0);
     receivedAny = true;
 
-    const update = { $inc: { stock_qty: qty } };
+    const update = {};
     if (line.unit_cost > 0) update.$set = { cost_price: line.unit_cost };
-    await Product.findByIdAndUpdate(line.product_id, update);
+    if (Object.keys(update).length) await Product.findByIdAndUpdate(line.product_id, update);
+    await adjustBranchStock(Product, line.product_id, po.branch_id, qty);
 
     await StockMovement.create({
       tenant_id:         tenantId,

@@ -3,6 +3,7 @@ const serviceTypes = require('../config/serviceTypes');
 const audit = require('../utils/audit');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
 const variants = require('../services/variantService');
+const { adjustBranchStock, setBranchStock } = require('../utils/branchStock');
 
 const getCategories = async (req, res) => {
   let tenantId = req.tenant_id;
@@ -216,6 +217,7 @@ const createProduct = async (req, res) => {
 
   // Only create an opening stock movement for physical products (not bundles)
   if (!isService && !isBundle && stock_qty > 0) {
+    await adjustBranchStock(Product, product._id, branchId, stock_qty);
     await StockMovement.create({
       tenant_id:  req.tenant_id,
       branch_id:  branchId,
@@ -361,12 +363,13 @@ const adjustStock = async (req, res) => {
   }
   const newQty = product.stock_qty + Number(quantity);
   if (newQty < 0) return res.status(400).json({ success: false, message: 'Insufficient stock.' });
-  product.stock_qty = newQty;
-  await product.save();
+  const branchId = product.branch_id || await resolveWriteBranchId(req);
+  await adjustBranchStock(Product, product._id, branchId, Number(quantity));
+  const updated = await Product.findById(product._id);
   const movementType = Number(quantity) > 0 ? 'purchase' : 'adjustment';
   await StockMovement.create({
     tenant_id:    req.tenant_id,
-    branch_id:    product.branch_id || await resolveWriteBranchId(req),
+    branch_id:    branchId,
     product_id:   product._id,
     type:         movementType,
     source:       'manual',
@@ -378,8 +381,8 @@ const adjustStock = async (req, res) => {
     expiry_date:  expiry_date ? new Date(expiry_date) : null,
     created_by:   req.user._id,
   });
-  await audit(req, 'ADJUST_STOCK', 'inventory', `${req.user.name} adjusted stock for "${product.name}" by ${quantity > 0 ? '+' : ''}${quantity}`, { product_id: product._id, quantity, new_qty: newQty });
-  res.json({ success: true, message: 'Stock adjusted.', data: { stock_qty: product.stock_qty } });
+  await audit(req, 'ADJUST_STOCK', 'inventory', `${req.user.name} adjusted stock for "${product.name}" by ${quantity > 0 ? '+' : ''}${quantity}`, { product_id: product._id, quantity, new_qty: updated.stock_qty });
+  res.json({ success: true, message: 'Stock adjusted.', data: { stock_qty: updated.stock_qty } });
 };
 
 const getStockMovements = async (req, res) => {

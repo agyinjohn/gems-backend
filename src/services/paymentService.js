@@ -4,6 +4,7 @@ const { Order, Product, StockMovement, PlatformSettings } = require('../models')
 const logPayment = require('../utils/paymentLog');
 const accounting = require('./accountingService');
 const { sendOrderConfirmation } = require('./notificationService');
+const { adjustBranchStock } = require('../utils/branchStock');
 
 let cachedCredentials = null;
 let cacheTime = 0;
@@ -267,16 +268,13 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
           for (const comp of bundle.bundle_items) {
             const needed = comp.quantity * item.quantity;
             const compProduct = await Product.findById(comp.product_id).lean();
-            // If the component has variants, deduct from the matching variant row
-            // as well as the product total — same logic as a direct variant sale.
             if (compProduct?.variants?.length && item.variant_key) {
               await Product.updateOne(
                 { _id: comp.product_id, 'variants.key': item.variant_key },
-                { $inc: { 'variants.$.stock_qty': -needed, stock_qty: -needed } },
+                { $inc: { 'variants.$.stock_qty': -needed } },
               );
-            } else {
-              await Product.findByIdAndUpdate(comp.product_id, { $inc: { stock_qty: -needed } });
             }
+            await adjustBranchStock(Product, comp.product_id, order.branch_id, -needed);
             await StockMovement.create({
               tenant_id:  order.tenant_id,
               product_id: comp.product_id,
@@ -290,7 +288,7 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
           }
         }
       } else if (item.item_type !== 'service') {
-        await Product.findByIdAndUpdate(item.product_id, { $inc: { stock_qty: -item.quantity } });
+        await adjustBranchStock(Product, item.product_id, order.branch_id, -item.quantity);
         await StockMovement.create({
           tenant_id:  order.tenant_id,
           product_id: item.product_id,

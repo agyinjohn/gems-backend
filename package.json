@@ -12,7 +12,8 @@
     "db:fix-orphans": "node src/config/fixOrphanedHr.js",
     "db:migrate-service-requests": "node src/config/migrateServiceRequests.js",
     "db:fix-indexes": "node src/config/indexRepair.js",
-    "db:backfill-product-slugs": "node src/config/backfillProductSlugs.js"
+    "db:backfill-product-slugs": "node src/config/backfillProductSlugs.js",
+    "db:migrate-branch-stock": "node src/config/migrateBranchStock.js"
   },
   "keywords": [],
   "author": "",

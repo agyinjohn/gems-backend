@@ -420,6 +420,18 @@ const productSchema = new Schema({
   // --- bundle composition (bundle only, ignored for products/services) ---
   bundle_items:        { type: [bundleItemSchema], default: [] },
   location_id:         { type: Schema.Types.ObjectId, ref: 'StorageLocation' },
+  /**
+   * Per-branch stock breakdown.
+   *
+   * stock_qty (above) is always the sum of these entries and is kept in step
+   * by branchStockHelper — nothing should write stock_qty directly any more.
+   * It stays on the document so every existing read (reports, dashboard,
+   * storefront availability) continues to work without change.
+   *
+   * One entry per branch that has ever held this product. qty may be zero
+   * (branch ran out) but the entry is kept so the history is readable.
+   */
+  branch_stock:        { type: [{ branch_id: { type: Schema.Types.ObjectId, ref: 'Branch' }, qty: { type: Number, default: 0 } }], default: [] },
   is_active:           { type: Boolean, default: true },
   created_by:          { type: Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
