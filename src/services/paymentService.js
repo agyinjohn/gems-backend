@@ -266,13 +266,25 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
         if (bundle?.bundle_items?.length) {
           for (const comp of bundle.bundle_items) {
             const needed = comp.quantity * item.quantity;
-            await Product.findByIdAndUpdate(comp.product_id, { $inc: { stock_qty: -needed } });
+            const compProduct = await Product.findById(comp.product_id).lean();
+            // If the component has variants, deduct from the matching variant row
+            // as well as the product total — same logic as a direct variant sale.
+            if (compProduct?.variants?.length && item.variant_key) {
+              await Product.updateOne(
+                { _id: comp.product_id, 'variants.key': item.variant_key },
+                { $inc: { 'variants.$.stock_qty': -needed, stock_qty: -needed } },
+              );
+            } else {
+              await Product.findByIdAndUpdate(comp.product_id, { $inc: { stock_qty: -needed } });
+            }
             await StockMovement.create({
               tenant_id:  order.tenant_id,
               product_id: comp.product_id,
               type:       'sale',
               quantity:   -needed,
               reference:  order.order_number,
+              source:     'storefront',
+              order_id:   order._id,
               notes:      `Bundle: ${bundle.name}`,
             });
           }
@@ -285,6 +297,8 @@ async function fulfillStorefrontOrders({ reference, orderIds }) {
           type:       'sale',
           quantity:   -item.quantity,
           reference:  order.order_number,
+          source:     'storefront',
+          order_id:   order._id,
         });
       }
     }

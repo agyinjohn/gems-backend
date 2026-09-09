@@ -352,11 +352,10 @@ const deleteProduct = async (req, res) => {
 };
 
 const adjustStock = async (req, res) => {
-  const { quantity, notes } = req.body;
+  const { quantity, notes, batch_number, supplier_name, cost_price, expiry_date } = req.body;
   if (quantity === undefined) return res.status(400).json({ success: false, message: 'quantity is required.' });
   const product = await Product.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
   if (!product) return res.status(404).json({ success: false, message: 'Product not found.' });
-  // Stock adjustments are meaningless for services and bundles
   if (product.item_type === 'service' || product.item_type === 'bundle') {
     return res.status(400).json({ success: false, message: 'Stock adjustments do not apply to services or bundles.' });
   }
@@ -364,17 +363,65 @@ const adjustStock = async (req, res) => {
   if (newQty < 0) return res.status(400).json({ success: false, message: 'Insufficient stock.' });
   product.stock_qty = newQty;
   await product.save();
-  await StockMovement.create({ tenant_id: req.tenant_id, branch_id: product.branch_id || await resolveWriteBranchId(req), product_id: product._id, type: 'adjustment', quantity, notes: notes || 'Manual adjustment', created_by: req.user._id });
+  const movementType = Number(quantity) > 0 ? 'purchase' : 'adjustment';
+  await StockMovement.create({
+    tenant_id:    req.tenant_id,
+    branch_id:    product.branch_id || await resolveWriteBranchId(req),
+    product_id:   product._id,
+    type:         movementType,
+    source:       'manual',
+    quantity,
+    notes:        notes || (Number(quantity) > 0 ? 'Stock received' : 'Manual adjustment'),
+    batch_number: batch_number || '',
+    supplier_name:supplier_name || '',
+    cost_price:   cost_price != null ? Number(cost_price) : null,
+    expiry_date:  expiry_date ? new Date(expiry_date) : null,
+    created_by:   req.user._id,
+  });
   await audit(req, 'ADJUST_STOCK', 'inventory', `${req.user.name} adjusted stock for "${product.name}" by ${quantity > 0 ? '+' : ''}${quantity}`, { product_id: product._id, quantity, new_qty: newQty });
   res.json({ success: true, message: 'Stock adjusted.', data: { stock_qty: product.stock_qty } });
 };
 
 const getStockMovements = async (req, res) => {
   const data = await StockMovement.find({ tenant_id: req.tenant_id, ...(req.branchFilter || {}), product_id: req.params.id })
-    .populate('product_id', 'name')
+    .populate('product_id', 'name sku')
     .populate('created_by', 'name')
+    .populate('shift_id', 'shift_number opened_at')
+    .populate('order_id', 'order_number source customer_name')
     .sort({ createdAt: -1 });
   res.json({ success: true, data });
 };
 
-module.exports = { getCategories, createCategory, updateCategory, deleteCategory, getProducts, getProduct, createProduct, updateProduct, deleteProduct, adjustStock, getStockMovements };
+const getAllStockMovements = async (req, res) => {
+  const { type, source, from, to, search, limit = 200 } = req.query;
+  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
+  if (type)   filter.type   = type;
+  if (source) filter.source = source;
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to)   { const end = new Date(to); end.setHours(23,59,59,999); filter.createdAt.$lte = end; }
+  }
+  const movements = await StockMovement.find(filter)
+    .populate('product_id', 'name sku unit')
+    .populate('created_by', 'name')
+    .populate('shift_id', 'shift_number opened_at')
+    .populate('order_id', 'order_number source customer_name')
+    .sort({ createdAt: -1 })
+    .limit(Number(limit));
+  let data = movements.map(m => m.toJSON());
+  if (search) {
+    const q = search.toLowerCase();
+    data = data.filter(m =>
+      m.product_id?.name?.toLowerCase().includes(q) ||
+      m.product_id?.sku?.toLowerCase().includes(q) ||
+      (m.reference || '').toLowerCase().includes(q) ||
+      (m.batch_number || '').toLowerCase().includes(q) ||
+      (m.supplier_name || '').toLowerCase().includes(q) ||
+      (m.notes || '').toLowerCase().includes(q)
+    );
+  }
+  res.json({ success: true, data });
+};
+
+module.exports = { getCategories, createCategory, updateCategory, deleteCategory, getProducts, getProduct, createProduct, updateProduct, deleteProduct, adjustStock, getStockMovements, getAllStockMovements };

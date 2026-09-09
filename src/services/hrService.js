@@ -1338,6 +1338,29 @@ async function approvePayrollBatch(tenantId, id, userId) {
   batch.status = 'approved';
   batch.approved_by = userId;
   batch.approved_at = new Date();
+
+  // Post payroll GL entry: DR 5100 Salaries & Wages / CR 2141 PAYE / CR 2140 SSNIT / CR 2130 Net Pay
+  try {
+    const { postPayrollEntry } = require('./accountingService');
+    const je = await postPayrollEntry({
+      tenantId,
+      grossSalary: batch.total_gross,
+      allowances: batch.total_allowances,
+      paye: batch.total_paye,
+      ssnitEmployee: batch.total_ssnit_employee,
+      ssnitEmployer: batch.total_ssnit_employer,
+      netSalary: batch.total_net,
+      reference: batch.label || `${batch.month}/${batch.year}`,
+      date: new Date(),
+      sourceId: batch._id,
+      createdBy: userId,
+      payFromCash: false, // posts to Salaries Payable (2130) until marked paid
+    });
+    batch.journal_entry_id = je._id;
+  } catch (err) {
+    console.error('[Payroll] GL posting failed:', err.message);
+  }
+
   await batch.save();
   return batch;
 }
@@ -1349,6 +1372,26 @@ async function markPayrollBatchPaid(tenantId, id) {
   await PayrollRun.updateMany({ tenant_id: tenantId, batch_id: id }, { status: 'paid' });
   batch.status = 'paid';
   batch.paid_at = new Date();
+
+  // Clear Salaries Payable to Cash: DR 2130 / CR 1001
+  try {
+    const { postJournalEntry } = require('./accountingService');
+    await postJournalEntry({
+      tenantId,
+      description: `Payroll payment — ${batch.label || `${batch.month}/${batch.year}`}`,
+      date: new Date(),
+      lines: [
+        { accountCode: '2130', debit: batch.total_net, credit: 0, description: `Salaries paid ${batch.label}` },
+        { accountCode: '1001', debit: 0, credit: batch.total_net, description: `Cash out — payroll ${batch.label}` },
+      ],
+      source: 'payroll',
+      sourceId: batch._id,
+      reference: `PAYROLL-PAY-${batch._id}`,
+    });
+  } catch (err) {
+    console.error('[Payroll] Payment GL posting failed:', err.message);
+  }
+
   await batch.save();
   return batch;
 }

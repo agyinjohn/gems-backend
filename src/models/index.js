@@ -474,15 +474,30 @@ reviewSchema.index({ tenant_id: 1, product_id: 1, createdAt: -1 });
 
 // STOCK MOVEMENT
 const stockMovementSchema = new Schema({
-  tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
-  branch_id:  { type: Schema.Types.ObjectId, ref: 'Branch' },
-  product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
-  type:       { type: String, enum: ['sale','purchase','adjustment','return'], required: true },
-  quantity:   { type: Number, required: true },
-  reference:  String,
-  notes:      String,
-  created_by: { type: Schema.Types.ObjectId, ref: 'User' },
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
+  product_id:   { type: Schema.Types.ObjectId, ref: 'Product', required: true },
+  type:         { type: String, enum: ['sale','purchase','adjustment','return'], required: true },
+  quantity:     { type: Number, required: true },
+  reference:    String,   // order number, PO number, etc.
+  notes:        String,
+  // Who did it and when (createdAt covers when)
+  created_by:   { type: Schema.Types.ObjectId, ref: 'User' },
+  // Sale context
+  order_id:     { type: Schema.Types.ObjectId, ref: 'Order' },
+  shift_id:     { type: Schema.Types.ObjectId, ref: 'PosShift' },
+  source:       { type: String, enum: ['pos','storefront','internal','service_request','manual','purchase'], default: 'manual' },
+  // Stock-in context (purchase / adjustment)
+  batch_number: { type: String, default: '' },
+  supplier_name:{ type: String, default: '' },
+  cost_price:   { type: Number, default: null },   // unit cost at time of receipt
+  expiry_date:  { type: Date, default: null },
+  purchase_order_id: { type: Schema.Types.ObjectId, ref: 'PurchaseOrder' },
 }, { timestamps: true });
+stockMovementSchema.index({ tenant_id: 1, product_id: 1, createdAt: -1 });
+stockMovementSchema.index({ tenant_id: 1, type: 1, createdAt: -1 });
+stockMovementSchema.index({ tenant_id: 1, shift_id: 1 });
+stockMovementSchema.index({ tenant_id: 1, source: 1, createdAt: -1 });
 
 // CUSTOMER
 const customerSchema = new Schema({

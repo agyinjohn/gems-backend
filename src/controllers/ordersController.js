@@ -17,7 +17,7 @@ const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() 
 
 // Deduct stock for a sold item — nothing for a service, and the stocked parts
 // of a solution rather than the solution itself.
-async function deductItemStock({ item, tenantId, branchId, orderNumber, createdBy }) {
+async function deductItemStock({ item, tenantId, branchId, orderNumber, createdBy, orderId, source }) {
   const sold = await Product.findById(item.product_id);
   if (!sold) return;
   const isBundle = sold.item_type === 'bundle';
@@ -28,10 +28,6 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
 
   for (const line of lines) {
     if (line.variant_key) {
-      // Off the row the customer actually chose, and the product's own figure
-      // moved with it. For a product sold in options, stock_qty is the sum of
-      // its rows rather than a count of its own, so the two have to travel
-      // together or the catalogue starts disagreeing with the shelf.
       await Product.updateOne(
         { _id: line.product_id, 'variants.key': line.variant_key },
         { $inc: { 'variants.$.stock_qty': -line.quantity, stock_qty: -line.quantity } },
@@ -47,8 +43,8 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
       type:       'sale',
       quantity:   -line.quantity,
       reference:  orderNumber,
-      // Which one went, so a stock report says "Polo Shirt (Size: M · Colour:
-      // Navy)" rather than leaving somebody to work it out from the order.
+      source:     source || 'internal',
+      order_id:   orderId || null,
       ...(line.variant_key ? { notes: line.name } : {}),
       ...(isBundle ? { notes: `Bundle: ${sold.name}` } : {}),
       created_by: createdBy,
@@ -57,10 +53,16 @@ async function deductItemStock({ item, tenantId, branchId, orderNumber, createdB
 }
 
 const getOrders = async (req, res) => {
-  const { status, payment_status, search } = req.query;
+  const { status, payment_status, search, source, from, to } = req.query;
   const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
-  if (status) filter.status = status;
+  if (status)         filter.status = status;
   if (payment_status) filter.payment_status = payment_status;
+  if (source)         filter.source = source;
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to)   filter.createdAt.$lte = new Date(to + 'T23:59:59');
+  }
   if (search) filter.$or = [{ order_number: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];
   const data = await Order.find(filter).populate('created_by', 'name').sort({ createdAt: -1 });
   res.json({ success: true, data });
@@ -143,7 +145,7 @@ const createOrder = async (req, res) => {
 
   if (isPaid) {
     for (const item of enrichedItems) {
-      await deductItemStock({ item, tenantId: req.tenant_id, branchId, orderNumber: order.order_number, createdBy: req.user._id });
+      await deductItemStock({ item, tenantId: req.tenant_id, branchId, orderNumber: order.order_number, createdBy: req.user._id, orderId: order._id, source: 'internal' });
     }
     await logPayment({
       tenant_id:   req.tenant_id,
@@ -211,7 +213,7 @@ const updateOrderStatus = async (req, res) => {
     processing: 'order_confirmed',
     shipped:    'order_shipped',
     delivered:  'order_delivered',
-    completed:  'order_delivered',
+    completed:  'order_completed',
     cancelled:  'order_cancelled',
   };
   if (notifiable[status] && order.customer_phone) {

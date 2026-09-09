@@ -1,4 +1,4 @@
-const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, PurchaseOrder, VendorBill, CreditNote, BankReconciliation, Budget, TaxRate } = require('../models');
+const { JournalEntry, Account, AccountingPeriod, Invoice, Expense, Order, StockMovement, PurchaseOrder, VendorBill, CreditNote, BankReconciliation, Budget, TaxRate } = require('../models');
 
 const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1586,7 +1586,14 @@ async function buildOrdersPl(tenantId, from, to) {
 
   const [rev, cogs, expByCategory, monthly] = await Promise.all([
     Order.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$total' }, subtotal: { $sum: '$subtotal' } } }]),
-    Order.aggregate([{ $match: match }, { $group: { _id: null, cogs: { $sum: '$subtotal' } } }]),
+    // COGS from stock movements (sale type) — cost_price × qty at time of sale.
+    // Falls back to subtotal only when no movements exist (e.g. service-only orders).
+    StockMovement.aggregate([
+      { $match: { tenant_id: tenantId, type: 'sale', ...(from || to ? { createdAt: match.createdAt } : {}) } },
+      { $lookup: { from: 'products', localField: 'product_id', foreignField: '_id', as: 'product' } },
+      { $unwind: '$product' },
+      { $group: { _id: null, cogs: { $sum: { $multiply: [{ $abs: '$quantity' }, '$product.cost_price'] } } } },
+    ]),
     Expense.aggregate([
       { $match: expMatch },
       { $group: { _id: { $ifNull: ['$category', 'Uncategorized'] }, total: { $sum: '$amount' } } },

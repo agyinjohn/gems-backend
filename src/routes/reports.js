@@ -7,6 +7,7 @@ const reports = require('../controllers/reportsController');
 router.use(authenticate, requireTenant, requireFeature('reports'));
 
 router.get('/reports/branches', reports.getBranches);
+router.get('/reports/daily', reports.getDaily);
 router.get('/reports/overview', reports.getOverview);
 router.get('/reports/sales', reports.getSales);
 router.get('/reports/inventory', reports.getInventory);

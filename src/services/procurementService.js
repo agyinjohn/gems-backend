@@ -175,7 +175,7 @@ async function cancelPurchaseOrder(tenantId, id, reason) {
 }
 
 async function receiveGoods(tenantId, userId, id, items) {
-  const po = await PurchaseOrder.findOne({ _id: id, tenant_id: tenantId });
+  const po = await PurchaseOrder.findOne({ _id: id, tenant_id: tenantId }).populate('supplier_id', 'name');
   if (!po) throw httpError('PO not found.', 404);
   if (po.status === 'cancelled') throw httpError('Cancelled PO cannot receive goods.');
   if (!['approved', 'sent', 'partially_received'].includes(po.status)) {
@@ -210,12 +210,20 @@ async function receiveGoods(tenantId, userId, id, items) {
     await Product.findByIdAndUpdate(line.product_id, update);
 
     await StockMovement.create({
-      tenant_id: tenantId,
-      product_id: line.product_id,
-      type: 'purchase',
-      quantity: qty,
-      reference: po.po_number,
-      created_by: userId,
+      tenant_id:         tenantId,
+      branch_id:         po.branch_id || null,
+      product_id:        line.product_id,
+      type:              'purchase',
+      source:            'purchase',
+      quantity:          qty,
+      reference:         po.po_number,
+      purchase_order_id: po._id,
+      supplier_name:     po.supplier_id?.name || item.supplier_name || '',
+      cost_price:        line.unit_cost || null,
+      batch_number:      item.batch_number || '',
+      expiry_date:       item.expiry_date ? new Date(item.expiry_date) : null,
+      notes:             `Received against PO ${po.po_number}`,
+      created_by:        userId,
     });
   }
 

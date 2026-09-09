@@ -664,6 +664,105 @@ async function listReportBranches(tenantId) {
   return Branch.find({ tenant_id: tenantId, is_active: true }).select('name code').sort('name');
 }
 
+async function getDailySales(tenantId, query) {
+  const bf = branchFilter(query.branch_id);
+
+  // Use provided date or today
+  const dateStr = query.date ? query.date.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const todayStart = new Date(`${dateStr}T00:00:00.000Z`);
+  const todayEnd   = new Date(`${dateStr}T23:59:59.999Z`);
+
+  const yesterdayStart = new Date(todayStart); yesterdayStart.setUTCDate(yesterdayStart.getUTCDate() - 1);
+  const yesterdayEnd   = new Date(todayEnd);   yesterdayEnd.setUTCDate(yesterdayEnd.getUTCDate() - 1);
+
+  const todayMatch     = { tenant_id: tenantId, payment_status: 'paid', createdAt: { $gte: todayStart, $lte: todayEnd }, ...bf };
+  const yesterdayMatch = { tenant_id: tenantId, payment_status: 'paid', createdAt: { $gte: yesterdayStart, $lte: yesterdayEnd }, ...bf };
+  const allTodayMatch  = { tenant_id: tenantId, createdAt: { $gte: todayStart, $lte: todayEnd }, ...bf };
+
+  const [
+    todaySummary,
+    yesterdaySummary,
+    byHour,
+    bySource,
+    byPayment,
+    topProducts,
+    recentOrders,
+    lowStock,
+    expenses,
+    pendingOrders,
+  ] = await Promise.all([
+    // Today paid totals
+    Order.aggregate([{ $match: todayMatch }, { $group: { _id: null, revenue: { $sum: '$total' }, orders: { $sum: 1 }, avg: { $avg: '$total' }, discounts: { $sum: '$discount_amount' }, tax: { $sum: '$tax_amount' } } }]),
+    // Yesterday paid totals for comparison
+    Order.aggregate([{ $match: yesterdayMatch }, { $group: { _id: null, revenue: { $sum: '$total' }, orders: { $sum: 1 } } }]),
+    // Hourly breakdown (paid orders)
+    Order.aggregate([
+      { $match: todayMatch },
+      { $group: { _id: { $hour: '$createdAt' }, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+      { $project: { hour: '$_id', label: { $concat: [{ $toString: '$_id' }, ':00'] }, revenue: 1, orders: 1 } },
+    ]),
+    // By source
+    Order.aggregate([{ $match: todayMatch }, { $group: { _id: '$source', revenue: { $sum: '$total' }, orders: { $sum: 1 } } }, { $sort: { revenue: -1 } }]),
+    // By payment method
+    Order.aggregate([{ $match: todayMatch }, { $group: { _id: '$payment_method', revenue: { $sum: '$total' }, orders: { $sum: 1 } } }, { $sort: { revenue: -1 } }]),
+    // Top products today
+    Order.aggregate([
+      { $match: todayMatch },
+      { $unwind: '$items' },
+      { $group: { _id: '$items.product_id', name: { $first: '$items.product_name' }, units_sold: { $sum: '$items.quantity' }, revenue: { $sum: '$items.total' } } },
+      { $sort: { revenue: -1 } },
+      { $limit: 8 },
+    ]),
+    // Recent orders (all statuses, newest first)
+    Order.find(allTodayMatch).sort({ createdAt: -1 }).limit(20).select('order_number customer_name total status payment_status source payment_method createdAt items').lean(),
+    // Low stock alerts
+    Product.find({ tenant_id: tenantId, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, ...bf })
+      .sort('stock_qty').limit(8).select('name sku stock_qty low_stock_threshold').lean(),
+    // Today's expenses
+    Expense.aggregate([{ $match: { tenant_id: tenantId, expense_date: { $gte: todayStart, $lte: todayEnd }, ...bf } }, { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    // Pending orders count
+    Order.countDocuments({ tenant_id: tenantId, payment_status: 'pending', createdAt: { $gte: todayStart, $lte: todayEnd }, ...bf }),
+  ]);
+
+  const today     = todaySummary[0]     || { revenue: 0, orders: 0, avg: 0, discounts: 0, tax: 0 };
+  const yesterday = yesterdaySummary[0] || { revenue: 0, orders: 0 };
+
+  return {
+    date: dateStr,
+    kpis: {
+      revenue:        Math.round((today.revenue     || 0) * 100) / 100,
+      orders:         today.orders   || 0,
+      avg_order:      Math.round((today.avg        || 0) * 100) / 100,
+      discounts:      Math.round((today.discounts  || 0) * 100) / 100,
+      tax_collected:  Math.round((today.tax        || 0) * 100) / 100,
+      expenses:       Math.round((expenses[0]?.total || 0) * 100) / 100,
+      pending_orders: pendingOrders,
+      vs_yesterday: {
+        revenue: yesterday.revenue > 0 ? Math.round(((today.revenue - yesterday.revenue) / yesterday.revenue) * 1000) / 10 : null,
+        orders:  yesterday.orders  > 0 ? Math.round(((today.orders  - yesterday.orders)  / yesterday.orders)  * 1000) / 10 : null,
+      },
+    },
+    by_hour:    byHour.map((h) => ({ hour: h.hour, label: h.label, revenue: Math.round((h.revenue || 0) * 100) / 100, orders: h.orders })),
+    by_source:  bySource.map((s)  => ({ source: s._id || 'other',   revenue: Math.round((s.revenue || 0) * 100) / 100, orders: s.orders })),
+    by_payment: byPayment.map((p) => ({ method: p._id || 'unknown', revenue: Math.round((p.revenue || 0) * 100) / 100, orders: p.orders })),
+    top_products: topProducts.map((p) => ({ name: p.name, units_sold: p.units_sold, revenue: Math.round((p.revenue || 0) * 100) / 100 })),
+    recent_orders: recentOrders.map((o) => ({
+      id: o._id,
+      order_number: o.order_number,
+      customer_name: o.customer_name,
+      total: o.total,
+      status: o.status,
+      payment_status: o.payment_status,
+      source: o.source,
+      payment_method: o.payment_method,
+      time: o.createdAt,
+      items_count: (o.items || []).length,
+    })),
+    low_stock,
+  };
+}
+
 module.exports = {
   getOverview,
   getSalesReport,
@@ -673,4 +772,5 @@ module.exports = {
   getProcurementReport,
   getCrmReport,
   listReportBranches,
+  getDailySales,
 };

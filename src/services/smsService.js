@@ -57,6 +57,13 @@ const DEFAULT_TEMPLATES = {
     variables: ORDER_VARIABLES,
     body: 'Hi {{customer_name}}, your order {{order_number}} has been cancelled. Contact {{business_name}} if this is unexpected.',
   },
+  order_completed: {
+    group: 'Orders',
+    label: 'Service completed',
+    description: 'Sent when a service order is marked completed.',
+    variables: ORDER_VARIABLES,
+    body: 'Hi {{customer_name}}, your service request {{order_number}} has been completed. Thank you for choosing {{business_name}}.',
+  },
 
   /* Project templates go to the client who awarded the contract, and only on
    * jobs where somebody has switched client updates on. They are deliberately

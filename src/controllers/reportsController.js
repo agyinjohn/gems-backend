@@ -40,6 +40,11 @@ const getBranches = async (req, res) => {
   res.json({ success: true, data });
 };
 
+const getDaily = async (req, res) => {
+  const data = await reports.getDailySales(req.tenant_id, req.query);
+  res.json({ success: true, data });
+};
+
 module.exports = {
   getOverview,
   getSales,
@@ -49,4 +54,5 @@ module.exports = {
   getProcurement,
   getCrm,
   getBranches,
+  getDaily,
 };

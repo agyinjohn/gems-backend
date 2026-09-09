@@ -66,6 +66,7 @@ const tenant = require('../controllers/tenantController');
 const branch = require('../controllers/branchController');
 const logPayment = require('../utils/paymentLog');
 const accounting = require('../services/accountingService');
+const audit = require('../utils/audit');
 const pos = require('../controllers/posController');
 const storeCustomer = require('../controllers/storeCustomerController');
 const { validateCoupon } = require('../services/couponService');
@@ -343,6 +344,208 @@ router.put('/products/:id', authenticate, requireTenant, authorize('business_own
 router.delete('/products/:id', authenticate, requireTenant, businessOwnerOnly, inventory.deleteProduct);
 router.post('/products/:id/adjust-stock', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), inventory.adjustStock);
 router.get('/products/:id/movements', authenticate, requireTenant, inventory.getStockMovements);
+router.get('/stock-movements', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff','accountant'), inventory.getAllStockMovements);
+
+router.get('/inventory/expiry', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff','accountant'), async (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+  const now = new Date();
+  const cutoff = new Date(now.getTime() + days * 86400000);
+  const movements = await StockMovement.find({
+    tenant_id: req.tenant_id,
+    expiry_date: { $ne: null, $lte: cutoff },
+    quantity: { $gt: 0 },
+  }).populate('product_id', 'name sku unit').sort({ expiry_date: 1 });
+  const data = movements
+    .filter(m => m.product_id)
+    .map(m => {
+      const daysLeft = Math.ceil((new Date(m.expiry_date).getTime() - now.getTime()) / 86400000);
+      return {
+        id: m._id,
+        product_name: m.product_id?.name,
+        sku: m.product_id?.sku,
+        unit: m.product_id?.unit,
+        batch_number: m.batch_number,
+        quantity: m.quantity,
+        expiry_date: m.expiry_date,
+        days_left: daysLeft,
+        status: daysLeft <= 0 ? 'expired' : daysLeft <= 7 ? 'critical' : daysLeft <= 30 ? 'warning' : 'ok',
+      };
+    });
+  res.json({ success: true, data });
+});
+
+router.get('/inventory/transfers', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
+  const { from, to, limit = 100 } = req.query;
+  const filter = {
+    tenant_id: req.tenant_id,
+    source: 'manual',
+    reference: /^TRF-/,
+  };
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to)   { const end = new Date(to); end.setHours(23,59,59,999); filter.createdAt.$lte = end; }
+  }
+  const movements = await StockMovement.find(filter)
+    .populate('product_id', 'name sku unit')
+    .populate('branch_id', 'name')
+    .populate('created_by', 'name')
+    .sort({ createdAt: -1 })
+    .limit(Number(limit));
+  res.json({ success: true, data: movements });
+});
+
+router.post('/inventory/transfer', authenticate, requireTenant, authorize('business_owner','branch_manager'), async (req, res) => {
+  const { product_id, from_branch_id, to_branch_id, quantity, notes } = req.body;
+  if (!product_id || !from_branch_id || !to_branch_id || !quantity)
+    return res.status(400).json({ success: false, message: 'product_id, from_branch_id, to_branch_id and quantity are required.' });
+  if (String(from_branch_id) === String(to_branch_id))
+    return res.status(400).json({ success: false, message: 'Source and destination branches must be different.' });
+  const qty = parseInt(quantity, 10);
+  if (!qty || qty <= 0)
+    return res.status(400).json({ success: false, message: 'quantity must be a positive integer.' });
+
+  const { Branch } = require('../models');
+  const [fromBranch, toBranch] = await Promise.all([
+    Branch.findOne({ _id: from_branch_id, tenant_id: req.tenant_id, is_active: true }),
+    Branch.findOne({ _id: to_branch_id,   tenant_id: req.tenant_id, is_active: true }),
+  ]);
+  if (!fromBranch) return res.status(404).json({ success: false, message: 'Source branch not found.' });
+  if (!toBranch)   return res.status(404).json({ success: false, message: 'Destination branch not found.' });
+
+  const source = await Product.findOne({ _id: product_id, tenant_id: req.tenant_id, is_active: true, item_type: 'product' });
+  if (!source) return res.status(404).json({ success: false, message: 'Product not found.' });
+  if (source.stock_qty < qty)
+    return res.status(400).json({ success: false, message: `Insufficient stock — only ${source.stock_qty} ${source.unit} available at ${fromBranch.name}.` });
+
+  const ref = `TRF-${Date.now()}`;
+
+  // Deduct from source
+  await Product.findByIdAndUpdate(source._id, { $inc: { stock_qty: -qty } });
+  await StockMovement.create({
+    tenant_id:  req.tenant_id,
+    branch_id:  fromBranch._id,
+    product_id: source._id,
+    type:       'adjustment',
+    source:     'manual',
+    quantity:   -qty,
+    reference:  ref,
+    notes:      `Transfer out to ${toBranch.name}${notes ? ` — ${notes}` : ''}`,
+    created_by: req.user._id,
+  });
+
+  // Add to destination — find or create the product record there
+  let dest = await Product.findOne({ tenant_id: req.tenant_id, branch_id: toBranch._id, sku: source.sku, is_active: true });
+  if (!dest) {
+    // Same product, different branch — clone the record
+    const { uniqueSlug } = require('../utils/slug');
+    const clone = source.toObject();
+    delete clone._id;
+    clone.branch_id  = toBranch._id;
+    clone.stock_qty  = qty;
+    clone.slug       = await uniqueSlug(Product, { tenant_id: req.tenant_id, name: source.name, fallback: 'item' });
+    clone.created_by = req.user._id;
+    dest = await Product.create(clone);
+  } else {
+    await Product.findByIdAndUpdate(dest._id, { $inc: { stock_qty: qty } });
+  }
+  await StockMovement.create({
+    tenant_id:  req.tenant_id,
+    branch_id:  toBranch._id,
+    product_id: dest._id,
+    type:       'adjustment',
+    source:     'manual',
+    quantity:   qty,
+    reference:  ref,
+    notes:      `Transfer in from ${fromBranch.name}${notes ? ` — ${notes}` : ''}`,
+    created_by: req.user._id,
+  });
+
+  await audit(req, 'STOCK_TRANSFER', 'inventory',
+    `${req.user.name} transferred ${qty} × ${source.name} from ${fromBranch.name} to ${toBranch.name}`,
+    { ref, product_id: source._id, qty, from: fromBranch.name, to: toBranch.name },
+  );
+  res.json({ success: true, message: `${qty} ${source.unit} transferred.`, data: { reference: ref } });
+});
+
+router.post('/inventory/reconcile', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff'), async (req, res) => {
+  const { counts, notes } = req.body; // counts: [{ product_id, physical_qty }]
+  if (!Array.isArray(counts) || !counts.length)
+    return res.status(400).json({ success: false, message: 'counts array is required.' });
+
+  const results = [];
+  for (const row of counts) {
+    const qty = Number(row.physical_qty);
+    if (!row.product_id || isNaN(qty) || qty < 0) continue;
+
+    const product = await Product.findOne({ _id: row.product_id, tenant_id: req.tenant_id, is_active: true });
+    if (!product || product.item_type !== 'product') continue;
+
+    const variance = qty - product.stock_qty;
+    if (variance === 0) { results.push({ product_id: product._id, name: product.name, system_qty: product.stock_qty, physical_qty: qty, variance: 0, adjusted: false }); continue; }
+
+    await Product.findByIdAndUpdate(product._id, { stock_qty: qty });
+    await StockMovement.create({
+      tenant_id:  req.tenant_id,
+      branch_id:  product.branch_id || null,
+      product_id: product._id,
+      type:       'adjustment',
+      source:     'manual',
+      quantity:   variance,
+      notes:      notes || `Stock reconciliation — physical count: ${qty}, system: ${product.stock_qty}`,
+      created_by: req.user._id,
+    });
+    results.push({ product_id: product._id, name: product.name, system_qty: product.stock_qty, physical_qty: qty, variance, adjusted: true });
+  }
+
+  await audit(req, 'STOCK_RECONCILE', 'inventory',
+    `${req.user.name} submitted a stock count (${results.filter(r => r.adjusted).length} adjustments)`,
+    { adjusted: results.filter(r => r.adjusted).length, total: results.length },
+  );
+  res.json({ success: true, data: results });
+});
+
+router.get('/inventory/valuation', authenticate, requireTenant, authorize('business_owner','branch_manager','warehouse_staff','accountant'), async (req, res) => {
+  const { Product } = require('../models');
+  const products = await Product.find({ tenant_id: req.tenant_id, is_active: true, item_type: { $ne: 'service' } })
+    .populate('category_id', 'name').sort('name');
+
+  const byCategory = {};
+  let totalValue = 0;
+  let totalCost  = 0;
+  let lowStockValue = 0;
+  let outOfStockCount = 0;
+
+  for (const p of products) {
+    const catName = p.category_id?.name || 'Uncategorised';
+    const value   = p.stock_qty * p.price;
+    const cost    = p.stock_qty * p.cost_price;
+    totalValue += value;
+    totalCost  += cost;
+    if (p.stock_qty === 0) outOfStockCount++;
+    if (p.stock_qty > 0 && p.stock_qty <= p.low_stock_threshold) lowStockValue += cost;
+    if (!byCategory[catName]) byCategory[catName] = { category: catName, qty: 0, cost_value: 0, retail_value: 0, product_count: 0 };
+    byCategory[catName].qty           += p.stock_qty;
+    byCategory[catName].cost_value    += cost;
+    byCategory[catName].retail_value  += value;
+    byCategory[catName].product_count += 1;
+  }
+
+  const items = products.map(p => ({
+    id: p._id, name: p.name, sku: p.sku, category: p.category_id?.name || 'Uncategorised',
+    stock_qty: p.stock_qty, unit: p.unit, cost_price: p.cost_price, price: p.price,
+    cost_value: p.stock_qty * p.cost_price,
+    retail_value: p.stock_qty * p.price,
+    margin: p.price > 0 ? Math.round(((p.price - p.cost_price) / p.price) * 100) : 0,
+    status: p.stock_qty === 0 ? 'out' : p.stock_qty <= p.low_stock_threshold ? 'low' : 'ok',
+  }));
+
+  res.json({ success: true, data: {
+    summary: { total_retail_value: totalValue, total_cost_value: totalCost, potential_profit: totalValue - totalCost, low_stock_value: lowStockValue, out_of_stock_count: outOfStockCount, total_products: products.length },
+    by_category: Object.values(byCategory).sort((a, b) => b.cost_value - a.cost_value),
+    items,
+  }});
+});
 router.post(
   '/uploads/product-images',
   authenticate,

@@ -146,6 +146,9 @@ async function completePosSale({
         type: 'sale',
         quantity: -line.quantity,
         reference: orderNumber,
+        source: 'pos',
+        order_id: order._id,
+        shift_id: shift_id || null,
         ...(isBundle ? { notes: `Bundle: ${sold.name}` } : {}),
         created_by: userId,
       });
