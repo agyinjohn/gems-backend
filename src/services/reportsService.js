@@ -759,7 +759,7 @@ async function getDailySales(tenantId, query) {
       time: o.createdAt,
       items_count: (o.items || []).length,
     })),
-    low_stock,
+    low_stock: lowStock,
   };
 }
 
