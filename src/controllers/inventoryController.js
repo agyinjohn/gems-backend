@@ -87,18 +87,39 @@ function normalizeImages(images) {
 
 const getProducts = async (req, res) => {
   const { search, category_id, is_active, low_stock, item_type } = req.query;
-  const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
+  // When a branch filter is active we show ALL products the tenant owns
+  // (not just those whose home branch matches) so that transferred stock is
+  // visible. The branch_stock array on each product carries the per-branch
+  // quantity; the frontend uses that to show the right number.
+  const filter = { tenant_id: req.tenant_id };
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { sku: new RegExp(search, 'i') }];
   if (category_id) filter.category_id = category_id;
   if (is_active !== undefined) filter.is_active = is_active === 'true';
-  // Allow filtering by catalog type: ?item_type=product|service|bundle
   if (item_type) filter.item_type = item_type;
   const products = await Product.find(filter)
     .populate('category_id', 'name')
     .populate('bundle_items.product_id', 'name')
+    .populate('branch_stock.branch_id', 'name')
     .sort({ createdAt: -1 });
-  let data = products.map(p => ({ ...p.toObject(), id: p._id, category_name: p.category_id?.name }));
-  // low_stock only makes sense for physical products
+
+  const activeBranchId = req.branchFilter?.branch_id
+    ? String(req.branchFilter.branch_id)
+    : null;
+
+  let data = products.map(p => {
+    const obj = { ...p.toObject(), id: p._id, category_name: p.category_id?.name };
+    // When scoped to a branch, replace stock_qty with the branch-specific qty
+    // so the inventory list reflects what that branch actually holds.
+    if (activeBranchId) {
+      const entry = (p.branch_stock || []).find(
+        e => String(e.branch_id?._id || e.branch_id) === activeBranchId
+      );
+      obj.stock_qty = entry ? entry.qty : 0;
+      obj.branch_stock_qty = obj.stock_qty; // explicit alias for clarity
+    }
+    return obj;
+  });
+
   if (low_stock === 'true') data = data.filter(p => p.item_type !== 'service' && p.stock_qty <= p.low_stock_threshold);
   res.json({ success: true, data });
 };
