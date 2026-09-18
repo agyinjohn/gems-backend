@@ -113,25 +113,71 @@ const getDashboard = async (req, res) => {
   if (role === 'warehouse_staff') {
     const weekAgo  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000);
     const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    // When scoped to a branch, stock counts must use branch_stock entries
+    // rather than the top-level stock_qty (which is the total across all
+    // branches) or branch_id (which is the product's home branch, not where
+    // its stock currently sits after transfers).
+    const activeBranchId = bf.branch_id ? String(bf.branch_id) : null;
+
+    // Build a match that finds products with stock at the active branch.
+    const branchStockMatch = activeBranchId
+      ? { 'branch_stock': { $elemMatch: { branch_id: bf.branch_id } } }
+      : {};
+
+    // For aggregations that need the branch-specific qty we use $filter on
+    // branch_stock to get the right entry, then $arrayElemAt to read its qty.
+    const branchQtyExpr = activeBranchId
+      ? { $ifNull: [{ $arrayElemAt: [{ $filter: { input: '$branch_stock', as: 'e', cond: { $eq: ['$$e.branch_id', bf.branch_id] } } }, 0] }, { qty: 0 }] }
+      : null;
+    const stockQtyExpr = activeBranchId ? `$${branchQtyExpr ? 'branch_stock_entry.qty' : 'stock_qty'}` : '$stock_qty';
+
     const [
       totalProducts, lowStock, outOfStock, healthyStock,
       recentMovements, lowStockItems,
       totalStockValue, movementsByType, stockTrend, topMovedProducts, pendingPOs,
     ] = await Promise.all([
-      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
-      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, $expr: { $and: [{ $lte: ['$stock_qty', '$low_stock_threshold'] }, { $gt: ['$stock_qty', 0] }] } }),
-      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, stock_qty: 0 }),
-      Product.countDocuments({ tenant_id: tid, ...bf, is_active: true, $expr: { $gt: ['$stock_qty', '$low_stock_threshold'] } }),
+      // When branch-scoped, count products that have any stock entry for that branch
+      activeBranchId
+        ? Product.countDocuments({ tenant_id: tid, is_active: true, 'branch_stock.branch_id': bf.branch_id })
+        : Product.countDocuments({ tenant_id: tid, is_active: true }),
+      // Low stock: branch qty <= threshold
+      activeBranchId
+        ? Product.countDocuments({ tenant_id: tid, is_active: true, branch_stock: { $elemMatch: { branch_id: bf.branch_id, $expr: { $and: [{ $lte: ['$$this.qty', '$low_stock_threshold'] }, { $gt: ['$$this.qty', 0] }] } } } })
+        : Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $and: [{ $lte: ['$stock_qty', '$low_stock_threshold'] }, { $gt: ['$stock_qty', 0] }] } }),
+      // Out of stock at branch
+      activeBranchId
+        ? Product.countDocuments({ tenant_id: tid, is_active: true, branch_stock: { $elemMatch: { branch_id: bf.branch_id, qty: 0 } } })
+        : Product.countDocuments({ tenant_id: tid, is_active: true, stock_qty: 0 }),
+      // Healthy stock at branch
+      activeBranchId
+        ? Product.countDocuments({ tenant_id: tid, is_active: true, branch_stock: { $elemMatch: { branch_id: bf.branch_id, $expr: { $gt: ['$$this.qty', '$low_stock_threshold'] } } } })
+        : Product.countDocuments({ tenant_id: tid, is_active: true, $expr: { $gt: ['$stock_qty', '$low_stock_threshold'] } }),
       StockMovement.find({ tenant_id: tid, ...bf }).sort({ createdAt: -1 }).limit(12).populate('product_id', 'name'),
-      Product.find({ tenant_id: tid, ...bf, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10).select('name stock_qty low_stock_threshold sku cost_price'),
-      // Total inventory value
-      Product.aggregate([{ $match: { tenant_id: tid, ...bf, is_active: true } }, { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
-      // Movement breakdown by type — last 30 days
+      // Low stock items list — show branch qty when scoped
+      activeBranchId
+        ? Product.aggregate([
+            { $match: { tenant_id: tid, is_active: true, 'branch_stock.branch_id': bf.branch_id } },
+            { $addFields: { branch_entry: { $arrayElemAt: [{ $filter: { input: '$branch_stock', as: 'e', cond: { $eq: ['$$e.branch_id', bf.branch_id] } } }, 0] } } },
+            { $addFields: { branch_qty: { $ifNull: ['$branch_entry.qty', 0] } } },
+            { $match: { $expr: { $lte: ['$branch_qty', '$low_stock_threshold'] } } },
+            { $sort: { branch_qty: 1 } },
+            { $limit: 10 },
+            { $project: { name: 1, sku: 1, stock_qty: '$branch_qty', low_stock_threshold: 1, cost_price: 1 } },
+          ])
+        : Product.find({ tenant_id: tid, is_active: true, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] } }).sort('stock_qty').limit(10).select('name stock_qty low_stock_threshold sku cost_price'),
+      // Inventory value — use branch qty when scoped
+      activeBranchId
+        ? Product.aggregate([
+            { $match: { tenant_id: tid, is_active: true, 'branch_stock.branch_id': bf.branch_id } },
+            { $addFields: { branch_qty: { $ifNull: [{ $arrayElemAt: [{ $filter: { input: '$branch_stock', as: 'e', cond: { $eq: ['$$e.branch_id', bf.branch_id] } } }, 0] }, { qty: 0 }] } } },
+            { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$branch_qty.qty'] } } } },
+          ])
+        : Product.aggregate([{ $match: { tenant_id: tid, is_active: true } }, { $group: { _id: null, value: { $sum: { $multiply: ['$cost_price', '$stock_qty'] } } } }]),
       StockMovement.aggregate([
         { $match: { tenant_id: tid, ...bf, createdAt: { $gte: monthAgo } } },
         { $group: { _id: '$type', count: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
       ]),
-      // Daily in/out trend — last 7 days
       StockMovement.aggregate([
         { $match: { tenant_id: tid, ...bf, createdAt: { $gte: weekAgo } } },
         { $group: {
@@ -142,7 +188,6 @@ const getDashboard = async (req, res) => {
         { $sort: { _id: 1 } },
         { $project: { day: { $substr: ['$_id', 5, 5] }, in: 1, out: 1 } },
       ]),
-      // Top 5 most moved products — last 30 days
       StockMovement.aggregate([
         { $match: { tenant_id: tid, ...bf, createdAt: { $gte: monthAgo } } },
         { $group: { _id: '$product_id', moves: { $sum: 1 }, qty: { $sum: { $abs: '$quantity' } } } },
@@ -151,7 +196,6 @@ const getDashboard = async (req, res) => {
         { $unwind: '$product' },
         { $project: { name: '$product.name', stock_qty: '$product.stock_qty', moves: 1, qty: 1 } },
       ]),
-      // Pending POs awaiting goods receipt
       PurchaseOrder.countDocuments({ tenant_id: tid, ...bf, status: { $in: ['approved', 'sent', 'partially_received'] } }),
     ]);
 
@@ -257,8 +301,20 @@ const getDashboard = async (req, res) => {
     // …and anything that is a standing count — what is on the shelf, who is on
     // the books — is as it stands now, whatever window is chosen. Asking how
     // many products existed during March is a different question.
-    Product.countDocuments({ tenant_id: tid, ...bf, is_active: true }),
-    Product.countDocuments({ tenant_id: tid, ...bf, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
+    activeBranchId
+      ? Product.aggregate([
+          { $match: { tenant_id: tid, is_active: true, 'branch_stock.branch_id': bf.branch_id } },
+          { $count: 'total' },
+        ]).then(r => r[0]?.total || 0)
+      : Product.countDocuments({ tenant_id: tid, is_active: true }),
+    activeBranchId
+      ? Product.aggregate([
+          { $match: { tenant_id: tid, is_active: true, 'branch_stock.branch_id': bf.branch_id } },
+          { $addFields: { bqty: { $ifNull: [{ $arrayElemAt: [{ $filter: { input: '$branch_stock', as: 'e', cond: { $eq: ['$$e.branch_id', bf.branch_id] } } }, 0] }, { qty: 0 }] } } },
+          { $match: { $expr: { $lte: ['$bqty.qty', '$low_stock_threshold'] } } },
+          { $count: 'total' },
+        ]).then(r => r[0]?.total || 0)
+      : Product.countDocuments({ tenant_id: tid, $expr: { $lte: ['$stock_qty', '$low_stock_threshold'] }, is_active: true }),
     Customer.countDocuments({ tenant_id: tid, ...bf }),
     Lead.countDocuments({ tenant_id: tid, ...bf, stage: { $nin: ['won', 'lost'] } }),
     Employee.countDocuments({ tenant_id: tid, ...bf, status: 'active' }),
