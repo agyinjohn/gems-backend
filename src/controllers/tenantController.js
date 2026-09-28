@@ -14,7 +14,7 @@ const platformMailer = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.PLATFORM_GMAIL_USER,
-    pass: process.env.PLATFORM_GMAIL_APP_PASSWORD,
+    pass: (process.env.PLATFORM_GMAIL_APP_PASSWORD || '').replace(/\s/g, ''),
   },
 });
 
@@ -25,11 +25,8 @@ function hashOtp(otp) {
 
 async function sendEmailOtpMail(to, otp) {
   if (!process.env.PLATFORM_GMAIL_USER || !process.env.PLATFORM_GMAIL_APP_PASSWORD) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[EMAIL OTP DEV] ${to} -> ${otp}`);
-      return { sent: true };
-    }
-    return { sent: false };
+    console.log(`[EMAIL OTP] Missing Gmail credentials — OTP for ${to}: ${otp}`);
+    return { sent: false, reason: 'Missing Gmail credentials' };
   }
   try {
     await platformMailer.sendMail({
@@ -46,7 +43,7 @@ async function sendEmailOtpMail(to, otp) {
     });
     return { sent: true };
   } catch (err) {
-    console.error('[EMAIL OTP]', err.message);
+    console.error('[EMAIL OTP ERROR]', err.message);
     return { sent: false, reason: err.message };
   }
 }
@@ -183,10 +180,7 @@ const sendEmailOtp = async (req, res) => {
 
   const result = await sendEmailOtpMail(normalised, otp);
   if (!result.sent) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[EMAIL OTP DEV] ${normalised} -> ${otp}`);
-      return res.json({ success: true, message: 'Code sent. (DEV: check server console)' });
-    }
+    console.error('[EMAIL OTP] Failed to send to', normalised, result.reason);
     return res.status(503).json({ success: false, message: 'Could not send verification email. Please try again.' });
   }
 
