@@ -2322,15 +2322,21 @@ module.exports = {
   ContractDocument:      mongoose.model('ContractDocument', contractDocumentSchema),
 };
 
-// OTP_VERIFICATION — lightweight pre-registration phone verification
+// OTP_VERIFICATION — lightweight pre-registration verification (phone + email)
 // Stored in DB so it survives server restarts and works across multiple processes.
 const otpVerificationSchema = new Schema({
-  phone:     { type: String, required: true, unique: true },
-  otp:       { type: String, required: true },
-  verified:  { type: Boolean, default: false },
-  expires_at:{ type: Date, required: true },
+  phone:        { type: String, lowercase: true, trim: true },
+  email:        { type: String, lowercase: true, trim: true },
+  otp_hash:     { type: String, required: true },
+  verified:     { type: Boolean, default: false },
+  attempts:     { type: Number, default: 0 },
+  send_count:   { type: Number, default: 1 },
+  last_sent_at: { type: Date, default: Date.now },
+  expires_at:   { type: Date, required: true },
 }, { timestamps: true });
-otpVerificationSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 }); // auto-delete expired
+otpVerificationSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
+otpVerificationSchema.index({ phone: 1 }, { unique: true, sparse: true });
+otpVerificationSchema.index({ email: 1 }, { unique: true, sparse: true });
 const OtpVerification = mongoose.model('OtpVerification', otpVerificationSchema);
 
 Object.assign(module.exports, { OtpVerification });

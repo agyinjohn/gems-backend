@@ -91,6 +91,8 @@ router.post('/auth/reset-password', auth.resetPassword);
 // TENANT REGISTRATION (public)
 router.post('/tenants/send-otp', tenant.sendOtp);
 router.post('/tenants/verify-otp', tenant.verifyOtp);
+router.post('/tenants/send-email-otp', tenant.sendEmailOtp);
+router.post('/tenants/verify-email-otp', tenant.verifyEmailOtp);
 router.post('/tenants/register', tenant.registerTenant);
 
 // Product mode info + storefront API docs (public)
