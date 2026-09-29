@@ -11,6 +11,32 @@ const types = require('../config/serviceTypes');
 const jobs = require('../services/jobService');
 const audit = require('../utils/audit');
 const { requestFilter } = require('../services/offeringService');
+const { sendTemplated: sendSms } = require('../services/smsService');
+const { sendTemplated: sendEmail } = require('../services/emailService');
+
+/**
+ * Fire-and-forget notifications to the client.
+ * Never throws — a failed notification must not break the flow that triggered it.
+ */
+async function notifyClient(order, key, extraVars = {}) {
+  if (!order.customer_phone && !order.customer_email) return;
+  const tenant = await Tenant.findById(order.tenant_id).select('business_name').lean();
+  const vars = {
+    customer_name: order.customer_name,
+    order_number: order.order_number,
+    business_name: tenant?.business_name || '',
+    track_link: `${process.env.FRONTEND_URL || ''}/track/${order.track_token}`,
+    ...extraVars,
+  };
+  const sends = [];
+  if (order.customer_phone) {
+    sends.push(sendSms({ tenantId: order.tenant_id, to: order.customer_phone, key, vars }).catch(() => {}));
+  }
+  if (order.customer_email) {
+    sends.push(sendEmail({ tenantId: order.tenant_id, to: order.customer_email, key, vars }).catch(() => {}));
+  }
+  await Promise.all(sends);
+}
 
 /**
  * Service requests.
@@ -232,6 +258,11 @@ const submitRequest = async (req, res) => {
       needs_quote: needsQuote,
     },
   });
+
+  // Notify the client their request landed. Fire-and-forget.
+  notifyClient(order, 'service_request_received', {
+    services: items.map(i => i.product_name).join(', '),
+  }).catch(() => {});
 };
 
 /* ── Staff: the queue ─────────────────────────────────────────────────────── */
@@ -331,6 +362,12 @@ const quote = async (req, res) => {
   await order.save();
 
   res.json({ success: true, data: shape(order.toJSON()) });
+
+  notifyClient(order, 'service_request_quoted', {
+    total: order.total.toFixed(2),
+    note: note || '',
+  }).catch(() => {});
+
   await audit(req, 'QUOTE_SERVICE_REQUEST', 'sales',
     `${req.user.name} quoted ${order.order_number} at GHS ${order.total.toFixed(2)}`,
     { reference: order.order_number, total: order.total });
@@ -399,16 +436,8 @@ const respondToQuote = async (req, res) => {
   order.quote_status = decision;
   if (decision === 'accepted') {
     order.accepted_at = new Date();
-    // Straight to whatever this trade's first step is — "in the queue" for a
-    // print job, "scheduled" for a site visit.
     order.production_stage = types.workStagesFor(order.service_type)[0].key;
     order.status = 'in_progress';
-
-    // An accepted quote is work, so the shop gets a job for it rather than
-    // somebody retyping the request. Deliberately not fatal: the client's
-    // acceptance is their decision and must stand even if this fails, and the
-    // request still lists in the queue either way. A missing job is visible —
-    // the request shows no job — and recoverable; a refused acceptance is not.
     try {
       const job = await jobs.createFromServiceRequest(order);
       if (job) order.job_id = job._id;
@@ -422,6 +451,21 @@ const respondToQuote = async (req, res) => {
   await order.save();
 
   res.json({ success: true, data: { quote_status: order.quote_status, production_stage: order.production_stage } });
+
+  // Notify the shop when the client responds.
+  const { User } = require('../models');
+  const owner = await User.findOne({ tenant_id: order.tenant_id, role: 'business_owner' }).select('email').lean();
+  if (owner?.email) {
+    const { sendEmail: rawEmail } = require('../services/emailService');
+    const tenant = await Tenant.findById(order.tenant_id).select('business_name').lean();
+    rawEmail({
+      tenantId: order.tenant_id,
+      to: owner.email,
+      subject: `${order.order_number} — quote ${decision}`,
+      body: `${order.customer_name} has ${decision} the quote for ${order.order_number}.\n\nLog in to view the job.`,
+      source: 'service_request_response',
+    }).catch(() => {});
+  }
 };
 
 /* ── Public: paying for the job ───────────────────────────────────────────── */

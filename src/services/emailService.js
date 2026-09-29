@@ -77,6 +77,33 @@ const DEFAULT_TEMPLATES = {
       + 'Kind regards,\n{{business_name}}',
   },
 
+  service_request_received: {
+    group: 'Service Requests',
+    label: 'Request received',
+    description: 'Sent to the client when their service request is submitted.',
+    variables: ['{{customer_name}}', '{{order_number}}', '{{business_name}}', '{{track_link}}', '{{services}}'],
+    subject: 'We have received your request — {{order_number}}',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Thank you — we have received your request {{order_number}} for {{services}}.\n\n'
+      + 'We will review it and send you a quote shortly. You can track the status of your job here:\n'
+      + '{{track_link}}\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+  service_request_quoted: {
+    group: 'Service Requests',
+    label: 'Quote sent',
+    description: 'Sent to the client when the shop sends a quote.',
+    variables: ['{{customer_name}}', '{{order_number}}', '{{total}}', '{{business_name}}', '{{track_link}}', '{{note}}'],
+    subject: 'Your quote is ready — {{order_number}}',
+    body: 'Hi {{customer_name}},\n\n'
+      + 'Your quote for {{order_number}} is ready.\n\n'
+      + 'Total: GH\u20b5 {{total}}\n\n'
+      + '{{note}}\n\n'
+      + 'Open the link below to accept or decline — nothing is charged until you say yes:\n'
+      + '{{track_link}}\n\n'
+      + 'Kind regards,\n{{business_name}}',
+  },
+
   project_application_raised: {
     group: 'Projects',
     label: 'Application raised',

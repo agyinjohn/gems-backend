@@ -65,6 +65,21 @@ const DEFAULT_TEMPLATES = {
     body: 'Hi {{customer_name}}, your service request {{order_number}} has been completed. Thank you for choosing {{business_name}}.',
   },
 
+  service_request_received: {
+    group: 'Service Requests',
+    label: 'Request received',
+    description: 'Sent to the client when their service request is submitted.',
+    variables: ['{{customer_name}}', '{{order_number}}', '{{business_name}}', '{{track_link}}', '{{services}}'],
+    body: 'Hi {{customer_name}}, we have received your request {{order_number}} for {{services}}. We will send a quote shortly. Track it here: {{track_link}} - {{business_name}}',
+  },
+  service_request_quoted: {
+    group: 'Service Requests',
+    label: 'Quote sent',
+    description: 'Sent to the client when the shop sends a quote.',
+    variables: ['{{customer_name}}', '{{order_number}}', '{{total}}', '{{business_name}}', '{{track_link}}', '{{note}}'],
+    body: 'Hi {{customer_name}}, your quote for {{order_number}} is ready: GHS {{total}}. Accept or decline here: {{track_link}} - {{business_name}}',
+  },
+
   /* Project templates go to the client who awarded the contract, and only on
    * jobs where somebody has switched client updates on. They are deliberately
    * terse: the money and the dates live on the application itself, and a text

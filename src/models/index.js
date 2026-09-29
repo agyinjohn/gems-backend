@@ -42,6 +42,9 @@ const tenantSchema = new Schema({
   subscription_type:       { type: String, enum: ['plan','custom'], default: 'plan' },
   modules:                 { type: [String], default: [] },
   addons:                  { type: [String], default: [] },
+  // Features the tenant explicitly removed from their plan at subscription time.
+  // requireModule reads this to block access to removed modules.
+  removed_features:        { type: [String], default: [] },
   max_branches:            { type: Number, default: 1 },
   max_users:               { type: Number, default: 5 },
   is_active:               { type: Boolean, default: true },
@@ -1064,6 +1067,8 @@ const billingTransactionSchema = new Schema({
   subscription_type: { type: String, enum: ['plan','custom'], default: 'plan' },
   modules:           { type: [String], default: [] },
   addons:            { type: [String], default: [] },
+  removed_features:  { type: [String], default: [] },
+  discount_pct:      { type: Number, default: 0 },
   amount:          { type: Number, required: true },
   currency:        { type: String, default: 'USD' },
   status:          { type: String, enum: ['pending','success','failed'], default: 'pending' },

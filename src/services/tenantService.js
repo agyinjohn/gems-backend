@@ -63,8 +63,10 @@ async function resolveTenantForUser(user, requestPath = '') {
     if (tenant.subscription_status === 'suspended') {
       return { error: { status: 403, message: 'Your subscription has been suspended. Please contact support.' } };
     }
-    if (tenant.subscription_status === 'expired' || tenant.subscription_expires_at < now) {
-      const gracePeriodEnd = new Date(tenant.subscription_expires_at.getTime() + 7 * 24 * 60 * 60 * 1000);
+    if (tenant.subscription_status === 'expired' || (tenant.subscription_expires_at && tenant.subscription_expires_at < now)) {
+      const settings = await getPlatformSettings();
+      const graceDays = settings.grace_days ?? 7;
+      const gracePeriodEnd = new Date(tenant.subscription_expires_at.getTime() + graceDays * 24 * 60 * 60 * 1000);
       if (now > gracePeriodEnd) {
         return { error: { status: 403, message: 'Your subscription has expired. Please renew to continue.' } };
       }

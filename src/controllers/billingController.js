@@ -26,9 +26,15 @@ const getStatus = async (req, res) => {
   const settings = await PlatformSettings.findOne() || {};
   const planPrices = settings.plans || PLAN_PRICES;
   const planPrice = planPrices[tenant.plan]?.price ?? PLAN_PRICES[tenant.plan] ?? 0;
-  const days = tenant.subscription_expires_at
-    ? Math.ceil((new Date(tenant.subscription_expires_at).getTime() - Date.now()) / 86400000)
+  const rawDays = tenant.subscription_expires_at
+    ? (new Date(tenant.subscription_expires_at).getTime() - Date.now()) / 86400000
     : null;
+  const days = rawDays !== null ? Math.ceil(rawDays) : null;
+
+  // If the expiry has passed but the cron hasn't run yet, reflect the real status
+  const effectiveStatus = tenant.subscription_status === 'active' && days !== null && days <= 0
+    ? 'expired'
+    : tenant.subscription_status;
 
   const lastTx = await BillingTransaction.findOne({ tenant_id: req.tenant_id, status: 'success' }).sort({ createdAt: -1 });
 
@@ -37,7 +43,8 @@ const getStatus = async (req, res) => {
     subscription_type:       tenant.subscription_type || 'plan',
     modules:                 tenant.modules || [],
     addons:                  tenant.addons  || [],
-    subscription_status:     tenant.subscription_status,
+    removed_features:        tenant.removed_features || [],
+    subscription_status:     effectiveStatus,
     subscription_expires_at: tenant.subscription_expires_at,
     trial_ends_at:           tenant.trial_ends_at,
     days_remaining:          days,
@@ -71,8 +78,13 @@ const subscribe = async (req, res) => {
   const settings = await PlatformSettings.findOne();
   const planPrices = settings?.plans || PLAN_PRICES;
   const base = planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 0;
-  const deduction = removed_features.reduce((s, f) => s + (REMOVABLE_FEATURES[f]?.deduction[plan] || 0), 0);
-  const amount = (base - deduction) * (duration_days / 30);
+  const featureDeduction = removed_features.reduce((s, f) => s + (REMOVABLE_FEATURES[f]?.deduction[plan] || 0), 0);
+  const monthlyPrice = base - featureDeduction;
+
+  // Apply duration discount
+  const DURATION_DISCOUNTS = { 30: 0, 90: 5, 180: 10, 365: 20 };
+  const discountPct = DURATION_DISCOUNTS[duration_days] ?? 0;
+  const amount = Math.round(monthlyPrice * (duration_days / 30) * (1 - discountPct / 100) * 100) / 100;
 
   const tx = await BillingTransaction.create({
     tenant_id: req.tenant_id,
@@ -83,6 +95,7 @@ const subscribe = async (req, res) => {
     currency: 'GHS',
     status: 'pending',
     duration_days,
+    discount_pct: discountPct,
     initiated_by: req.user._id,
   });
 
@@ -92,6 +105,7 @@ const subscribe = async (req, res) => {
     plan,
     removed_features,
     duration_days,
+    discount_pct:        discountPct,
     email:               tenant.email,
     paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
     reference:           `BILLING-${tx._id}-${Date.now()}`,
@@ -135,6 +149,7 @@ const verify = async (req, res) => {
       subscription_expires_at: newExpiry,
       max_branches,
       max_users,
+      auto_renew:              true,
     });
 
     tx.status         = 'success';
@@ -160,6 +175,12 @@ const authorizeCard = async (req, res) => {
   const tenant = await Tenant.findById(req.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
+  // Read key from PlatformSettings so admin changes take effect immediately.
+  const settings = await PlatformSettings.findOne().select('paystack_secret_key paystack_public_key').lean();
+  const secretKey  = settings?.paystack_secret_key  || process.env.PAYSTACK_SECRET_KEY  || '';
+  const publicKey  = settings?.paystack_public_key   || process.env.PAYSTACK_PUBLIC_KEY   || '';
+  if (!secretKey) return res.status(500).json({ success: false, message: 'Payment gateway is not configured.' });
+
   const https = require('node:https');
   const payload = JSON.stringify({
     email: tenant.email, amount: 5000, currency: 'GHS',
@@ -169,7 +190,7 @@ const authorizeCard = async (req, res) => {
   });
   const options = {
     hostname: 'api.paystack.co', path: '/transaction/initialize', method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
   };
   let body = '';
   const paystackReq = https.request(options, r => {
@@ -180,7 +201,7 @@ const authorizeCard = async (req, res) => {
         res.json({ success: true, data: {
           authorization_url: data.data?.authorization_url,
           reference: data.data?.reference,
-          paystack_public_key: process.env.PAYSTACK_PUBLIC_KEY,
+          paystack_public_key: publicKey,
         } });
       } catch { res.status(500).json({ success: false, message: 'Failed to initialize card authorization.' }); }
     });
@@ -222,10 +243,11 @@ const getCard = async (req, res) => {
 
 // POST /billing/cancel
 const cancelSubscription = async (req, res) => {
+  // Only turn off auto-renewal — the card stays active so the tenant can
+  // re-subscribe later without having to add a new card.
   await Tenant.findByIdAndUpdate(req.tenant_id, { auto_renew: false });
-  await CardAuthorization.findOneAndUpdate({ tenant_id: req.tenant_id }, { is_active: false });
-  await audit(req, 'CANCEL_SUBSCRIPTION', 'billing', `${req.user.name} cancelled auto-renewal`);
-  res.json({ success: true, message: 'Auto-renewal cancelled. Your subscription will remain active until it expires.' });
+  await audit(req, 'CANCEL_SUBSCRIPTION', 'billing', `${req.user.name} turned off auto-renewal`);
+  res.json({ success: true, message: 'Auto-renewal turned off. Your subscription stays active until it expires.' });
 };
 
 // Internal: charge saved card (called by cron)
@@ -233,15 +255,27 @@ const chargeCard = async (tenant_id, plan, duration_days = 30) => {
   const card = await CardAuthorization.findOne({ tenant_id, is_active: true });
   if (!card) return { success: false, message: 'No saved card.' };
 
+  const tenant = await Tenant.findById(tenant_id);
+  if (!tenant) return { success: false, message: 'Tenant not found.' };
+
+  // Preserve the features the tenant removed at their last subscription.
+  const removed_features = tenant.removed_features || [];
+
   const settings = await PlatformSettings.findOne();
   const planPrices = settings?.plans || PLAN_PRICES;
-  const amount = Math.round((planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 350) * (duration_days / 30) * 100);
+  const secretKey = settings?.paystack_secret_key || process.env.PAYSTACK_SECRET_KEY || '';
+  if (!secretKey) return { success: false, message: 'Payment gateway not configured.' };
+
+  const base = planPrices[plan]?.price ?? PLAN_PRICES[plan] ?? 350;
+  const featureDeduction = removed_features.reduce((s, f) => s + (REMOVABLE_FEATURES[f]?.deduction[plan] || 0), 0);
+  const monthlyPrice = base - featureDeduction;
+  const amount = Math.round(monthlyPrice * (duration_days / 30) * 100);
 
   const https = require('node:https');
   const payload = JSON.stringify({ authorization_code: card.authorization_code, email: card.email, amount, currency: 'GHS' });
   const options = {
     hostname: 'api.paystack.co', path: '/transaction/charge_authorization', method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
   };
 
   return new Promise((resolve) => {
@@ -252,12 +286,20 @@ const chargeCard = async (tenant_id, plan, duration_days = 30) => {
         try {
           const data = JSON.parse(body);
           if (data.data?.status === 'success') {
-            const tenant = await Tenant.findById(tenant_id);
             const base = tenant.subscription_expires_at && new Date(tenant.subscription_expires_at) > new Date()
               ? new Date(tenant.subscription_expires_at) : new Date();
             const newExpiry = new Date(base.getTime() + duration_days * 86400000);
-            await Tenant.findByIdAndUpdate(tenant_id, { subscription_status: 'active', subscription_expires_at: newExpiry });
-            await BillingTransaction.create({ tenant_id, plan, amount: amount / 100, currency: 'GHS', status: 'success', payment_ref: data.data.reference, payment_method: 'card_auto', duration_days, expires_at: newExpiry });
+            await Tenant.findByIdAndUpdate(tenant_id, {
+              subscription_status:     'active',
+              subscription_expires_at: newExpiry,
+              removed_features,
+            });
+            await BillingTransaction.create({
+              tenant_id, plan, removed_features,
+              amount: amount / 100, currency: 'GHS',
+              status: 'success', payment_ref: data.data.reference,
+              payment_method: 'card_auto', duration_days, expires_at: newExpiry,
+            });
             resolve({ success: true, reference: data.data.reference });
           } else {
             await BillingTransaction.create({ tenant_id, plan, amount: amount / 100, currency: 'GHS', status: 'failed', duration_days });

@@ -60,6 +60,17 @@ const runBillingCron = async () => {
     { subscription_status: 'expired' }
   );
 
+  // ── 4. EXPIRE active tenants whose subscription_expires_at has passed and won't auto-charge
+  await Tenant.updateMany(
+    {
+      is_active:               true,
+      subscription_status:     'active',
+      subscription_expires_at: { $lte: now },
+      $or: [{ auto_renew: false }, { card_saved: false }],
+    },
+    { subscription_status: 'expired' }
+  );
+
   console.log('[Cron] Billing check complete.');
 };
 

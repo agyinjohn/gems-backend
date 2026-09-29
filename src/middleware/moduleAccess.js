@@ -22,16 +22,20 @@ function requireModule(module) {
       const tenant = await Tenant.findById(req.tenant_id).select('plan subscription_status trial_ends_at removed_features');
       if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found.' });
 
-      const { plan, subscription_status, trial_ends_at, removed_features = [] } = tenant;
+      const { plan, subscription_status, subscription_expires_at, trial_ends_at, removed_features = [] } = tenant;
+      const now = new Date();
 
       // Trial — full access until trial ends
       if (subscription_status === 'trial') {
-        if (trial_ends_at && new Date(trial_ends_at) > new Date()) return next();
+        if (trial_ends_at && new Date(trial_ends_at) > now) return next();
         return res.status(403).json({ success: false, message: 'Your free trial has expired. Please subscribe to continue.' });
       }
 
       // Expired or suspended — block everything except dashboard/billing
-      if (subscription_status === 'expired' || subscription_status === 'suspended') {
+      // Also catch active tenants whose expiry has passed but cron hasn't run yet
+      const effectivelyExpired = subscription_status === 'expired' ||
+        (subscription_status === 'active' && subscription_expires_at && new Date(subscription_expires_at) <= now);
+      if (effectivelyExpired || subscription_status === 'suspended') {
         return res.status(403).json({ success: false, message: 'Your subscription is inactive. Please renew to access this feature.' });
       }
 
