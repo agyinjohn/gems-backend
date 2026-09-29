@@ -294,6 +294,8 @@ const getDashboard = async (req, res) => {
   }
 
   // ── SUPER ADMIN / BUSINESS OWNER / BRANCH MANAGER ────────────────────────────────
+  const activeBranchId = bf.branch_id ? String(bf.branch_id) : null;
+
   const [orders, revenue, products, lowStock, customers, leads, employees, expenses, recentOrders, topProducts, monthlySales, recentLeave, hrSummary, monthPayrollAgg] = await Promise.all([
     // Anything counted over time answers to the chosen window…
     Order.countDocuments({ tenant_id: tid, ...bf, payment_status: 'paid', ...period }),
