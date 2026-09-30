@@ -74,6 +74,7 @@ const { validateCoupon } = require('../services/couponService');
 const { completePosSale, getOpenShift, requireOpenShift, recordShiftRefund } = require('../services/posService');
 const accountingRouter = require('./accounting');
 const reportsRouter = require('./reports');
+const payrollRates = require('../config/payrollRates');
 const {
   Supplier, PurchaseOrder, Product, StockMovement,
   Account, Expense, JournalEntry,
@@ -1399,7 +1400,6 @@ async function resolveEssEmployee(req) {
 
 router.get('/ess/me', authenticate, async (req, res) => {
   const hrService = require('../services/hrService');
-const payrollRates = require('../config/payrollRates');
   const employee = await resolveEssEmployee(req);
   if (!employee) return res.json({ success: true, data: null });
   await employee.populate('department_id', 'name');
@@ -1540,7 +1540,11 @@ router.delete('/employees/:id/documents/:docId', authenticate, requireTenant, re
 // ATTENDANCE
 router.get('/attendance', authenticate, requireTenant, requireModule('hr'), async (req, res) => {
   const filter = { tenant_id: req.tenant_id, ...(req.branchFilter || {}) };
-  if (req.query.date) filter.date = new Date(req.query.date);
+  if (req.query.date) {
+    const d = new Date(req.query.date);
+    const next = new Date(d); next.setDate(d.getDate() + 1);
+    filter.date = { $gte: d, $lt: next };
+  }
   const data = await Attendance.find(filter).populate('employee_id', 'name').sort('employee_id');
   const mapped = data.map(a => ({ ...a.toJSON(), employee_name: a.employee_id?.name || null }));
   res.json({ success: true, data: mapped });
@@ -1756,22 +1760,7 @@ router.get('/payroll/batches/:id', authenticate, requireTenant, requireModule('h
 router.patch('/payroll/batches/:id/approve', authenticate, requireTenant, authorize('business_owner', 'accountant'), async (req, res) => {
   const batch = await hrService.approvePayrollBatch(req.tenant_id, req.params.id, req.user._id);
   const ref = `BATCH-${batch.label?.replace(/\s+/g, '-') || batch._id}`;
-  // One aggregate GL entry + payment log for the whole pay run.
   await logPayment({ tenant_id: req.tenant_id, source: 'payroll', reference: `PAYROLL-${ref}`, amount: batch.total_net, method: 'bank_transfer', status: 'success', description: `Payroll approved — ${batch.label} (${batch.employee_count} employees)`, source_id: batch._id, recorded_by: req.user._id });
-  await accounting.postPayrollEntry({
-    tenantId: req.tenant_id,
-    grossSalary: batch.total_gross,
-    allowances: batch.total_allowances || 0,
-    paye: batch.total_paye || 0,
-    ssnitEmployee: batch.total_ssnit_employee || 0,
-    ssnitEmployer: batch.total_ssnit_employer || 0,
-    netSalary: batch.total_net,
-    reference: ref,
-    date: new Date(),
-    sourceId: batch._id,
-    createdBy: req.user._id,
-    payFromCash: true,
-  }).catch((err) => console.error('[Payroll] Batch GL post failed:', err.message));
   res.json({ success: true, data: batch });
 });
 

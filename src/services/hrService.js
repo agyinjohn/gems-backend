@@ -378,11 +378,14 @@ async function approveLeaveRequest(tenantId, leaveId, reviewerId, status) {
           ? emp.leave_entitlements.create({ code, entitlement_days, used_days })
           : { code, entitlement_days, used_days };
         emp.leave_entitlements.push(entry);
+        // Re-find the pushed entry so we have the Mongoose subdocument, not the plain object.
+        entry = emp.leave_entitlements[emp.leave_entitlements.length - 1];
       }
       if (entry.used_days + days > entry.entitlement_days) {
         throw httpError(`Insufficient ${leaveType.name.toLowerCase()}. ${Math.max(0, entry.entitlement_days - entry.used_days)} day(s) remaining.`);
       }
       entry.used_days += days;
+      emp.markModified('leave_entitlements');
     }
     await emp.save();
   }
@@ -1076,7 +1079,8 @@ async function getHrSummary(tenantId, query = {}, branchFilter = {}) {
     // them into the "present" figure — the one number on the page that has to
     // match the room.
     Attendance.countDocuments({
-      tenant_id: tenantId, ...bf, date: today,
+      tenant_id: tenantId, ...bf,
+      date: { $gte: today, $lt: new Date(today.getTime() + 86400000) },
       status: { $in: ['present', 'half_day'] },
     }),
     PayrollRun.aggregate([
