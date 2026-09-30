@@ -795,15 +795,6 @@ const postMessage = async (req, res) => {
   const body = String(req.body.body || '').trim();
   if (!body) return res.status(400).json({ success: false, message: 'Write something first.' });
 
-  // Worth saying plainly: this reaches the client, and the office should know
-  // that before it types rather than after.
-  if (!project.track_token) {
-    return res.status(400).json({
-      success: false,
-      message: 'Create the client link first — there is nobody to send this to yet.',
-    });
-  }
-
   const message = await ProjectMessage.create({
     tenant_id: req.tenant_id,
     project_id: project._id,
@@ -816,15 +807,16 @@ const postMessage = async (req, res) => {
 
   res.status(201).json({ success: true, data: withId(message.toObject()) });
 
-  // A message nobody knows about is a message nobody reads. Texted where the
-  // client asked to be texted, and silent otherwise.
-  await notify.sendProjectNotification({
-    tenantId: req.tenant_id,
-    project,
-    key: 'project_message',
-    userId: req.user._id,
-    vars: { sender: req.user.name },
-  });
+  // Only notify the client if a link exists — internal notes have nobody to send to.
+  if (project.track_token) {
+    await notify.sendProjectNotification({
+      tenantId: req.tenant_id,
+      project,
+      key: 'project_message',
+      userId: req.user._id,
+      vars: { sender: req.user.name },
+    });
+  }
 };
 
 /* ── Baseline programme ───────────────────────────────────────────────────── */
