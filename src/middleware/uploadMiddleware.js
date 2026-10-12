@@ -22,6 +22,21 @@ const hrDocUpload = multer({
   },
 });
 
+// A report the lead wrote elsewhere: Word, PDF or plain text, to be read for its words.
+const reportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const ok = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain',
+    ].includes(file.mimetype);
+    if (ok) return cb(null, true);
+    cb(new Error('Upload a Word (.docx), PDF or text file.'));
+  },
+});
+
 /**
  * Files a client sends in with a service request.
  *
@@ -50,4 +65,5 @@ const serviceUpload = multer({
   },
 });
 
-module.exports = { imageUpload, hrDocUpload, serviceUpload, MAX_FILES };
+module.exports = {
+  reportUpload, imageUpload, hrDocUpload, serviceUpload, MAX_FILES };
