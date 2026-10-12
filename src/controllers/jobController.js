@@ -25,8 +25,42 @@ const list = async (req, res) => {
   if (req.query.project_id)  filter.project_id  = req.query.project_id;
   if (req.query.open === 'true') filter.status = { $in: ['open', 'in_progress', 'done'] };
 
+  // ?date=YYYY-MM-DD — the jobs for one day: due that day, or undated and
+  // booked in that day. With carryover=true (used for today) also anything
+  // earlier that is still unfinished, so nothing silently drops off the list.
+  // Due dates are stored as midnight UTC of the chosen day; when a job was
+  // booked in is judged in the viewer's own timezone (tz = minutes ahead of UTC).
+  const dayRange = (str, tz = 0) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(str || ''))) return null;
+    const utc = new Date(`${str}T00:00:00.000Z`);
+    if (Number.isNaN(utc.getTime())) return null;
+    const local = new Date(utc.getTime() - tz * 60000);
+    return { utc, utcEnd: new Date(utc.getTime() + 86400000), local, localEnd: new Date(local.getTime() + 86400000) };
+  };
+  const tz = Number(req.query.tz) || 0;
+  const day = dayRange(req.query.date, tz);
+  if (day) {
+    const or = [
+      { due_date: { $gte: day.utc, $lt: day.utcEnd } },
+      { due_date: null, createdAt: { $gte: day.local, $lt: day.localEnd } },
+    ];
+    if (req.query.carryover === 'true') {
+      or.push(
+        { due_date: { $lt: day.utc }, status: { $in: ['open', 'in_progress'] } },
+        { due_date: null, createdAt: { $lt: day.local }, status: { $in: ['open', 'in_progress'] } },
+      );
+    }
+    filter.$or = or;
+  }
+  // ?after=YYYY-MM-DD — unfinished work due after that day (the "Upcoming" view).
+  const after = dayRange(req.query.after);
+  if (after) {
+    filter.due_date = { $gte: after.utcEnd };
+    filter.status = { $in: ['open', 'in_progress'] };
+  }
+
   const jobs = await Job.find(filter)
-    .sort({ createdAt: -1 })
+    .sort(after ? { due_date: 1 } : { createdAt: -1 })
     .populate('assigned_to', 'name')
     .lean();
 
