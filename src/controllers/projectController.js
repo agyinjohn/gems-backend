@@ -16,6 +16,7 @@ const shortDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric
 const amount = (n) => Number(n || 0).toFixed(2);
 const audit = require('../utils/audit');
 const { uploadProjectFile } = require('../services/uploadService');
+const { parseReport } = require('../utils/reportSections');
 
 const scope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) });
 
@@ -955,15 +956,35 @@ const extractReportText = async (req, res) => {
       text = (await require('mammoth').extractRawText({ buffer: req.file.buffer })).value;
     }
   } catch {
-    return res.status(422).json({ success: false, message: 'Could not read that file. Is it damaged or password protected?' });
+    const message = req.file.mimetype === 'application/pdf'
+      ? "This PDF couldn't be read. Upload the Word (.docx) version instead, or re-save the PDF from Word or your browser."
+      : "This file couldn't be read. Check it isn't damaged or password protected.";
+    return res.status(422).json({ success: false, message });
   }
 
   text = text.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   if (!text) return res.status(422).json({ success: false, message: 'No text found — a scanned document needs OCR first.' });
 
-  const MAX = 8000; // the summary field's limit
-  const title = req.file.originalname.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
-  res.json({ success: true, data: { title, text: text.slice(0, MAX), truncated: text.length > MAX } });
+  // Split into the report's own fields where the document has headings for
+  // them, each trimmed to what that field can hold.
+  const parsed = parseReport(text, req.file.originalname);
+  const cap = (v, n) => (v.length > n ? v.slice(0, n) : v);
+  const truncated = parsed.summary.length > 8000 || parsed.issues.length > 4000 || parsed.next_steps.length > 4000;
+  res.json({
+    success: true,
+    data: {
+      title: cap(parsed.title, 200),
+      summary: cap(parsed.summary, 8000),
+      issues: cap(parsed.issues, 4000),
+      next_steps: cap(parsed.next_steps, 4000),
+      progress_pct: parsed.progress_pct,
+      health: parsed.health,
+      sections_found: parsed.sections_found,
+      truncated,
+      // Kept for older clients that only read the raw text.
+      text: cap(text, 8000),
+    },
+  });
 };
 
 /** A manager (or the lead) replying to a report. */
