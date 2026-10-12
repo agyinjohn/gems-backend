@@ -889,7 +889,8 @@ const listReports = async (req, res) => {
   res.json({
     success: true,
     data: withIds(reports),
-    can_report: isProjectStaff(req) || await isLeadOf(req, project),
+    // Reports come from the lead alone; managers read and reply.
+    can_report: await isLeadOf(req, project),
     can_comment: isProjectStaff(req) || await isLeadOf(req, project),
     lead: project.manager_id ? { id: String(project.manager_id._id), name: project.manager_id.name, job_title: project.manager_id.job_title } : null,
     report_status: reportStatus(project, last),
@@ -899,9 +900,7 @@ const listReports = async (req, res) => {
 const createReport = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
-  // findScoped already limits non-staff to projects they lead; staff may file
-  // a report on any project they can see.
-  if (!isProjectStaff(req) && !(await isLeadOf(req, project))) {
+  if (!(await isLeadOf(req, project))) {
     return res.status(403).json({ success: false, message: 'Only the project lead can submit reports.' });
   }
 
@@ -941,7 +940,7 @@ const createReport = async (req, res) => {
 const extractReportText = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
-  if (!isProjectStaff(req) && !(await isLeadOf(req, project))) {
+  if (!(await isLeadOf(req, project))) {
     return res.status(403).json({ success: false, message: 'Only the project lead can submit reports.' });
   }
   if (!req.file) return res.status(400).json({ success: false, message: 'Choose a file first.' });
