@@ -7,6 +7,25 @@ const { dispatchToProvider, normalisePhone } = require('../services/smsService')
 const { PlatformSettings } = require('../models');
 
 const MAX_ATTEMPTS  = 5;   // wrong guesses before OTP is invalidated
+// Once a code is confirmed, how long the person has to finish signing up.
+// Without this the record's TTL (10 minutes from sending) deleted it while
+// they were still choosing a plan, and registration then said "not verified".
+const VERIFIED_WINDOW = 60 * 60 * 1000;
+const PLAN_LIMITS = {
+  starter:    { max_branches: 1,   max_users: 5 },
+  pro:        { max_branches: 5,   max_users: 20 },
+  enterprise: { max_branches: 999, max_users: 999 },
+};
+/** Same rules as the sign-up form: 8+ characters, an upper-case letter, a number and a symbol. */
+const passwordProblem = (pw) => {
+  if (typeof pw !== 'string' || pw.length < 8) return 'Password must be at least 8 characters.';
+  if (!/[A-Z]/.test(pw)) return 'Password needs an upper-case letter.';
+  if (!/[0-9]/.test(pw)) return 'Password needs a number.';
+  if (!/[^A-Za-z0-9]/.test(pw)) return 'Password needs a symbol.';
+  return null;
+};
+/** Taken as a business email or as anyone's login — logins are unique across the platform. */
+const emailTaken = async (email) => !!(await Tenant.exists({ email })) || !!(await User.exists({ email }));
 const MAX_SENDS     = 3;   // resends allowed per OTP window
 const RESEND_WINDOW = 60 * 60 * 1000; // 1 hour
 
@@ -67,7 +86,7 @@ async function issueOtp(filter) {
     }
   }
 
-  const otp      = Math.floor(100000 + Math.random() * 900000).toString();
+  const otp      = crypto.randomInt(100000, 1000000).toString();
   const otp_hash = hashOtp(otp);
   const expires_at = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -155,6 +174,7 @@ const verifyOtp = async (req, res) => {
   }
 
   entry.verified = true;
+  entry.expires_at = new Date(Date.now() + VERIFIED_WINDOW);
   await entry.save();
   res.json({ success: true, message: 'Phone number verified.' });
 };
@@ -168,8 +188,9 @@ const sendEmailOtp = async (req, res) => {
   const normalised = email.toLowerCase().trim();
 
   // Block if this email already has a verified tenant account
-  const existing = await Tenant.findOne({ email: normalised });
-  if (existing) return res.status(400).json({ success: false, message: 'An account with this email already exists.' });
+  if (await emailTaken(normalised)) {
+    return res.status(400).json({ success: false, message: 'An account with this email already exists. Sign in instead, or use another email.' });
+  }
 
   let otp;
   try {
@@ -179,6 +200,10 @@ const sendEmailOtp = async (req, res) => {
   }
 
   const result = await sendEmailOtpMail(normalised, otp);
+  if (!result.sent && process.env.NODE_ENV !== 'production') {
+    console.log(`[EMAIL OTP DEV] ${normalised} -> ${otp}`);
+    return res.json({ success: true, message: 'Verification code sent. (DEV: check server console)' });
+  }
   if (!result.sent) {
     console.error('[EMAIL OTP] Failed to send to', normalised, result.reason);
     return res.status(503).json({ success: false, message: 'Could not send verification email. Please try again.' });
@@ -218,16 +243,19 @@ const verifyEmailOtp = async (req, res) => {
   }
 
   entry.verified = true;
+  entry.expires_at = new Date(Date.now() + VERIFIED_WINDOW);
   await entry.save();
   res.json({ success: true, message: 'Email verified.' });
 };
 
 // POST /api/tenants/register
 const registerTenant = async (req, res) => {
-  const { business_name, email, password, phone, address, plan, removed_features } = req.body;
-  if (!business_name || !email || !password || !phone || !address) {
+  const { business_name, owner_name, email, password, phone, address, plan, removed_features } = req.body;
+  if (!business_name?.trim() || !email || !password || !phone || !address?.trim()) {
     return res.status(400).json({ success: false, message: 'business_name, email, password, phone and address are required.' });
   }
+  const pwProblem = passwordProblem(password);
+  if (pwProblem) return res.status(400).json({ success: false, message: pwProblem });
 
   const validPlans  = ['starter', 'pro', 'enterprise'];
   const chosenPlan  = validPlans.includes(plan) ? plan : 'pro';
@@ -254,50 +282,83 @@ const registerTenant = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Email verification has expired. Please verify again.' });
   }
 
-  const existing = await Tenant.findOne({ email: normEmail });
-  if (existing) return res.status(400).json({ success: false, message: 'A business with this email already exists.' });
+  // Checked against logins too: an email already used by a staff account
+  // somewhere would otherwise create the business and then fail on the owner,
+  // leaving a business nobody can sign in to.
+  if (await emailTaken(normEmail)) {
+    return res.status(400).json({ success: false, message: 'An account with this email already exists. Sign in instead, or use another email.' });
+  }
 
-  // Consume both OTP records
+  // A store address for the business. Names with no Latin letters or digits
+  // would otherwise produce an empty slug.
+  const base = business_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'business';
+  let slug = base;
+  for (let i = 0; await Tenant.exists({ slug }); i++) {
+    slug = `${base}-${i < 3 ? Date.now().toString().slice(-4) : crypto.randomInt(10000, 99999)}`;
+  }
+
+  const settings = await PlatformSettings.findOne().select('trial_days').lean();
+  const trialEnds = new Date(Date.now() + (settings?.trial_days || 14) * 24 * 60 * 60 * 1000);
+
+  // Create everything, and undo it all if any step fails, so a failed sign-up
+  // can simply be retried. The verification codes are only used up on success.
+  let tenant, branch, owner;
+  try {
+    tenant = await Tenant.create({
+      business_name: business_name.trim(), slug,
+      email: normEmail,
+      phone: normalised, address: address.trim(),
+      plan: chosenPlan,
+      ...PLAN_LIMITS[chosenPlan],
+      removed_features: Array.isArray(removed_features) ? removed_features.filter((f) => typeof f === 'string') : [],
+      subscription_status: 'trial',
+      trial_ends_at: trialEnds,
+      subscription_expires_at: trialEnds,
+    });
+
+    branch = await Branch.create({
+      tenant_id: tenant._id,
+      name: 'Main Branch',
+      slug: 'main',
+      address: address.trim(),
+      email: normEmail,
+    });
+
+    owner = await User.create({
+      tenant_id: tenant._id,
+      branch_id: null,
+      name: (owner_name || '').trim() || business_name.trim(),
+      email: normEmail,
+      password_hash: await bcrypt.hash(password, 10),
+      role: 'business_owner',
+    });
+
+    branch.manager_id = owner._id;
+    await branch.save();
+
+    await seedChartOfAccounts(tenant._id);
+  } catch (err) {
+    console.error('[REGISTER] rolling back:', err.message);
+    if (tenant) {
+      const { Account } = require('../models');
+      await Promise.allSettled([
+        owner && User.deleteOne({ _id: owner._id }),
+        branch && Branch.deleteOne({ _id: branch._id }),
+        Account && Account.deleteMany({ tenant_id: tenant._id }),
+        Tenant.deleteOne({ _id: tenant._id }),
+      ]);
+    }
+    const duplicate = err.code === 11000;
+    return res.status(duplicate ? 400 : 500).json({
+      success: false,
+      message: duplicate
+        ? 'An account with these details already exists. Sign in instead, or use another email.'
+        : 'Registration could not be completed. Please try again.',
+    });
+  }
+
   await OtpVerification.deleteOne({ phone: normalised });
   await OtpVerification.deleteOne({ email: normEmail });
-
-  let slug = business_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const slugExists = await Tenant.findOne({ slug });
-  if (slugExists) slug = `${slug}-${Date.now().toString().slice(-4)}`;
-
-  const tenant = await Tenant.create({
-    business_name, slug,
-    email: normEmail,
-    phone, address,
-    plan: chosenPlan,
-    removed_features: Array.isArray(removed_features) ? removed_features : [],
-    subscription_status: 'trial',
-    trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-    subscription_expires_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-  });
-
-  const branch = await Branch.create({
-    tenant_id: tenant._id,
-    name: 'Main Branch',
-    slug: 'main',
-    address,
-    email: normEmail,
-  });
-
-  const password_hash = await bcrypt.hash(password, 10);
-  const owner = await User.create({
-    tenant_id: tenant._id,
-    branch_id: null,
-    name: business_name,
-    email: normEmail,
-    password_hash,
-    role: 'business_owner',
-  });
-
-  branch.manager_id = owner._id;
-  await branch.save();
-
-  await seedChartOfAccounts(tenant._id);
 
   res.status(201).json({
     success: true,
