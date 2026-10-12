@@ -950,13 +950,13 @@ router.put('/projects/:id',                authenticate, requireTenant, requireF
 router.delete('/projects/:id',             authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.remove);
 router.get('/projects/:id/financials',     authenticate, requireTenant, requireFeature('projects'), projects.financials);
 
-router.post('/projects/:id/milestones',              authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.addMilestone);
-router.put('/projects/:id/milestones/:milestoneId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.updateMilestone);
-router.delete('/projects/:id/milestones/:milestoneId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeMilestone);
+router.post('/projects/:id/milestones',              authenticate, requireTenant, requireFeature('projects'), projects.leadOrManager, projects.addMilestone);
+router.put('/projects/:id/milestones/:milestoneId',  authenticate, requireTenant, requireFeature('projects'), projects.leadOrManager, projects.updateMilestone);
+router.delete('/projects/:id/milestones/:milestoneId', authenticate, requireTenant, requireFeature('projects'), projects.leadOrManager, projects.removeMilestone);
 
 router.post('/projects/:id/tasks',           authenticate, requireTenant, requireFeature('projects'), projects.addTask);
 router.put('/projects/:id/tasks/:taskId',    authenticate, requireTenant, requireFeature('projects'), projects.updateTask);
-router.delete('/projects/:id/tasks/:taskId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeTask);
+router.delete('/projects/:id/tasks/:taskId', authenticate, requireTenant, requireFeature('projects'), projects.leadOrManager, projects.removeTask);
 
 router.post('/projects/:id/variations',                    authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.addVariation);
 router.patch('/projects/:id/variations/:variationId',      authenticate, requireTenant, requireFeature('projects'), businessOwnerOnly, projects.decideVariation);
@@ -990,6 +990,7 @@ router.get('/projects/:id/invoices/:invoiceId/certificate', authenticate, requir
 router.get('/projects/:id/reports',             authenticate, requireTenant, requireFeature('projects'), projects.listReports);
 router.post('/projects/:id/reports/extract',    authenticate, requireTenant, requireFeature('projects'), reportUpload.single('file'), projects.extractReportText);
 router.post('/projects/:id/reports',            authenticate, requireTenant, requireFeature('projects'), projects.createReport);
+router.post('/projects/:id/reports/:reportId/comments', authenticate, requireTenant, requireFeature('projects'), projects.commentOnReport);
 router.delete('/projects/:id/reports/:reportId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeReport);
 router.get('/projects/:id/diary',              authenticate, requireTenant, requireFeature('projects'), projects.listDiary);
 router.post('/projects/:id/diary',             authenticate, requireTenant, requireFeature('projects'), projects.saveDiary);

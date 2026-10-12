@@ -1694,8 +1694,14 @@ const projectSchema = new Schema({
   planned_end_date: Date,
   actual_end_date:  Date,
   status:         { type: String, enum: ['draft', 'active', 'on_hold', 'completed', 'cancelled'], default: 'draft' },
+  // The project lead. Sees the project, runs its stages and tasks, and files
+  // the progress reports below on the cadence set here.
   manager_id:     { type: Schema.Types.ObjectId, ref: 'Employee' },
   team:           [{ type: Schema.Types.ObjectId, ref: 'Employee' }],
+  report_frequency: { type: String, enum: ['weekly', 'biweekly', 'monthly', 'none'], default: 'weekly' },
+  // Baseline programme, time claims and the cash-flow forecast. Left unset on
+  // projects that predate the switch, which read it from their type instead.
+  advanced_tools: { type: Boolean },
   site_address:   String,
   // Cached from the milestone weights so lists don't have to aggregate.
   // projectService.recalculate is the only thing that writes it.
@@ -1886,8 +1892,17 @@ const projectReportSchema = new Schema({
   progress_pct: { type: Number, min: 0, max: 100 },
   issues:      { type: String, maxlength: 4000 },
   next_steps:  { type: String, maxlength: 4000 },
+  // The lead's own read of the project: green, amber, red.
+  health:      { type: String, enum: ['on_track', 'at_risk', 'off_track'], default: 'on_track' },
   author_id:   { type: Schema.Types.ObjectId, ref: 'User' },
   author_name: String,
+  // Management's replies, so a report is a conversation rather than a drop box.
+  comments: [{
+    body:        { type: String, required: true, maxlength: 2000 },
+    author_id:   { type: Schema.Types.ObjectId, ref: 'User' },
+    author_name: String,
+    created_at:  { type: Date, default: Date.now },
+  }],
 }, { timestamps: true });
 projectReportSchema.index({ tenant_id: 1, project_id: 1, report_date: -1 });
 

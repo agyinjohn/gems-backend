@@ -37,6 +37,61 @@ const isLeadOf = async (req, project) => {
 };
 
 /**
+ * Route guard for the day-to-day running of a project — stages and tasks.
+ * Project staff always pass; the project's lead passes for their own project,
+ * but cannot set what a stage bills for.
+ */
+const leadOrManager = async (req, res, next) => {
+  try {
+    if (isProjectStaff(req)) return next();
+    const project = await findScoped(req);
+    if (project && await isLeadOf(req, project)) {
+      delete req.body.billable_amount;
+      return next();
+    }
+    return res.status(403).json({ success: false, message: 'Only the project lead or a manager can do this.' });
+  } catch (err) { return next(err); }
+};
+
+const REPORT_DAYS = { weekly: 7, biweekly: 14, monthly: 30 };
+
+/**
+ * When the lead's next report falls due, measured from the last one (or from
+ * the start of the project when nothing has been filed). Only running projects
+ * are ever overdue — nobody owes a report on a finished or paused job.
+ */
+function reportStatus(project, last) {
+  const frequency = project.report_frequency || 'weekly';
+  const base = {
+    frequency,
+    last_report_at: last?.report_date || null,
+    last_health: last?.health || null,
+    report_count: last?.count ?? null,
+  };
+  if (frequency === 'none') return { ...base, next_due: null, overdue: false };
+  const anchor = new Date(last?.report_date || project.start_date || project.createdAt || Date.now());
+  const next_due = new Date(anchor.getTime() + REPORT_DAYS[frequency] * 86400000);
+  return { ...base, next_due, overdue: project.status === 'active' && Date.now() > next_due.getTime() };
+}
+
+/** Latest report per project, in one query: { [projectId]: { report_date, health, count } }. */
+async function latestReports(tenantId, projectIds) {
+  if (!projectIds.length) return {};
+  const mongoose = require('mongoose');
+  const rows = await ProjectReport.aggregate([
+    { $match: { tenant_id: new mongoose.Types.ObjectId(String(tenantId)), project_id: { $in: projectIds.map((id) => new mongoose.Types.ObjectId(String(id))) } } },
+    { $sort: { report_date: -1, createdAt: -1 } },
+    { $group: { _id: '$project_id', report_date: { $first: '$report_date' }, health: { $first: '$health' }, count: { $sum: 1 } } },
+  ]);
+  return Object.fromEntries(rows.map((r) => [String(r._id), r]));
+}
+
+/** Legacy projects (no advanced_tools stored) keep the contract tools if they are construction jobs. */
+const advancedOn = (project) => (project.advanced_tools === undefined || project.advanced_tools === null
+  ? (project.project_type || 'construction') === 'construction'
+  : !!project.advanced_tools);
+
+/**
  * Load a project within the caller's tenant and branch scope, or null.
  * Non-staff callers only reach projects they lead or work on; a project lead is not
  * branch-scoped, since they were named on it explicitly.
@@ -126,6 +181,7 @@ const list = async (req, res) => {
     .populate('manager_id', 'name')
     .sort({ createdAt: -1 })
     .lean();
+  const latest = await latestReports(req.tenant_id, projects.map((p) => p._id));
 
   // Overdue is worth seeing in the list rather than only on the detail page.
   const now = Date.now();
@@ -133,6 +189,7 @@ const list = async (req, res) => {
     success: true,
     data: projects.map((p) => ({
       ...withId(p),
+      report_status: reportStatus(p, latest[String(p._id)]),
       is_overdue: !!p.planned_end_date
         && !['completed', 'cancelled'].includes(p.status)
         && new Date(p.planned_end_date).getTime() < now,
@@ -143,6 +200,9 @@ const list = async (req, res) => {
 const get = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const isLead = await isLeadOf(req, project);
+  await project.populate([{ path: 'manager_id', select: 'name job_title user_id' }, { path: 'team', select: 'name job_title' }]);
+  const latest = (await latestReports(req.tenant_id, [project._id]))[String(project._id)];
 
   const [milestones, tasks, variations, financials] = await Promise.all([
     ProjectMilestone.find({ project_id: project._id, tenant_id: req.tenant_id }).sort({ sequence: 1, createdAt: 1 }).lean(),
@@ -154,7 +214,9 @@ const get = async (req, res) => {
   res.json({
     success: true,
     data: {
-      project,
+      project: { ...project.toJSON(), advanced_tools: advancedOn(project) },
+      viewer: { is_staff: isProjectStaff(req), is_lead: isLead },
+      report_status: reportStatus(project, latest),
       milestones: withIds(milestones),
       tasks: withIds(tasks),
       variations: withIds(variations),
@@ -168,6 +230,7 @@ const create = async (req, res) => {
     name, description, customer_id, contract_value, currency, budget_lines,
     retention_pct, payment_terms_days, defects_liability_days,
     start_date, planned_end_date, manager_id, team, site_address, status, project_type,
+    report_frequency, advanced_tools,
   } = req.body;
   if (!name) return res.status(400).json({ success: false, message: 'A project name is required.' });
 
@@ -197,6 +260,8 @@ const create = async (req, res) => {
     planned_end_date: planned_end_date || null,
     manager_id: manager_id || null,
     team: Array.isArray(team) ? team : [],
+    report_frequency: ['weekly', 'biweekly', 'monthly', 'none'].includes(report_frequency) ? report_frequency : 'weekly',
+    advanced_tools: !!advanced_tools,
     site_address,
     status: status || 'draft',
     created_by: req.user._id,
@@ -215,6 +280,7 @@ const update = async (req, res) => {
     'payment_terms_days', 'defects_liability_days', 'working_hours_per_day',
     'client_sms_enabled', 'client_phone',
     'start_date', 'planned_end_date', 'actual_end_date', 'manager_id', 'team', 'site_address', 'status',
+    'report_frequency', 'advanced_tools',
   ];
   for (const f of fields) if (req.body[f] !== undefined) project[f] = req.body[f];
 
@@ -810,7 +876,16 @@ const listReports = async (req, res) => {
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
   const reports = await ProjectReport.find({ project_id: project._id, tenant_id: req.tenant_id })
     .sort({ report_date: -1, createdAt: -1 }).limit(200).lean();
-  res.json({ success: true, data: withIds(reports), can_report: isProjectStaff(req) || await isLeadOf(req, project) });
+  await project.populate({ path: 'manager_id', select: 'name job_title' });
+  const last = reports[0] && { report_date: reports[0].report_date, health: reports[0].health, count: reports.length };
+  res.json({
+    success: true,
+    data: withIds(reports),
+    can_report: isProjectStaff(req) || await isLeadOf(req, project),
+    can_comment: isProjectStaff(req) || await isLeadOf(req, project),
+    lead: project.manager_id ? { id: String(project.manager_id._id), name: project.manager_id.name, job_title: project.manager_id.job_title } : null,
+    report_status: reportStatus(project, last),
+  });
 };
 
 const createReport = async (req, res) => {
@@ -842,6 +917,7 @@ const createReport = async (req, res) => {
     progress_pct: progress,
     issues: String(req.body.issues || '').trim(),
     next_steps: String(req.body.next_steps || '').trim(),
+    health: ['on_track', 'at_risk', 'off_track'].includes(req.body.health) ? req.body.health : 'on_track',
     author_id: req.user._id,
     author_name: req.user.name,
   });
@@ -881,6 +957,20 @@ const extractReportText = async (req, res) => {
   const MAX = 8000; // the summary field's limit
   const title = req.file.originalname.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
   res.json({ success: true, data: { title, text: text.slice(0, MAX), truncated: text.length > MAX } });
+};
+
+/** A manager (or the lead) replying to a report. */
+const commentOnReport = async (req, res) => {
+  const { project, doc } = await findChild(req, ProjectReport, 'reportId');
+  if (!doc) return notFound(res, project, 'Report');
+  if (!isProjectStaff(req) && !(await isLeadOf(req, project))) {
+    return res.status(403).json({ success: false, message: 'Access denied.' });
+  }
+  const body = String(req.body.body || '').trim();
+  if (!body) return res.status(400).json({ success: false, message: 'Write something first.' });
+  doc.comments.push({ body, author_id: req.user._id, author_name: req.user.name });
+  await doc.save();
+  res.status(201).json({ success: true, data: withId(doc.toObject()) });
 };
 
 const removeReport = async (req, res) => {
@@ -1456,6 +1546,6 @@ module.exports = {
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,
-  listReports, createReport, extractReportText, removeReport,
+  listReports, createReport, extractReportText, commentOnReport, removeReport, leadOrManager,
   listDocuments, uploadDocument, removeDocument,
 };
