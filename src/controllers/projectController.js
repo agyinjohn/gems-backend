@@ -849,6 +849,40 @@ const createReport = async (req, res) => {
   await audit(req, 'PROJECT_REPORT', 'projects', `${req.user.name} submitted a report on ${project.code}: ${title}`, { code: project.code });
 };
 
+/**
+ * Read the text out of an uploaded document so the lead can turn it into a
+ * report. Nothing is stored: the text goes back to the form to be edited and
+ * submitted like any other report.
+ */
+const extractReportText = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  if (!isProjectStaff(req) && !(await isLeadOf(req, project))) {
+    return res.status(403).json({ success: false, message: 'Only the project lead can submit reports.' });
+  }
+  if (!req.file) return res.status(400).json({ success: false, message: 'Choose a file first.' });
+
+  let text = '';
+  try {
+    if (req.file.mimetype === 'application/pdf') {
+      text = (await require('pdf-parse')(req.file.buffer)).text;
+    } else if (req.file.mimetype === 'text/plain') {
+      text = req.file.buffer.toString('utf8');
+    } else {
+      text = (await require('mammoth').extractRawText({ buffer: req.file.buffer })).value;
+    }
+  } catch {
+    return res.status(422).json({ success: false, message: 'Could not read that file. Is it damaged or password protected?' });
+  }
+
+  text = text.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (!text) return res.status(422).json({ success: false, message: 'No text found — a scanned document needs OCR first.' });
+
+  const MAX = 8000; // the summary field's limit
+  const title = req.file.originalname.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+  res.json({ success: true, data: { title, text: text.slice(0, MAX), truncated: text.length > MAX } });
+};
+
 const removeReport = async (req, res) => {
   const { project, doc } = await findChild(req, ProjectReport, 'reportId');
   if (!doc) return notFound(res, project, 'Report');
@@ -1422,6 +1456,6 @@ module.exports = {
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,
-  listReports, createReport, removeReport,
+  listReports, createReport, extractReportText, removeReport,
   listDocuments, uploadDocument, removeDocument,
 };

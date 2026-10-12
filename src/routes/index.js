@@ -13,7 +13,7 @@ const dashboard = require('../controllers/dashboardController');
 const inventory = require('../controllers/inventoryController');
 const hr = require('../controllers/hrController');
 const upload = require('../controllers/uploadController');
-const { imageUpload, hrDocUpload, serviceUpload } = require('../middleware/uploadMiddleware');
+const { imageUpload, hrDocUpload, serviceUpload, reportUpload } = require('../middleware/uploadMiddleware');
 const { StoreBanner } = require('../models');
 const orders = require('../controllers/ordersController');
 const { deductItemStock } = require('../controllers/ordersController');
@@ -987,6 +987,7 @@ router.post('/projects/:id/retention-release', authenticate, requireTenant, requ
 router.get('/projects/:id/invoices/:invoiceId/certificate', authenticate, requireTenant, requireFeature('projects'), projects.certificate);
 
 router.get('/projects/:id/reports',             authenticate, requireTenant, requireFeature('projects'), projects.listReports);
+router.post('/projects/:id/reports/extract',    authenticate, requireTenant, requireFeature('projects'), reportUpload.single('file'), projects.extractReportText);
 router.post('/projects/:id/reports',            authenticate, requireTenant, requireFeature('projects'), projects.createReport);
 router.delete('/projects/:id/reports/:reportId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeReport);
 router.get('/projects/:id/diary',              authenticate, requireTenant, requireFeature('projects'), projects.listDiary);
