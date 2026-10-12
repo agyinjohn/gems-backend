@@ -54,6 +54,7 @@ const storefront = require('../controllers/storefrontController');
 const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
+const tasks = require('../controllers/taskController');
 const emailSettings = require('../controllers/emailController');
 const projects = require('../controllers/projectController');
 const contracts = require('../controllers/contractController');
@@ -1835,6 +1836,16 @@ router.delete('/appraisals/:id', authenticate, requireTenant, requireModule('hr'
   await hrService.deleteAppraisal(req.tenant_id, req.params.id);
   res.json({ success: true });
 });
+
+// TASKS — day-to-day work handed to employees. Any signed-in user can see and
+// tick off their own; who may assign is decided in the controller.
+router.get('/tasks/mine',       authenticate, requireTenant, tasks.listMine);
+router.get('/tasks/assignable', authenticate, requireTenant, tasks.listAssignable);
+router.get('/tasks',            authenticate, requireTenant, tasks.listAssigned);
+router.post('/tasks',           authenticate, requireTenant, tasks.createTasks);
+router.patch('/tasks/:id/status', authenticate, requireTenant, tasks.setStatus);
+router.put('/tasks/:id',        authenticate, requireTenant, tasks.updateTask);
+router.delete('/tasks/:id',     authenticate, requireTenant, tasks.removeTask);
 
 // CRM - CUSTOMERS
 router.get('/customers', authenticate, requireTenant, requireModule('crm'), async (req, res) => {

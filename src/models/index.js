@@ -1857,6 +1857,25 @@ projectDocumentSchema.index({ tenant_id: 1, project_id: 1, category: 1 });
 // contract — the thing people currently keep in WhatsApp, where it is lost the
 // moment somebody changes phone, and cannot be produced when a dispute turns
 // on who approved what.
+// A piece of day-to-day work handed to an employee.
+const workTaskSchema = new Schema({
+  tenant_id:    { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  branch_id:    { type: Schema.Types.ObjectId, ref: 'Branch' },
+  title:        { type: String, required: true, trim: true, maxlength: 200 },
+  description:  { type: String, maxlength: 4000 },
+  assignee_id:  { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
+  assigned_by:  { type: Schema.Types.ObjectId, ref: 'User' },
+  assigned_by_name: String,
+  // The day it is due, held as midnight UTC of that calendar date.
+  due_date:     { type: Date, required: true },
+  priority:     { type: String, enum: ['low', 'normal', 'high'], default: 'normal' },
+  status:       { type: String, enum: ['todo', 'in_progress', 'done'], default: 'todo' },
+  completed_at: Date,
+  completion_note: { type: String, maxlength: 2000 },
+}, { timestamps: true });
+workTaskSchema.index({ tenant_id: 1, assignee_id: 1, due_date: 1 });
+workTaskSchema.index({ tenant_id: 1, status: 1, due_date: 1 });
+
 // A periodic status report written by the project lead (or a manager).
 const projectReportSchema = new Schema({
   tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
@@ -2250,7 +2269,7 @@ const allSchemas = [
   emailTemplateSchema, emailMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
-  projectMessageSchema, projectReportSchema,
+  projectMessageSchema, projectReportSchema, workTaskSchema,
   contractSchema, contractDocumentSchema, contractNoteSchema,
   contractPaymentMilestoneSchema, contractSignatorySchema,
 ];
@@ -2338,6 +2357,7 @@ module.exports = {
   ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
   ProjectMessage:        mongoose.model('ProjectMessage', projectMessageSchema),
   ProjectReport:         mongoose.model('ProjectReport', projectReportSchema),
+  WorkTask:              mongoose.model('WorkTask', workTaskSchema),
   Job:                   mongoose.model('Job', jobSchema),
   Contract:              mongoose.model('Contract', contractSchema),
   ContractDocument:      mongoose.model('ContractDocument', contractDocumentSchema),
