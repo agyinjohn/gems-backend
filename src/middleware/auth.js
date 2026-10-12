@@ -3,6 +3,7 @@ const { User } = require('../models');
 const { resolveTenantForUser } = require('../services/tenantService');
 const { applyBranchScope } = require('./branchScope');
 const auditMiddleware = require('./auditMiddleware');
+const { customRoleAllows } = require('../config/customRolePolicy');
 
 const authenticate = async (req, res, next) => {
   try {
@@ -16,6 +17,14 @@ const authenticate = async (req, res, next) => {
 
     req.user = user;
     req.permissions = user.custom_role_id?.permissions || [];
+
+    // A custom role reaches only the API its pages use. Checked here, once,
+    // rather than on each route, so a new route cannot forget it.
+    if (user.role === 'custom') {
+      const role = user.custom_role_id;
+      const allowed = role?.is_active && customRoleAllows(req.permissions, req.method, (req.originalUrl || '').replace(/^\/api/, ''));
+      if (!allowed) return res.status(403).json({ success: false, message: 'Your role does not include access to this.' });
+    }
 
     if (user.tenant_id) {
       const apiPath = req.originalUrl?.replace(/^\/api/, '') || req.path || '';
