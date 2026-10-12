@@ -174,6 +174,13 @@ const list = async (req, res) => {
     delete filter.branch_id;
     filter.$and = [{ $or: [{ manager_id: empId }, { team: empId }] }];
   }
+  // ?lead=me — just the projects the caller leads (their "reports due" list).
+  const myEmp = await callerEmployeeId(req);
+  if (req.query.lead === 'me') {
+    if (!myEmp) return res.json({ success: true, data: [] });
+    delete filter.branch_id;
+    filter.manager_id = myEmp;
+  }
   if (status) filter.status = status;
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { code: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];
 
@@ -190,6 +197,7 @@ const list = async (req, res) => {
     data: projects.map((p) => ({
       ...withId(p),
       report_status: reportStatus(p, latest[String(p._id)]),
+      is_lead: !!myEmp && String(p.manager_id?._id || p.manager_id || '') === String(myEmp),
       is_overdue: !!p.planned_end_date
         && !['completed', 'cancelled'].includes(p.status)
         && new Date(p.planned_end_date).getTime() < now,
