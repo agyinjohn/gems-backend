@@ -97,19 +97,38 @@ const createUser = async (req, res) => {
 
 const updateUser = async (req, res) => {
   const { name, email, role, custom_role_id, branch_id, is_active } = req.body;
+  const target = await User.findOne({ _id: req.params.id, tenant_id: req.tenant_id });
+  if (!target) return res.status(404).json({ success: false, message: 'User not found.' });
+  const isSelf = String(target._id) === String(req.user._id);
+
   const update = {};
   if (name !== undefined) update.name = name;
   if (email !== undefined) update.email = email.toLowerCase().trim();
   if (role !== undefined) {
+    if (!TENANT_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Invalid role.' });
+    if (role === 'custom') {
+      if (!custom_role_id) return res.status(400).json({ success: false, message: 'Choose which custom role.' });
+      const cr = await Role.findOne({ _id: custom_role_id, tenant_id: req.tenant_id, is_active: true });
+      if (!cr) return res.status(400).json({ success: false, message: 'Invalid or inactive custom role.' });
+    }
+    const changing = role !== target.role || (role === 'custom' && String(custom_role_id) !== String(target.custom_role_id || ''));
+    if (changing && isSelf) return res.status(400).json({ success: false, message: 'You cannot change your own role.' });
+    // Never leave the business without an owner.
+    if (changing && target.role === 'business_owner' && role !== 'business_owner') {
+      const owners = await User.countDocuments({ tenant_id: req.tenant_id, role: 'business_owner', is_active: true });
+      if (owners <= 1) return res.status(400).json({ success: false, message: 'This is the only business owner. Make someone else an owner first.' });
+    }
     update.role = role;
-    update.custom_role_id = role === 'custom' ? (custom_role_id || null) : null;
+    update.custom_role_id = role === 'custom' ? custom_role_id : null;
   }
+  if (is_active === false && isSelf) return res.status(400).json({ success: false, message: 'You cannot deactivate your own account.' });
   if (branch_id !== undefined) update.branch_id = branch_id || null;
   if (is_active !== undefined) update.is_active = is_active;
   const user = await User.findOneAndUpdate({ _id: req.params.id, tenant_id: req.tenant_id }, update, { new: true, select: '-password_hash' })
     .populate('custom_role_id', 'name permissions is_active');
   if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-  await audit(req, 'UPDATE_USER', 'users', `${req.user.name} updated user "${user.name}"`, { user_id: user._id });
+  const roleNote = update.role && update.role !== target.role ? ` (role ${target.role} → ${update.role})` : '';
+  await audit(req, 'UPDATE_USER', 'users', `${req.user.name} updated user "${user.name}"${roleNote}`, { user_id: user._id });
   res.json({ success: true, message: 'User updated.', data: user });
 };
 

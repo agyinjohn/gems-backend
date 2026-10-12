@@ -86,7 +86,11 @@ const getMe = async (req, res) => {
     const branch = await Branch.findById(req.user.branch_id);
     if (branch) branchData = { id: branch._id, name: branch.name, slug: branch.slug };
   }
-  res.json({ success: true, data: { user: req.user, tenant: tenantData, branch: branchData } });
+  // Same shape as login, so the app can refresh a user whose role was changed
+  // without them signing out.
+  const permissions = req.user.role === 'custom' ? (req.user.custom_role_id?.permissions || []) : [];
+  const user = { ...req.user.toObject(), id: req.user._id, permissions };
+  res.json({ success: true, data: { user, tenant: tenantData, branch: branchData } });
 };
 
 const changePassword = async (req, res) => {
