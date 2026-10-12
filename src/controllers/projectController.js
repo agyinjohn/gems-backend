@@ -1,6 +1,6 @@
 const {
   Project, ProjectMilestone, ProjectTask, ProjectVariation, ProjectTimeLog,
-  ProjectDiary, ProjectDocument, ProjectBaseline, ProjectEotClaim, ProjectMessage,
+  ProjectDiary, ProjectDocument, ProjectBaseline, ProjectEotClaim, ProjectMessage, ProjectReport,
   Customer, Employee, Expense, PurchaseOrder, Invoice,
 } = require('../models');
 const { resolveWriteBranchId } = require('../middleware/branchScope');
@@ -19,9 +19,33 @@ const { uploadProjectFile } = require('../services/uploadService');
 
 const scope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) });
 
-/** Load a project within the caller's tenant and branch scope, or null. */
+// Roles that see every project. Anyone else only sees projects they lead or are on the team of.
+const PROJECT_STAFF = ['platform_admin', 'business_owner', 'branch_manager', 'accountant'];
+const isProjectStaff = (req) => PROJECT_STAFF.includes(req.user.role);
+
+/** The employee record behind the signed-in user, if there is one. */
+async function callerEmployeeId(req) {
+  if (req.callerEmployeeId !== undefined) return req.callerEmployeeId;
+  const emp = await Employee.findOne({ tenant_id: req.tenant_id, user_id: req.user._id }).select('_id').lean();
+  req.callerEmployeeId = emp ? emp._id : null;
+  return req.callerEmployeeId;
+}
+
+const isLeadOf = async (req, project) => {
+  const empId = await callerEmployeeId(req);
+  return !!empId && !!project.manager_id && String(project.manager_id._id || project.manager_id) === String(empId);
+};
+
+/**
+ * Load a project within the caller's tenant and branch scope, or null.
+ * Non-staff callers only reach projects they lead or work on; a project lead is not
+ * branch-scoped, since they were named on it explicitly.
+ */
 async function findScoped(req) {
-  return Project.findOne({ _id: req.params.id, ...scope(req) });
+  if (isProjectStaff(req)) return Project.findOne({ _id: req.params.id, ...scope(req) });
+  const empId = await callerEmployeeId(req);
+  if (!empId) return null;
+  return Project.findOne({ _id: req.params.id, tenant_id: req.tenant_id, $or: [{ manager_id: empId }, { team: empId }] });
 }
 
 /**
@@ -89,6 +113,12 @@ const listTypes = async (req, res) => {
 const list = async (req, res) => {
   const { status, search } = req.query;
   const filter = scope(req);
+  if (!isProjectStaff(req)) {
+    const empId = await callerEmployeeId(req);
+    if (!empId) return res.json({ success: true, data: [] });
+    delete filter.branch_id;
+    filter.$and = [{ $or: [{ manager_id: empId }, { team: empId }] }];
+  }
   if (status) filter.status = status;
   if (search) filter.$or = [{ name: new RegExp(search, 'i') }, { code: new RegExp(search, 'i') }, { customer_name: new RegExp(search, 'i') }];
 
@@ -773,6 +803,59 @@ const shareDocument = async (req, res) => {
   res.json({ success: true, data: withId(doc.toObject()) });
 };
 
+/* ── Progress reports (written by the project lead) ───────────────────────── */
+
+const listReports = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  const reports = await ProjectReport.find({ project_id: project._id, tenant_id: req.tenant_id })
+    .sort({ report_date: -1, createdAt: -1 }).limit(200).lean();
+  res.json({ success: true, data: withIds(reports), can_report: isProjectStaff(req) || await isLeadOf(req, project) });
+};
+
+const createReport = async (req, res) => {
+  const project = await findScoped(req);
+  if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+  // findScoped already limits non-staff to projects they lead; staff may file
+  // a report on any project they can see.
+  if (!isProjectStaff(req) && !(await isLeadOf(req, project))) {
+    return res.status(403).json({ success: false, message: 'Only the project lead can submit reports.' });
+  }
+
+  const title = String(req.body.title || '').trim();
+  const summary = String(req.body.summary || '').trim();
+  if (!title || !summary) return res.status(400).json({ success: false, message: 'A title and a summary are required.' });
+  let progress;
+  if (req.body.progress_pct !== undefined && req.body.progress_pct !== '' && req.body.progress_pct !== null) {
+    progress = Number(req.body.progress_pct);
+    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
+      return res.status(400).json({ success: false, message: 'Progress must be between 0 and 100.' });
+    }
+  }
+
+  const report = await ProjectReport.create({
+    tenant_id: req.tenant_id,
+    project_id: project._id,
+    report_date: req.body.report_date || new Date(),
+    title,
+    summary,
+    progress_pct: progress,
+    issues: String(req.body.issues || '').trim(),
+    next_steps: String(req.body.next_steps || '').trim(),
+    author_id: req.user._id,
+    author_name: req.user.name,
+  });
+  res.status(201).json({ success: true, data: withId(report.toObject()) });
+  await audit(req, 'PROJECT_REPORT', 'projects', `${req.user.name} submitted a report on ${project.code}: ${title}`, { code: project.code });
+};
+
+const removeReport = async (req, res) => {
+  const { project, doc } = await findChild(req, ProjectReport, 'reportId');
+  if (!doc) return notFound(res, project, 'Report');
+  await doc.deleteOne();
+  res.json({ success: true });
+};
+
 const listMessages = async (req, res) => {
   const project = await findScoped(req);
   if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
@@ -1339,5 +1422,6 @@ module.exports = {
   setBaseline, listBaselines, schedule, cashflow,
   eotAnalysis, listEot, createEot, updateEot, decideEot, removeEot,
   listDiary, saveDiary, removeDiary,
+  listReports, createReport, removeReport,
   listDocuments, uploadDocument, removeDocument,
 };

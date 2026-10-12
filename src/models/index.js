@@ -1857,6 +1857,21 @@ projectDocumentSchema.index({ tenant_id: 1, project_id: 1, category: 1 });
 // contract — the thing people currently keep in WhatsApp, where it is lost the
 // moment somebody changes phone, and cannot be produced when a dispute turns
 // on who approved what.
+// A periodic status report written by the project lead (or a manager).
+const projectReportSchema = new Schema({
+  tenant_id:   { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
+  project_id:  { type: Schema.Types.ObjectId, ref: 'Project', required: true },
+  report_date: { type: Date, default: Date.now },
+  title:       { type: String, required: true, trim: true, maxlength: 200 },
+  summary:     { type: String, required: true, maxlength: 8000 },
+  progress_pct: { type: Number, min: 0, max: 100 },
+  issues:      { type: String, maxlength: 4000 },
+  next_steps:  { type: String, maxlength: 4000 },
+  author_id:   { type: Schema.Types.ObjectId, ref: 'User' },
+  author_name: String,
+}, { timestamps: true });
+projectReportSchema.index({ tenant_id: 1, project_id: 1, report_date: -1 });
+
 const projectMessageSchema = new Schema({
   tenant_id:  { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   project_id: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
@@ -2235,7 +2250,7 @@ const allSchemas = [
   emailTemplateSchema, emailMessageSchema,
   projectSchema, projectMilestoneSchema, projectTaskSchema, projectVariationSchema, projectTimeLogSchema,
   projectDiarySchema, projectDocumentSchema, projectBaselineSchema, projectEotClaimSchema,
-  projectMessageSchema,
+  projectMessageSchema, projectReportSchema,
   contractSchema, contractDocumentSchema, contractNoteSchema,
   contractPaymentMilestoneSchema, contractSignatorySchema,
 ];
@@ -2322,6 +2337,7 @@ module.exports = {
   ProjectBaseline:       mongoose.model('ProjectBaseline', projectBaselineSchema),
   ProjectEotClaim:       mongoose.model('ProjectEotClaim', projectEotClaimSchema),
   ProjectMessage:        mongoose.model('ProjectMessage', projectMessageSchema),
+  ProjectReport:         mongoose.model('ProjectReport', projectReportSchema),
   Job:                   mongoose.model('Job', jobSchema),
   Contract:              mongoose.model('Contract', contractSchema),
   ContractDocument:      mongoose.model('ContractDocument', contractDocumentSchema),

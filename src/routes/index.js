@@ -129,6 +129,7 @@ router.delete('/branches/:id', authenticate, requireTenant, businessOwnerOnly, b
 router.get('/branches/:id/staff', authenticate, requireTenant, branch.getBranchStaff);
 
 // USERS
+router.get('/users/unlinked-employees', authenticate, requireTenant, businessOwnerOnly, users.listUnlinkedEmployees);
 router.get('/users', authenticate, requireTenant, businessOwnerOnly, users.getUsers);
 router.get('/users/:id', authenticate, requireTenant, businessOwnerOnly, users.getUser);
 router.post('/users', authenticate, requireTenant, businessOwnerOnly, users.createUser);
@@ -985,6 +986,9 @@ router.post('/projects/:id/invoices',        authenticate, requireTenant, requir
 router.post('/projects/:id/retention-release', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.releaseRetention);
 router.get('/projects/:id/invoices/:invoiceId/certificate', authenticate, requireTenant, requireFeature('projects'), projects.certificate);
 
+router.get('/projects/:id/reports',             authenticate, requireTenant, requireFeature('projects'), projects.listReports);
+router.post('/projects/:id/reports',            authenticate, requireTenant, requireFeature('projects'), projects.createReport);
+router.delete('/projects/:id/reports/:reportId', authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeReport);
 router.get('/projects/:id/diary',              authenticate, requireTenant, requireFeature('projects'), projects.listDiary);
 router.post('/projects/:id/diary',             authenticate, requireTenant, requireFeature('projects'), projects.saveDiary);
 router.delete('/projects/:id/diary/:entryId',  authenticate, requireTenant, requireFeature('projects'), projectManagers, projects.removeDiary);
@@ -1841,6 +1845,65 @@ router.post('/customers', authenticate, requireTenant, requireModule('crm'), aut
   if (!name) return res.status(400).json({ success: false, message: 'name required.' });
   const data = await Customer.create({ tenant_id: req.tenant_id, branch_id: await resolveWriteBranchId(req), name, email, phone, company, address, segment: segment || 'general', notes, created_by: req.user._id });
   res.status(201).json({ success: true, data });
+});
+
+const crmWriters = ['business_owner', 'sales_staff'];
+const customerScope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) });
+
+// Bulk import. Rows are validated one by one so a bad row is reported rather
+// than sinking the whole file; phone/email duplicates already on file (or
+// repeated within the file) are skipped.
+router.post('/customers/bulk', authenticate, requireTenant, requireModule('crm'), authorize(...crmWriters), async (req, res) => {
+  const rows = req.body.customers;
+  if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ success: false, message: 'customers must be a non-empty array.' });
+  if (rows.length > 2000) return res.status(400).json({ success: false, message: 'Maximum 2000 customers per import.' });
+
+  const branch_id = await resolveWriteBranchId(req);
+  const existing = await Customer.find({ tenant_id: req.tenant_id }).select('email phone');
+  const seenEmail = new Set(existing.map(c => c.email?.toLowerCase()).filter(Boolean));
+  const seenPhone = new Set(existing.map(c => (c.phone || '').replace(/\s+/g, '')).filter(Boolean));
+  const str = (v) => (v === undefined || v === null ? '' : String(v).trim());
+
+  const docs = [], errors = [];
+  rows.forEach((r, i) => {
+    const row = i + 1;
+    const name = str(r.name), email = str(r.email).toLowerCase(), phone = str(r.phone).replace(/\s+/g, '');
+    if (!name) return errors.push({ row, message: 'Name is required.' });
+    if (email && !/^\S+@\S+\.\S+$/.test(email)) return errors.push({ row, message: `Invalid email "${email}".` });
+    if (email && seenEmail.has(email)) return errors.push({ row, message: `Duplicate email "${email}".` });
+    if (phone && seenPhone.has(phone)) return errors.push({ row, message: `Duplicate phone "${phone}".` });
+    if (email) seenEmail.add(email);
+    if (phone) seenPhone.add(phone);
+    docs.push({ tenant_id: req.tenant_id, branch_id, name, email: email || undefined, phone: phone || undefined, company: str(r.company), address: str(r.address), segment: str(r.segment).toLowerCase() || 'general', notes: str(r.notes), created_by: req.user._id });
+  });
+
+  if (docs.length) await Customer.insertMany(docs);
+  res.status(201).json({ success: true, data: { imported: docs.length, skipped: errors.length, errors } });
+});
+
+router.put('/customers/:id', authenticate, requireTenant, requireModule('crm'), authorize(...crmWriters), async (req, res) => {
+  const update = {};
+  for (const k of ['name', 'email', 'phone', 'company', 'address', 'segment', 'notes']) {
+    if (req.body[k] !== undefined) update[k] = typeof req.body[k] === 'string' ? req.body[k].trim() : req.body[k];
+  }
+  if (update.name !== undefined && !update.name) return res.status(400).json({ success: false, message: 'name required.' });
+  const data = await Customer.findOneAndUpdate({ _id: req.params.id, ...customerScope(req) }, update, { new: true });
+  if (!data) return res.status(404).json({ success: false, message: 'Customer not found.' });
+  res.json({ success: true, data });
+});
+
+// Registered before /:id so "bulk-delete" is not read as an id.
+router.post('/customers/bulk-delete', authenticate, requireTenant, requireModule('crm'), authorize(...crmWriters), async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ success: false, message: 'ids must be a non-empty array.' });
+  const r = await Customer.deleteMany({ _id: { $in: ids }, ...customerScope(req) });
+  res.json({ success: true, data: { deleted: r.deletedCount } });
+});
+
+router.delete('/customers/:id', authenticate, requireTenant, requireModule('crm'), authorize(...crmWriters), async (req, res) => {
+  const data = await Customer.findOneAndDelete({ _id: req.params.id, ...customerScope(req) });
+  if (!data) return res.status(404).json({ success: false, message: 'Customer not found.' });
+  res.json({ success: true });
 });
 
 // CRM - LEADS
