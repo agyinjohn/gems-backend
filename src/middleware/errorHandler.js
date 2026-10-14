@@ -10,6 +10,17 @@ const errorHandler = (err, req, res, next) => {
     return res.status(400).json({ success: false, message });
   }
 
+  // MongoDB unique index — name the field instead of showing the raw driver message.
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue || err.keyPattern || {})[0];
+    const value = err.keyValue && field ? err.keyValue[field] : null;
+    const what = field ? field.replace(/_/g, ' ') : 'value';
+    return res.status(409).json({
+      success: false,
+      message: value ? `That ${what} (${value}) is already in use.` : `That ${what} is already in use.`,
+    });
+  }
+
   // Postgres unique violation
   if (err.code === '23505') {
     return res.status(409).json({ success: false, message: 'A record with this value already exists.' });

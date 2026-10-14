@@ -52,6 +52,37 @@ const createUser = async (req, res) => {
     if (!cr) return res.status(400).json({ success: false, message: 'Invalid or inactive custom role.' });
   }
 
+  // Logins are unique by email across the whole platform, so look before
+  // creating rather than letting the database refuse it.
+  const normEmail = email.toLowerCase().trim();
+  const taken = await User.findOne({ email: normEmail });
+  if (taken) {
+    const sameBusiness = String(taken.tenant_id) === String(req.tenant_id);
+    if (!sameBusiness) {
+      return res.status(409).json({ success: false, message: `${normEmail} is already used by another GEMS account. Use a different email for this user.` });
+    }
+    // The person already signs in here (often the owner, who is also on the
+    // payroll). Connect the employee record to that login instead of making a
+    // second account.
+    if (existingEmployee) {
+      const linkedElsewhere = await Employee.findOne({ tenant_id: req.tenant_id, user_id: taken._id, _id: { $ne: existingEmployee._id } });
+      if (linkedElsewhere) {
+        return res.status(409).json({ success: false, message: `${taken.name} already has a login and it is linked to the employee record "${linkedElsewhere.name}".` });
+      }
+      existingEmployee.user_id = taken._id;
+      await existingEmployee.save();
+      await audit(req, 'LINK_USER', 'users', `${req.user.name} linked employee "${existingEmployee.name}" to the existing login ${normEmail}`, { email: normEmail });
+      const { password_hash, ...userObj } = taken.toObject();
+      return res.status(200).json({
+        success: true,
+        linked: true,
+        message: `${normEmail} already has a login, so ${existingEmployee.name}'s employee record was linked to it. Their role and password were not changed.`,
+        data: userObj,
+      });
+    }
+    return res.status(409).json({ success: false, message: `A user with ${normEmail} already exists in your business.` });
+  }
+
   // Check user limit
   const tenant = req.tenant;
   const count = await User.countDocuments({ tenant_id: req.tenant_id, is_active: true });
