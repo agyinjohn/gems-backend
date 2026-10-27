@@ -55,6 +55,7 @@ const payout = require('../controllers/payoutController');
 const paystackSubaccount = require('../controllers/paystackSubaccountController');
 const sms = require('../controllers/smsController');
 const tasks = require('../controllers/taskController');
+const limits = require('../middleware/rateLimits');
 const emailSettings = require('../controllers/emailController');
 const projects = require('../controllers/projectController');
 const contracts = require('../controllers/contractController');
@@ -84,18 +85,23 @@ const {
 } = require('../models');
 
 // AUTH
-router.post('/auth/login', auth.login);
+router.post('/auth/login', limits.login, auth.login);
+router.post('/auth/2fa/verify', limits.login, auth.verifyTwoFactor);
 router.get('/auth/me', authenticate, auth.getMe);
-router.post('/auth/change-password', authenticate, auth.changePassword);
-router.post('/auth/forgot-password', auth.forgotPassword);
-router.post('/auth/reset-password', auth.resetPassword);
+router.post('/auth/change-password', authenticate, limits.resetPassword, auth.changePassword);
+router.post('/auth/forgot-password', limits.forgotPassword, auth.forgotPassword);
+router.post('/auth/reset-password', limits.resetPassword, auth.resetPassword);
+router.post('/auth/logout-all', authenticate, auth.logoutEverywhere);
+router.post('/auth/2fa/setup', authenticate, auth.setupTwoFactor);
+router.post('/auth/2fa/enable', authenticate, limits.resetPassword, auth.enableTwoFactor);
+router.post('/auth/2fa/disable', authenticate, limits.resetPassword, auth.disableTwoFactor);
 
 // TENANT REGISTRATION (public)
-router.post('/tenants/send-otp', tenant.sendOtp);
-router.post('/tenants/verify-otp', tenant.verifyOtp);
-router.post('/tenants/send-email-otp', tenant.sendEmailOtp);
-router.post('/tenants/verify-email-otp', tenant.verifyEmailOtp);
-router.post('/tenants/register', tenant.registerTenant);
+router.post('/tenants/send-otp', limits.sendCode, tenant.sendOtp);
+router.post('/tenants/verify-otp', limits.verifyCode, tenant.verifyOtp);
+router.post('/tenants/send-email-otp', limits.sendCode, tenant.sendEmailOtp);
+router.post('/tenants/verify-email-otp', limits.verifyCode, tenant.verifyEmailOtp);
+router.post('/tenants/register', limits.register, tenant.registerTenant);
 
 // Product mode info + storefront API docs (public)
 router.get('/product-info', (req, res) => res.json({ success: true, data: getModeMeta() }));
@@ -815,7 +821,10 @@ router.get('/storefront/products', orders.getStorefrontProducts);
 // tenant-scoped settings routes below so ':tenantSlug' cannot swallow it.
 router.get('/storefront/:tenantSlug/products/:productSlug', orders.getStorefrontProduct);
 router.get('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.getMerchantSettings);
-router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storefront.updateMerchantSettings);
+// Changing the shop front — switching it off, its domain, its prices for delivery —
+// is for the people who run the business, not every signed-in member of staff.
+const storeEditors = authorize('business_owner', 'branch_manager', 'page:/store-settings', 'branches.manage');
+router.put('/storefront/settings', authenticate, requireTenant, requireFeature('storefront'), storeEditors, storefront.updateMerchantSettings);
 // The picture behind the shop's headline. Same guard as the settings it is
 // saved into, so anybody who can change the shop front can supply its image.
 router.post(
@@ -823,6 +832,7 @@ router.post(
   authenticate,
   requireTenant,
   requireFeature('storefront'),
+  storeEditors,
   imageUpload.single('image'),
   upload.uploadStorefrontImage,
 );
@@ -832,6 +842,7 @@ router.post(
   authenticate,
   requireTenant,
   requireFeature('storefront'),
+  storeEditors,
   imageUpload.single('image'),
   upload.uploadLogo,
 );
@@ -1088,7 +1099,7 @@ router.post('/service-requests/:tenantSlug', serviceUpload.array('files', 10), s
 // The intake page was /print before it handled anything else, and clients were
 // given that link. Kept pointing at the same handlers so those links still work.
 router.get('/print-requests/:tenantSlug/services', serviceRequests.publicServices);
-router.post('/print-requests/:tenantSlug', serviceUpload.array('files', 10), serviceRequests.submitRequest);
+router.post('/print-requests/:tenantSlug', limits.publicSubmit, serviceUpload.array('files', 10), serviceRequests.submitRequest);
 router.post('/track/:token/quote-response', serviceRequests.respondToQuote);
 router.post('/track/:token/pay',            serviceRequests.startPayment);
 router.post('/track/:token/confirm-payment', serviceRequests.confirmPayment);
@@ -1097,9 +1108,9 @@ router.get('/track/:token/documents',       clientPortal.listDocuments);
 router.post('/track/:token/documents',      hrDocUpload.single('file'), clientPortal.uploadDocument);
 router.get('/track/:token/messages',        clientPortal.listMessages);
 router.post('/track/:token/messages',       clientPortal.postMessage);
-router.post('/storefront/:tenantSlug/customers/register', storeCustomer.register);
-router.post('/storefront/:tenantSlug/customers/login', storeCustomer.login);
-router.post('/storefront/:tenantSlug/customers/google', storeCustomer.googleAuth);
+router.post('/storefront/:tenantSlug/customers/register', limits.register, storeCustomer.register);
+router.post('/storefront/:tenantSlug/customers/login', limits.storeAuth, storeCustomer.login);
+router.post('/storefront/:tenantSlug/customers/google', limits.storeAuth, storeCustomer.googleAuth);
 router.get('/storefront/customer/me', authenticateStoreCustomer, storeCustomer.getMe);
 router.get('/storefront/customer/orders', authenticateStoreCustomer, storeCustomer.getMyOrders);
 // What this customer has said, and what they bought and have not said anything
@@ -1860,7 +1871,8 @@ router.post('/customers', authenticate, requireTenant, requireModule('crm'), aut
   res.status(201).json({ success: true, data });
 });
 
-const crmWriters = ['business_owner', 'sales_staff'];
+// 'crm.manage' lets a custom role with that action through; built-in roles go by name.
+const crmWriters = ['business_owner', 'sales_staff', 'crm.manage'];
 const customerScope = (req) => ({ tenant_id: req.tenant_id, ...(req.branchFilter || {}) });
 
 // Bulk import. Rows are validated one by one so a bad row is reported rather
@@ -1931,7 +1943,7 @@ router.post('/leads', authenticate, requireTenant, requireModule('crm'), authori
   const data = await Lead.create({ tenant_id: req.tenant_id, branch_id: await resolveWriteBranchId(req), customer_id: customer_id || null, title, stage: stage || 'new', value: value || 0, assigned_to: assigned_to || null, notes, next_followup: next_followup || null });
   res.status(201).json({ success: true, data });
 });
-router.patch('/leads/:id', authenticate, requireTenant, requireModule('crm'), async (req, res) => {
+router.patch('/leads/:id', authenticate, requireTenant, requireModule('crm'), authorize(...crmWriters), async (req, res) => {
   const { stage, value, notes, next_followup } = req.body;
   const update = {};
   if (stage !== undefined) update.stage = stage;

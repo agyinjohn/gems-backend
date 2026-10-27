@@ -248,9 +248,29 @@ const userSchema = new Schema({
   custom_role_id:       { type: Schema.Types.ObjectId, ref: 'Role' },
   is_active:            { type: Boolean, default: true },
   token_version:        { type: Number, default: 0 },
-  verification_id:      String,
-  verification_code:    String,
-  verification_expires: Date,
+  // Legacy reset fields, no longer written; kept so old documents still load.
+  verification_id:      { type: String, select: false },
+  verification_code:    { type: String, select: false },
+  verification_expires: { type: Date, select: false },
+
+  // Guessing protection: five wrong passwords lock the account for a while.
+  failed_login_attempts: { type: Number, default: 0 },
+  locked_until:          Date,
+  last_login_at:         Date,
+
+  // Password reset: the code is kept only as a hash, and dies after a few wrong tries.
+  reset_code_hash:  { type: String, select: false },
+  reset_expires:    { type: Date,   select: false },
+  reset_attempts:   { type: Number, default: 0, select: false },
+  reset_sent_at:    { type: Date,   select: false },
+
+  // Two-factor sign-in with an authenticator app. The key is encrypted and the
+  // recovery codes hashed; none of it is returned unless asked for by name.
+  twofa_enabled:        { type: Boolean, default: false },
+  twofa_secret:         { type: String, select: false },
+  twofa_pending_secret: { type: String, select: false },
+  twofa_last_step:      { type: Number, default: 0, select: false },
+  twofa_recovery:       { type: [String], default: [], select: false },
 }, { timestamps: true });
 userSchema.index({ tenant_id: 1, email: 1 });
 

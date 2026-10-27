@@ -11,6 +11,8 @@ const authenticate = async (req, res, next) => {
     if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // A shopper's token or any other kind of pass is not a staff session.
+    if (decoded.type || decoded.purpose) return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
     const user = await User.findById(decoded.id, '-password_hash').populate('custom_role_id', 'name permissions is_active');
     if (!user || !user.is_active) return res.status(401).json({ success: false, message: 'User not found or deactivated.' });
     if ((decoded.tv ?? 0) !== (user.token_version || 0)) return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });

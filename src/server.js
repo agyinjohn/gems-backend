@@ -9,11 +9,17 @@ const morgan = require('morgan');
 const connectDB = require('./config/db');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
+const sanitize = require('./middleware/sanitize');
+const limits = require('./middleware/rateLimits');
 
 const app = express();
-// Trust the hosting proxy (Render/Vercel/etc.) so req.ip reflects the real
-// client address for audit logging, not the proxy's.
-app.set('trust proxy', true);
+// Trust the hosting proxy so req.ip is the real client address (audit log and
+// rate limits both rely on it). TRUST_PROXY is how many proxies sit in front of
+// the app — 1 for a single load balancer, 2 behind a CDN as well. `true` (the
+// default, as before) trusts the whole X-Forwarded-For chain, which works but
+// lets a caller invent an address; set the number to close that.
+const trustProxy = process.env.TRUST_PROXY;
+app.set('trust proxy', trustProxy === undefined || trustProxy === '' ? true : (/^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy === 'true'));
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 
@@ -30,11 +36,9 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
-io.on('connection', (socket) => {
-  socket.on('join_conversation', (conversationId) => socket.join(`conv_${conversationId}`));
-  socket.on('join_admin', () => socket.join('admin_room'));
-  socket.on('leave_conversation', (conversationId) => socket.leave(`conv_${conversationId}`));
-});
+// Live support chat. Nobody gets in without a valid session, and what a
+// socket may listen to is decided here, not by what it asks for.
+require('./sockets/chatSocket')(io);
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 app.use(cors({
@@ -53,12 +57,14 @@ app.use(cors({
   credentials: true,
 }));
 app.use(helmet());
+app.use('/api', limits.api);
 
 // Paystack webhook — raw body required for signature verification
 const { handlePaystackWebhook } = require('./controllers/webhookController');
 app.post('/api/webhooks/paystack', express.raw({ type: 'application/json' }), handlePaystackWebhook);
 
 app.use(express.json({ limit: '10mb' }));
+app.use(sanitize);
 app.use(morgan('dev'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────

@@ -1,10 +1,11 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const { Tenant, Branch, User, OtpVerification } = require('../models');
 const { seedChartOfAccounts } = require('../services/accountingService');
 const { dispatchToProvider, normalisePhone } = require('../services/smsService');
 const { PlatformSettings } = require('../models');
+const { sendPlatformMail, codeEmail } = require('../services/platformMailService');
+const { passwordProblem } = require('../utils/passwordPolicy');
 
 const MAX_ATTEMPTS  = 5;   // wrong guesses before OTP is invalidated
 // Once a code is confirmed, how long the person has to finish signing up.
@@ -16,26 +17,10 @@ const PLAN_LIMITS = {
   pro:        { max_branches: 5,   max_users: 20 },
   enterprise: { max_branches: 999, max_users: 999 },
 };
-/** Same rules as the sign-up form: 8+ characters, an upper-case letter, a number and a symbol. */
-const passwordProblem = (pw) => {
-  if (typeof pw !== 'string' || pw.length < 8) return 'Password must be at least 8 characters.';
-  if (!/[A-Z]/.test(pw)) return 'Password needs an upper-case letter.';
-  if (!/[0-9]/.test(pw)) return 'Password needs a number.';
-  if (!/[^A-Za-z0-9]/.test(pw)) return 'Password needs a symbol.';
-  return null;
-};
 /** Taken as a business email or as anyone's login — logins are unique across the platform. */
 const emailTaken = async (email) => !!(await Tenant.exists({ email })) || !!(await User.exists({ email }));
 const MAX_SENDS     = 3;   // resends allowed per OTP window
 const RESEND_WINDOW = 60 * 60 * 1000; // 1 hour
-
-const platformMailer = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.PLATFORM_GMAIL_USER,
-    pass: (process.env.PLATFORM_GMAIL_APP_PASSWORD || '').replace(/\s/g, ''),
-  },
-});
 
 /** SHA-256 hash of the OTP — never store plain text. */
 function hashOtp(otp) {
@@ -43,28 +28,10 @@ function hashOtp(otp) {
 }
 
 async function sendEmailOtpMail(to, otp) {
-  if (!process.env.PLATFORM_GMAIL_USER || !process.env.PLATFORM_GMAIL_APP_PASSWORD) {
-    console.log(`[EMAIL OTP] Missing Gmail credentials — OTP for ${to}: ${otp}`);
-    return { sent: false, reason: 'Missing Gmail credentials' };
-  }
-  try {
-    await platformMailer.sendMail({
-      from: `"GEMS" <${process.env.PLATFORM_GMAIL_USER}>`,
-      to,
-      subject: 'Your GEMS verification code',
-      text: `Your GEMS email verification code is ${otp}.\n\nIt expires in 10 minutes. Do not share it with anyone.`,
-      html: `<div style="font-family:sans-serif;max-width:480px;margin:auto">
-        <h2 style="color:#0D3B6E">Verify your email</h2>
-        <p>Your GEMS verification code is:</p>
-        <div style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#0D3B6E;padding:16px 0">${otp}</div>
-        <p style="color:#666">It expires in 10 minutes. Do not share it with anyone.</p>
-      </div>`,
-    });
-    return { sent: true };
-  } catch (err) {
-    console.error('[EMAIL OTP ERROR]', err.message);
-    return { sent: false, reason: err.message };
-  }
+  const mail = codeEmail({ heading: 'Verify your email', intro: 'Your GEMS verification code is:', code: otp, minutes: 10 });
+  const result = await sendPlatformMail({ to, subject: 'Your GEMS verification code', ...mail });
+  if (!result.sent && result.reason === 'Missing Gmail credentials') console.log(`[EMAIL OTP] Missing Gmail credentials — OTP for ${to}: ${otp}`);
+  return result;
 }
 
 /**

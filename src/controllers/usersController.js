@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { User, Tenant, Employee, Department, Role } = require('../models');
 const audit = require('../utils/audit');
+const { passwordProblem } = require('../utils/passwordPolicy');
 
 const TENANT_ROLES = ['business_owner', 'branch_manager', 'sales_staff', 'warehouse_staff', 'accountant', 'hr_manager', 'procurement_officer', 'employee', 'custom'];
 
@@ -44,6 +45,8 @@ const createUser = async (req, res) => {
   }
   if (!name || !email || !password || !role) return res.status(400).json({ success: false, message: 'name, email, password, and role are required.' });
   if (!TENANT_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Invalid role.' });
+  const pwProblem = passwordProblem(password);
+  if (pwProblem) return res.status(400).json({ success: false, message: pwProblem });
   if (role === 'custom' && !custom_role_id) return res.status(400).json({ success: false, message: 'custom_role_id is required for custom roles.' });
 
   // Validate custom role belongs to this tenant

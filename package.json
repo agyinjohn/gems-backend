@@ -13,7 +13,8 @@
     "db:migrate-service-requests": "node src/config/migrateServiceRequests.js",
     "db:fix-indexes": "node src/config/indexRepair.js",
     "db:backfill-product-slugs": "node src/config/backfillProductSlugs.js",
-    "db:migrate-branch-stock": "node src/config/migrateBranchStock.js"
+    "db:migrate-branch-stock": "node src/config/migrateBranchStock.js",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +26,7 @@
     "dotenv": "^17.4.2",
     "express": "^4.22.1",
     "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^7.5.0",
     "google-auth-library": "^10.9.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
@@ -38,6 +40,7 @@
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "socket.io-client": "^4.8.3"
   }
 }
