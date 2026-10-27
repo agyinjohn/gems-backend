@@ -1,12 +1,13 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { User, Tenant, Branch, Product } = require('../models');
+const { User, Tenant, Branch, Product, Employee, PlatformSettings, AuditLog } = require('../models');
 const audit = require('../utils/audit');
 const { passwordProblem } = require('../utils/passwordPolicy');
 const { generateSecret, verifyTotp, otpauthUrl } = require('../utils/totp');
 const secretBox = require('../utils/secretBox');
 const { sendPlatformMail, codeEmail } = require('../services/platformMailService');
+const sms = require('../services/smsService');
 
 /**
  * What this business actually sells.
@@ -97,6 +98,8 @@ async function finishLogin(req, res, user) {
   const token = generateToken(user);
   const {
     password_hash, twofa_secret, twofa_pending_secret, twofa_recovery, twofa_last_step,
+    twofa_phone, twofa_pending_method, twofa_pending_phone,
+    twofa_otp_hash, twofa_otp_expires, twofa_otp_attempts, twofa_otp_sent_at,
     reset_code_hash, reset_expires, reset_attempts, reset_sent_at, ...userObj
   } = user.toObject();
   // Include permissions in user object for frontend sidebar rendering
@@ -105,6 +108,87 @@ async function finishLogin(req, res, user) {
   await audit(req, 'LOGIN', 'auth', `${user.name} logged in`, { role: user.role });
   return res.json({ success: true, message: 'Login successful', data: { token, user: { ...userObj, id: user._id, permissions }, tenant: tenantData, branch: branchData } });
 }
+
+/* ── Codes sent by text or email ──────────────────────────────────────────── */
+
+const OTP_MINUTES = 10;
+const OTP_MAX_TRIES = 5;
+const OTP_RESEND_SECONDS = 30;
+const otpHash = (code) => crypto.createHash('sha256').update(String(code).trim()).digest('hex');
+const METHOD_LABEL = { totp: 'authenticator app', sms: 'text message', email: 'email' };
+
+/** "024•••••67" / "jo•••@gmail.com" — enough to recognise, not enough to use. */
+function maskDestination(method, value) {
+  if (!value) return '';
+  if (method === 'email') {
+    const [name, domain] = String(value).split('@');
+    return `${name.slice(0, 2)}${'•'.repeat(Math.max(1, name.length - 2))}@${domain}`;
+  }
+  const v = String(value);
+  return `${v.slice(0, 4)}${'•'.repeat(Math.max(1, v.length - 6))}${v.slice(-2)}`;
+}
+
+/** A phone we can text: +<country><number>, 9 to 15 digits. */
+function cleanPhone(raw) {
+  const phone = sms.normalisePhone(raw);
+  return phone && /^\+\d{9,15}$/.test(phone) ? phone : null;
+}
+
+/**
+ * Make a fresh code, keep its hash on the user and send it by text or email.
+ * Resolves { sent, reason, wait } — wait is set (seconds) when asked again too soon.
+ */
+async function sendOtp(user, method, phone, purpose = 'sign in') {
+  const current = await User.findById(user._id).select('+twofa_otp_sent_at');
+  const since = current?.twofa_otp_sent_at ? Date.now() - new Date(current.twofa_otp_sent_at).getTime() : Infinity;
+  if (since < OTP_RESEND_SECONDS * 1000) return { sent: false, wait: Math.ceil((OTP_RESEND_SECONDS * 1000 - since) / 1000) };
+
+  const code = crypto.randomInt(100000, 1000000).toString();
+  await User.updateOne({ _id: user._id }, {
+    $set: { twofa_otp_hash: otpHash(code), twofa_otp_expires: new Date(Date.now() + OTP_MINUTES * 60000), twofa_otp_attempts: 0, twofa_otp_sent_at: new Date() },
+  });
+
+  let result;
+  if (method === 'email') {
+    const mail = codeEmail({ heading: 'Your GEMS sign-in code', intro: `Use this code to ${purpose}:`, code, minutes: OTP_MINUTES });
+    result = await sendPlatformMail({ to: user.email, subject: `${code} is your GEMS code`, ...mail });
+  } else {
+    const settings = await PlatformSettings.findOne().select('sms_sender_id').lean();
+    result = await sms.dispatchToProvider({
+      to: phone,
+      body: `${code} is your GEMS code to ${purpose}. It expires in ${OTP_MINUTES} minutes. Never share it.`,
+      senderId: settings?.sms_sender_id || 'GEMS',
+    });
+  }
+  if (!result.sent) {
+    console.error(`[2FA] could not send the ${method} code for`, user.email, result.reason);
+    // Only in development, where there may be no gateway: print it.
+    if (process.env.NODE_ENV !== 'production') console.log(`[2FA DEV] ${user.email} -> ${code}`);
+  }
+  return { sent: !!result.sent, reason: result.reason };
+}
+
+/** Check a sent code. Each code works once and dies after a few wrong tries. */
+async function checkOtp(userId, code) {
+  const user = await User.findById(userId).select('+twofa_otp_hash +twofa_otp_expires +twofa_otp_attempts');
+  if (!user?.twofa_otp_hash || !user.twofa_otp_expires || !code) return false;
+  if (new Date(user.twofa_otp_expires) < new Date() || (user.twofa_otp_attempts || 0) >= OTP_MAX_TRIES) {
+    await User.updateOne({ _id: userId }, { $unset: { twofa_otp_hash: '', twofa_otp_expires: '' } });
+    return false;
+  }
+  const given = Buffer.from(otpHash(code));
+  const stored = Buffer.from(user.twofa_otp_hash);
+  if (given.length !== stored.length || !crypto.timingSafeEqual(given, stored)) {
+    await User.updateOne({ _id: userId }, { $inc: { twofa_otp_attempts: 1 } });
+    return false;
+  }
+  await User.updateOne({ _id: userId }, { $unset: { twofa_otp_hash: '', twofa_otp_expires: '' }, $set: { twofa_otp_attempts: 0 } });
+  return true;
+}
+
+const sendFailedMessage = (method) => method === 'sms'
+  ? 'We could not send the text message. Try again shortly, or use a recovery code.'
+  : 'We could not send the email. Try again shortly, or use a recovery code.';
 
 const login = async (req, res) => {
   const { email, password } = req.body;
@@ -128,21 +212,56 @@ const login = async (req, res) => {
   }
 
   // Right password. With two-factor on, that is only the first half.
-  if (user.twofa_enabled) {
-    return res.json({ success: true, two_factor_required: true, message: 'Enter the code from your authenticator app.', data: { challenge_token: makeChallenge(user) } });
-  }
+  if (user.twofa_enabled) return startChallenge(res, user);
   return finishLogin(req, res, user);
 };
 
-/** Second step of sign-in: an authenticator code, or one of the saved recovery codes. */
+/** Answer a correct password on a two-factor account: send the code if it is sent, hand back the pass. */
+async function startChallenge(res, user) {
+  const method = user.twofa_method || 'totp';
+  const data = { challenge_token: makeChallenge(user), method };
+  if (method === 'totp') {
+    return res.json({ success: true, two_factor_required: true, message: 'Enter the code from your authenticator app.', data });
+  }
+  const full = await User.findById(user._id).select('+twofa_phone');
+  const destination = method === 'sms' ? full?.twofa_phone : user.email;
+  data.destination = maskDestination(method, destination);
+  const sent = await sendOtp(user, method, destination);
+  data.resend_in = OTP_RESEND_SECONDS;
+  // A code sent moments ago is still good, so a quick second sign-in just reuses it.
+  if (!sent.sent && !sent.wait) data.send_failed = true;
+  return res.json({
+    success: true, two_factor_required: true, data,
+    message: data.send_failed ? sendFailedMessage(method) : `We sent a code by ${METHOD_LABEL[method]} to ${data.destination}.`,
+  });
+}
+
+const challengeUser = (token) => {
+  try { return jwt.verify(token, challengeKey()).id; } catch { return null; }
+};
+
+/** Send the sign-in code again (text or email methods only). */
+const resendTwoFactor = async (req, res) => {
+  const id = typeof req.body.challenge_token === 'string' && challengeUser(req.body.challenge_token);
+  if (!id) return res.status(401).json({ success: false, message: 'That sign-in has expired. Please sign in again.' });
+  const user = await User.findOne({ _id: id, is_active: true }).select('+twofa_phone');
+  if (!user || !user.twofa_enabled) return res.status(401).json({ success: false, message: 'Please sign in again.' });
+  if (user.twofa_method === 'totp') return res.status(400).json({ success: false, message: 'Your code comes from your authenticator app.' });
+  const destination = user.twofa_method === 'sms' ? user.twofa_phone : user.email;
+  const sent = await sendOtp(user, user.twofa_method, destination);
+  if (sent.wait) return res.status(429).json({ success: false, message: `Please wait ${sent.wait} seconds before asking again.`, data: { resend_in: sent.wait } });
+  if (!sent.sent) return res.status(502).json({ success: false, message: sendFailedMessage(user.twofa_method) });
+  res.json({ success: true, message: `A new code is on its way to ${maskDestination(user.twofa_method, destination)}.`, data: { resend_in: OTP_RESEND_SECONDS } });
+};
+
+/** Second step of sign-in: the code (from the app, a text or an email), or one of the saved recovery codes. */
 const verifyTwoFactor = async (req, res) => {
   const { challenge_token, code, recovery_code } = req.body;
   if (typeof challenge_token !== 'string' || (!code && !recovery_code)) {
     return res.status(400).json({ success: false, message: 'Enter your 6-digit code.' });
   }
-  let id;
-  try { id = jwt.verify(challenge_token, challengeKey()).id; }
-  catch { return res.status(401).json({ success: false, message: 'That sign-in has expired. Please sign in again.' }); }
+  const id = challengeUser(challenge_token);
+  if (!id) return res.status(401).json({ success: false, message: 'That sign-in has expired. Please sign in again.' });
 
   const user = await User.findOne({ _id: id, is_active: true })
     .select('+twofa_secret +twofa_last_step +twofa_recovery')
@@ -158,28 +277,59 @@ const verifyTwoFactor = async (req, res) => {
       // Each recovery code works once.
       await User.updateOne({ _id: user._id }, { $pull: { twofa_recovery: hash } });
     }
-  } else {
+  } else if ((user.twofa_method || 'totp') === 'totp') {
     const step = verifyTotp(secretBox.decrypt(user.twofa_secret), code);
     // A code already used cannot be used again, even inside its 30 seconds.
     if (step !== null && step > (user.twofa_last_step || 0)) {
       ok = true;
       await User.updateOne({ _id: user._id }, { $set: { twofa_last_step: step } });
     }
+  } else {
+    ok = await checkOtp(user._id, code);
   }
   if (!ok) {
     const locked = await recordFailure(req, user, 'two-factor code');
-    return res.status(locked ? 429 : 401).json({ success: false, message: locked ? `Too many failed attempts. This account is locked for ${LOCK_MINUTES} minutes.` : 'That code is not right. Check the time on your phone and try again.' });
+    const hint = user.twofa_method === 'totp' || !user.twofa_method
+      ? 'That code is not right. Check the time on your phone and try again.'
+      : 'That code is not right or has expired. Ask for a new one.';
+    return res.status(locked ? 429 : 401).json({ success: false, message: locked ? `Too many failed attempts. This account is locked for ${LOCK_MINUTES} minutes.` : hint });
   }
   return finishLogin(req, res, user);
 };
 
 /* ── Two-factor setup (signed-in) ─────────────────────────────────────────── */
 
+/**
+ * Start turning on two-factor sign-in with the chosen method.
+ *   totp  → a new key to scan into an authenticator app
+ *   sms   → a code texted to `phone`
+ *   email → a code sent to the account's email
+ * Nothing changes until the code is entered at /2fa/enable.
+ */
 const setupTwoFactor = async (req, res) => {
-  if (req.user.twofa_enabled) return res.status(400).json({ success: false, message: 'Two-factor sign-in is already on.' });
-  const secret = generateSecret();
-  await User.updateOne({ _id: req.user._id }, { $set: { twofa_pending_secret: secretBox.encrypt(secret) } });
-  res.json({ success: true, data: { secret, otpauth_url: otpauthUrl({ secret, account: req.user.email }) } });
+  if (req.user.twofa_enabled) return res.status(400).json({ success: false, message: 'Two-factor sign-in is already on. Turn it off first to change the method.' });
+  const method = req.body?.method || 'totp';
+  if (!METHOD_LABEL[method]) return res.status(400).json({ success: false, message: 'Choose an authenticator app, text message or email.' });
+
+  if (method === 'totp') {
+    const secret = generateSecret();
+    await User.updateOne({ _id: req.user._id }, { $set: { twofa_pending_secret: secretBox.encrypt(secret), twofa_pending_method: 'totp' }, $unset: { twofa_pending_phone: '' } });
+    return res.json({ success: true, data: { method, secret, otpauth_url: otpauthUrl({ secret, account: req.user.email }) } });
+  }
+
+  let phone;
+  if (method === 'sms') {
+    phone = cleanPhone(req.body.phone);
+    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid phone number, for example 024 123 4567.' });
+  }
+  await User.updateOne({ _id: req.user._id }, { $set: { twofa_pending_method: method, ...(phone && { twofa_pending_phone: phone }) }, $unset: { twofa_pending_secret: '', ...(!phone && { twofa_pending_phone: '' }) } });
+  const sent = await sendOtp(req.user, method, phone, 'turn on two-factor sign-in');
+  const destination = maskDestination(method, method === 'sms' ? phone : req.user.email);
+  if (sent.wait) return res.status(429).json({ success: false, message: `Please wait ${sent.wait} seconds before asking for another code.`, data: { resend_in: sent.wait } });
+  if (!sent.sent) {
+    return res.status(502).json({ success: false, message: method === 'sms' ? 'We could not send the text message. Check the number or try again shortly.' : 'We could not send the email. Try again shortly.' });
+  }
+  res.json({ success: true, message: `We sent a code to ${destination}.`, data: { method, destination, resend_in: OTP_RESEND_SECONDS } });
 };
 
 const newRecoveryCodes = () => {
@@ -192,32 +342,98 @@ const newRecoveryCodes = () => {
 };
 
 const enableTwoFactor = async (req, res) => {
-  const user = await User.findById(req.user._id).select('+twofa_pending_secret');
-  if (!user?.twofa_pending_secret) return res.status(400).json({ success: false, message: 'Start the setup first.' });
-  const step = verifyTotp(secretBox.decrypt(user.twofa_pending_secret), req.body.code);
-  if (step === null) return res.status(400).json({ success: false, message: 'That code is not right. Check the time on your phone and try again.' });
+  const user = await User.findById(req.user._id).select('+twofa_pending_secret +twofa_pending_method +twofa_pending_phone');
+  // Setups started before methods existed only left a pending key behind.
+  const method = user?.twofa_pending_method || (user?.twofa_pending_secret ? 'totp' : null);
+  if (!method) return res.status(400).json({ success: false, message: 'Start the setup first.' });
+
+  const set = { twofa_enabled: true, twofa_method: method };
+  if (method === 'totp') {
+    if (!user.twofa_pending_secret) return res.status(400).json({ success: false, message: 'Start the setup first.' });
+    const step = verifyTotp(secretBox.decrypt(user.twofa_pending_secret), req.body.code);
+    if (step === null) return res.status(400).json({ success: false, message: 'That code is not right. Check the time on your phone and try again.' });
+    Object.assign(set, { twofa_secret: user.twofa_pending_secret, twofa_last_step: step });
+  } else {
+    if (!(await checkOtp(user._id, req.body.code))) return res.status(400).json({ success: false, message: 'That code is not right or has expired. Ask for a new one.' });
+    if (method === 'sms') set.twofa_phone = user.twofa_pending_phone;
+  }
 
   const { codes, hashes } = newRecoveryCodes();
-  await User.updateOne({ _id: user._id }, {
-    $set: { twofa_enabled: true, twofa_secret: user.twofa_pending_secret, twofa_last_step: step, twofa_recovery: hashes },
-    $unset: { twofa_pending_secret: '' },
-  });
-  await audit(req, 'TWO_FACTOR_ON', 'auth', `${req.user.name} turned on two-factor sign-in`);
-  res.json({ success: true, message: 'Two-factor sign-in is on.', data: { recovery_codes: codes } });
+  set.twofa_recovery = hashes;
+  const unset = { twofa_pending_secret: '', twofa_pending_method: '', twofa_pending_phone: '' };
+  if (method !== 'totp') unset.twofa_secret = '';
+  if (method !== 'sms') unset.twofa_phone = '';
+  await User.updateOne({ _id: user._id }, { $set: set, $unset: unset });
+  await audit(req, 'TWO_FACTOR_ON', 'auth', `${req.user.name} turned on two-factor sign-in (${METHOD_LABEL[method]})`, { method });
+  res.json({ success: true, message: 'Two-factor sign-in is on.', data: { method, recovery_codes: codes } });
+};
+
+/** Signed in, two-factor by text or email: send a code so the user can prove it is them (e.g. to turn it off). */
+const sendTwoFactorCode = async (req, res) => {
+  const user = await User.findById(req.user._id).select('+twofa_phone');
+  if (!user.twofa_enabled || user.twofa_method === 'totp') return res.status(400).json({ success: false, message: 'Your code comes from your authenticator app.' });
+  const destination = user.twofa_method === 'sms' ? user.twofa_phone : user.email;
+  const sent = await sendOtp(user, user.twofa_method, destination, 'confirm it is you');
+  if (sent.wait) return res.status(429).json({ success: false, message: `Please wait ${sent.wait} seconds before asking again.`, data: { resend_in: sent.wait } });
+  if (!sent.sent) return res.status(502).json({ success: false, message: sendFailedMessage(user.twofa_method) });
+  res.json({ success: true, message: `We sent a code to ${maskDestination(user.twofa_method, destination)}.`, data: { resend_in: OTP_RESEND_SECONDS } });
 };
 
 const disableTwoFactor = async (req, res) => {
-  const { password, code } = req.body;
-  const user = await User.findById(req.user._id).select('+twofa_secret +twofa_last_step');
+  const { password, code, recovery_code } = req.body;
+  const user = await User.findById(req.user._id).select('+twofa_secret +twofa_last_step +twofa_recovery');
   if (!user.twofa_enabled) return res.status(400).json({ success: false, message: 'Two-factor sign-in is not on.' });
   if (typeof password !== 'string' || !(await bcrypt.compare(password, user.password_hash))) {
     return res.status(400).json({ success: false, message: 'Your password is not right.' });
   }
-  const step = verifyTotp(secretBox.decrypt(user.twofa_secret), code);
-  if (step === null) return res.status(400).json({ success: false, message: 'That code is not right.' });
-  await User.updateOne({ _id: user._id }, { $set: { twofa_enabled: false, twofa_recovery: [] }, $unset: { twofa_secret: '', twofa_pending_secret: '' } });
+  let ok = false;
+  if (recovery_code) {
+    const hash = crypto.createHash('sha256').update(String(recovery_code).toUpperCase().replace(/[^A-Z0-9]/g, '')).digest('hex');
+    ok = (user.twofa_recovery || []).includes(hash);
+  } else if ((user.twofa_method || 'totp') === 'totp') {
+    ok = verifyTotp(secretBox.decrypt(user.twofa_secret), code) !== null;
+  } else {
+    ok = await checkOtp(user._id, code);
+  }
+  if (!ok) return res.status(400).json({ success: false, message: 'That code is not right.' });
+  await User.updateOne({ _id: user._id }, {
+    $set: { twofa_enabled: false, twofa_recovery: [], twofa_method: 'totp' },
+    $unset: { twofa_secret: '', twofa_pending_secret: '', twofa_phone: '', twofa_pending_method: '', twofa_pending_phone: '', twofa_otp_hash: '', twofa_otp_expires: '' },
+  });
   await audit(req, 'TWO_FACTOR_OFF', 'auth', `${req.user.name} turned off two-factor sign-in`);
   res.json({ success: true, message: 'Two-factor sign-in is off.' });
+};
+
+/** What the security page shows: the method in use, where codes go, and a phone to suggest. */
+const twoFactorStatus = async (req, res) => {
+  const user = await User.findById(req.user._id).select('+twofa_phone +twofa_recovery');
+  let suggestedPhone = null;
+  if (!user.twofa_enabled && req.user.tenant_id) {
+    const employee = await Employee.findOne({ tenant_id: req.user.tenant_id, user_id: req.user._id }).select('phone').lean();
+    suggestedPhone = employee?.phone || null;
+    if (!suggestedPhone && req.user.role === 'business_owner') {
+      const tenant = await Tenant.findById(req.user.tenant_id).select('phone').lean();
+      suggestedPhone = tenant?.phone || null;
+    }
+  }
+  res.json({ success: true, data: {
+    enabled: !!user.twofa_enabled,
+    method: user.twofa_enabled ? (user.twofa_method || 'totp') : null,
+    destination: user.twofa_enabled && user.twofa_method !== 'totp'
+      ? maskDestination(user.twofa_method, user.twofa_method === 'sms' ? user.twofa_phone : user.email) : null,
+    recovery_left: user.twofa_enabled ? (user.twofa_recovery || []).length : 0,
+    email: user.email,
+    suggested_phone: suggestedPhone,
+    last_login_at: user.last_login_at || null,
+  } });
+};
+
+/** The signed-in user's own recent sign-ins and security changes. */
+const myActivity = async (req, res) => {
+  const rows = await AuditLog.find({ user_id: req.user._id, module: 'auth' })
+    .sort({ createdAt: -1 }).limit(15)
+    .select('action description device ip status createdAt').lean();
+  res.json({ success: true, data: rows });
 };
 
 /** Sign out everywhere: every token issued so far stops working. */
@@ -332,6 +548,7 @@ const resetPassword = async (req, res) => {
 };
 
 module.exports = {
-  login, verifyTwoFactor, getMe, changePassword, forgotPassword, resetPassword,
-  setupTwoFactor, enableTwoFactor, disableTwoFactor, logoutEverywhere,
+  login, verifyTwoFactor, resendTwoFactor, getMe, changePassword, forgotPassword, resetPassword,
+  setupTwoFactor, enableTwoFactor, disableTwoFactor, sendTwoFactorCode, twoFactorStatus,
+  myActivity, logoutEverywhere,
 };

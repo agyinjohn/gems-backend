@@ -43,6 +43,11 @@ module.exports = {
   // A code sent by SMS or email costs a credit and reaches a stranger's phone.
   sendCode: make({ windowMs: HOUR, max: 10, key: ip,
     message: 'Too many verification codes requested. Please try again in an hour.' }),
+  // Two-factor codes by text or email, per account (signed in, or mid sign-in),
+  // so a busy office behind one address is not throttled as one person.
+  twoFactorCode: make({ windowMs: HOUR, max: 10,
+    key: (req) => `${ip(req)}|${req.user?._id || String(req.body?.challenge_token || '').slice(-24)}`,
+    message: 'Too many codes requested. Please try again in an hour, or use a recovery code.' }),
   verifyCode: make({ windowMs: 15 * MIN, max: 20, key: byEmail,
     message: 'Too many attempts. Please wait a few minutes and request a new code.' }),
 

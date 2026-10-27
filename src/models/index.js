@@ -264,13 +264,23 @@ const userSchema = new Schema({
   reset_attempts:   { type: Number, default: 0, select: false },
   reset_sent_at:    { type: Date,   select: false },
 
-  // Two-factor sign-in with an authenticator app. The key is encrypted and the
-  // recovery codes hashed; none of it is returned unless asked for by name.
+  // Two-factor sign-in: an authenticator app, a text message or an email code.
+  // The app key is encrypted, the codes hashed; none of it is returned unless
+  // asked for by name.
   twofa_enabled:        { type: Boolean, default: false },
+  twofa_method:         { type: String, enum: ['totp', 'sms', 'email'], default: 'totp' },
+  twofa_phone:          { type: String, select: false },
   twofa_secret:         { type: String, select: false },
   twofa_pending_secret: { type: String, select: false },
+  twofa_pending_method: { type: String, select: false },
+  twofa_pending_phone:  { type: String, select: false },
   twofa_last_step:      { type: Number, default: 0, select: false },
   twofa_recovery:       { type: [String], default: [], select: false },
+  // The one-time code sent by text or email, kept only as a hash.
+  twofa_otp_hash:       { type: String, select: false },
+  twofa_otp_expires:    { type: Date,   select: false },
+  twofa_otp_attempts:   { type: Number, default: 0, select: false },
+  twofa_otp_sent_at:    { type: Date,   select: false },
 }, { timestamps: true });
 userSchema.index({ tenant_id: 1, email: 1 });
 

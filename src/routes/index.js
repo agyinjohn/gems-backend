@@ -87,12 +87,16 @@ const {
 // AUTH
 router.post('/auth/login', limits.login, auth.login);
 router.post('/auth/2fa/verify', limits.login, auth.verifyTwoFactor);
+router.post('/auth/2fa/resend', limits.twoFactorCode, auth.resendTwoFactor);
 router.get('/auth/me', authenticate, auth.getMe);
 router.post('/auth/change-password', authenticate, limits.resetPassword, auth.changePassword);
 router.post('/auth/forgot-password', limits.forgotPassword, auth.forgotPassword);
 router.post('/auth/reset-password', limits.resetPassword, auth.resetPassword);
 router.post('/auth/logout-all', authenticate, auth.logoutEverywhere);
-router.post('/auth/2fa/setup', authenticate, auth.setupTwoFactor);
+router.get('/auth/2fa/status', authenticate, auth.twoFactorStatus);
+router.get('/auth/activity', authenticate, auth.myActivity);
+router.post('/auth/2fa/setup', authenticate, limits.twoFactorCode, auth.setupTwoFactor);
+router.post('/auth/2fa/send-code', authenticate, limits.twoFactorCode, auth.sendTwoFactorCode);
 router.post('/auth/2fa/enable', authenticate, limits.resetPassword, auth.enableTwoFactor);
 router.post('/auth/2fa/disable', authenticate, limits.resetPassword, auth.disableTwoFactor);
 

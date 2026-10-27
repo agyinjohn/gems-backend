@@ -34,11 +34,16 @@ function coll(name) {
     findOneAndUpdate: (q, u, o) => new Query(() => { const d = rows.find(r => matches(r, q)); if (d) apply(d, u); return wrap(d) || null; }),
   };
 }
-const models = { User: coll('u'), Tenant: coll('t'), Branch: coll('b'), Product: coll('p'), AuditLog: coll('a'), ChatConversation: coll('c') };
+const models = { User: coll('u'), Tenant: coll('t'), Branch: coll('b'), Product: coll('p'), AuditLog: coll('a'), ChatConversation: coll('c'), Employee: coll('e'), PlatformSettings: coll('ps') };
 require.cache[path.join(SRC, 'models/index.js')] = { loaded: true, exports: models };
 const mail = []; require.cache[path.join(SRC, 'services/platformMailService.js')] = { loaded: true, exports: {
   sendPlatformMail: async (m) => { mail.push(m); return { sent: true }; },
   codeEmail: ({ code }) => ({ text: `code ${code}`, html: `code ${code}` }),
+} };
+const texts = []; let smsUp = true;
+require.cache[path.join(SRC, 'services/smsService.js')] = { loaded: true, exports: {
+  normalisePhone: (raw) => { const d = String(raw || '').replace(/[^\d+]/g, ''); if (!d) return null; if (d.startsWith('+')) return d; if (d.startsWith('0')) return `+233${d.slice(1)}`; return `+${d}`; },
+  dispatchToProvider: async (m) => { if (!smsUp) return { sent: false, reason: 'down' }; texts.push(m); return { sent: true }; },
 } };
 
 const auth = require(path.join(SRC, 'controllers/authController.js'));
@@ -58,6 +63,10 @@ r.post('/auth/forgot-password', limits.forgotPassword, auth.forgotPassword);
 r.post('/auth/reset-password', limits.resetPassword, auth.resetPassword);
 r.post('/auth/2fa/setup', authenticate, auth.setupTwoFactor);
 r.post('/auth/2fa/enable', authenticate, auth.enableTwoFactor);
+r.post('/auth/2fa/resend', auth.resendTwoFactor);
+r.post('/auth/2fa/send-code', authenticate, auth.sendTwoFactorCode);
+r.post('/auth/2fa/disable', authenticate, auth.disableTwoFactor);
+r.get('/auth/2fa/status', authenticate, auth.twoFactorStatus);
 r.post('/auth/logout-all', authenticate, auth.logoutEverywhere);
 r.get('/whoami', authenticate, (req, res) => res.json({ ok: true, id: String(req.user._id) }));
 r.get('/echo', (req, res) => res.json({ query: req.query }));
@@ -176,6 +185,94 @@ const ok = (name, cond, extra = '') => { cond ? pass++ : fail++; console.log(con
   ok('challenge must be signed with the challenge key', x.s === 401);
   for (let i = 0; i < 5; i++) last = await call('POST', '/auth/2fa/verify', { challenge_token: challenge, code: '99999' + i }, null, '10.3.1.' + i);
   ok('repeated wrong 2FA codes lock the account', last.s === 429 || owner.locked_until, last.j.message);
+
+
+  // ── 5b. two-factor by text message ────────────────────────────────────────
+  const smsUser = await mkUser('sms@biz.com', 'Str0ng!pass');
+  models.Employee.rows.push({ _id: 'E1', tenant_id: 'T1', user_id: smsUser._id, phone: '0244111222' });
+  let ss = (await call('POST', '/auth/login', { email: 'sms@biz.com', password: 'Str0ng!pass' }, null, '10.6.0.1')).j.data.token;
+  x = await call('GET', '/auth/2fa/status', null, ss);
+  ok('status suggests the phone on the staff record', x.j.data.enabled === false && x.j.data.suggested_phone === '0244111222', JSON.stringify(x.j.data));
+  x = await call('POST', '/auth/2fa/setup', { method: 'sms', phone: '12' }, ss);
+  ok('a bad phone number is refused', x.s === 400);
+  x = await call('POST', '/auth/2fa/setup', { method: 'carrier-pigeon' }, ss);
+  ok('an unknown method is refused', x.s === 400);
+  x = await call('POST', '/auth/2fa/setup', { method: 'sms', phone: '024 411 1222' }, ss);
+  ok('sms setup texts a code to the number', x.s === 200 && texts.at(-1)?.to === '+233244111222' && /\d{6}/.test(texts.at(-1).body), JSON.stringify(x.j));
+  ok('the number is shown masked', x.j.data.destination && !x.j.data.destination.includes('244111222'), x.j.data.destination);
+  let smsCode = texts.at(-1).body.match(/(\d{6})/)[1];
+  ok('the texted code is stored hashed', smsUser.twofa_otp_hash && !JSON.stringify(smsUser).includes(smsCode));
+  x = await call('POST', '/auth/2fa/setup', { method: 'sms', phone: '0244111222' }, ss);
+  ok('asking again within 30 seconds is refused', x.s === 429, x.j.message);
+  x = await call('POST', '/auth/2fa/enable', { code: '000000' }, ss);
+  ok('wrong texted code refused at enable', x.s === 400);
+  x = await call('POST', '/auth/2fa/enable', { code: smsCode }, ss);
+  ok('right texted code turns sms two-factor on', x.s === 200 && x.j.data.method === 'sms' && x.j.data.recovery_codes.length === 10, x.j.message);
+  ok('the phone is stored for sign-in', smsUser.twofa_method === 'sms' && smsUser.twofa_phone === '+233244111222');
+  x = await call('POST', '/auth/2fa/enable', { code: smsCode }, ss);
+  ok('the setup code cannot be reused', x.s === 400);
+
+  smsUser.twofa_otp_sent_at = new Date(Date.now() - 60000);
+  login = await call('POST', '/auth/login', { email: 'sms@biz.com', password: 'Str0ng!pass' }, null, '10.6.0.2');
+  ok('sms login stops at the second factor and texts a code', login.j.two_factor_required && login.j.data.method === 'sms' && !login.j.data.token && /\d{6}/.test(texts.at(-1).body), JSON.stringify(login.j));
+  ok('login says where the code went, masked', /•/.test(login.j.data.destination) && !JSON.stringify(login.j).includes('244111222'));
+  smsCode = texts.at(-1).body.match(/(\d{6})/)[1];
+  const smsChallenge = login.j.data.challenge_token;
+  x = await call('POST', '/auth/2fa/resend', { challenge_token: smsChallenge }, null, '10.6.0.3');
+  ok('resend straight away is refused', x.s === 429);
+  smsUser.twofa_otp_sent_at = new Date(Date.now() - 60000);
+  x = await call('POST', '/auth/2fa/resend', { challenge_token: smsChallenge }, null, '10.6.0.3');
+  const resent = texts.at(-1).body.match(/(\d{6})/)[1];
+  ok('resend after the wait sends a new code', x.s === 200);
+  x = await call('POST', '/auth/2fa/verify', { challenge_token: smsChallenge, code: resent === smsCode ? '000001' : smsCode }, null, '10.6.0.4');
+  ok('the replaced code no longer works', x.s === 401);
+  x = await call('POST', '/auth/2fa/verify', { challenge_token: smsChallenge, code: resent }, null, '10.6.0.5');
+  ok('the texted code signs in', x.s === 200 && x.j.data?.token, x.j.message);
+  ok('sms sign-in payload has no secrets', !JSON.stringify(x.j).match(/twofa_phone|twofa_otp|twofa_recovery/));
+  x = await call('POST', '/auth/2fa/verify', { challenge_token: smsChallenge, code: resent }, null, '10.6.0.6');
+  ok('a texted code works once', x.s === 401);
+  x = await call('GET', '/auth/2fa/status', null, ss);
+  ok('status shows the method and masked phone', x.j.data.enabled && x.j.data.method === 'sms' && /•/.test(x.j.data.destination), JSON.stringify(x.j.data));
+
+  // gateway down at sign-in: still a challenge, flagged, so a recovery code can be used
+  smsUp = false; smsUser.twofa_otp_sent_at = new Date(Date.now() - 60000);
+  login = await call('POST', '/auth/login', { email: 'sms@biz.com', password: 'Str0ng!pass' }, null, '10.6.0.8');
+  ok('a failed text is reported, not hidden', login.j.two_factor_required && login.j.data.send_failed === true, JSON.stringify(login.j.data));
+  smsUp = true;
+
+  // five wrong guesses burn a texted code
+  smsUser.twofa_otp_sent_at = new Date(Date.now() - 60000); smsUser.failed_login_attempts = 0;
+  login = await call('POST', '/auth/login', { email: 'sms@biz.com', password: 'Str0ng!pass' }, null, '10.6.1.0');
+  const burnt = texts.at(-1).body.match(/(\d{6})/)[1];
+  for (let i = 0; i < 5; i++) { smsUser.failed_login_attempts = 0; await call('POST', '/auth/2fa/verify', { challenge_token: login.j.data.challenge_token, code: '12345' + i }, null, '10.6.1.' + (i + 1)); }
+  smsUser.locked_until = undefined;
+  x = await call('POST', '/auth/2fa/verify', { challenge_token: login.j.data.challenge_token, code: burnt }, null, '10.6.1.9');
+  ok('five wrong guesses burn the texted code', x.s === 401, x.j.message);
+
+  // turning it off needs the password and a fresh code
+  smsUser.twofa_otp_sent_at = new Date(Date.now() - 60000);
+  x = await call('POST', '/auth/2fa/send-code', null, ss);
+  const offCode = texts.at(-1).body.match(/(\d{6})/)[1];
+  ok('send-code texts a code to the signed-in user', x.s === 200);
+  x = await call('POST', '/auth/2fa/disable', { password: 'wrong', code: offCode }, ss);
+  ok('disable needs the password', x.s === 400);
+  x = await call('POST', '/auth/2fa/disable', { password: 'Str0ng!pass', code: offCode }, ss);
+  ok('disable with password + texted code', x.s === 200 && smsUser.twofa_enabled === false && !smsUser.twofa_phone, x.j.message);
+
+  // ── 5c. two-factor by email ───────────────────────────────────────────────
+  const mailUser = await mkUser('mailer@biz.com', 'Str0ng!pass');
+  const ms = (await call('POST', '/auth/login', { email: 'mailer@biz.com', password: 'Str0ng!pass' }, null, '10.7.0.1')).j.data.token;
+  x = await call('POST', '/auth/2fa/setup', { method: 'email' }, ms);
+  ok('email setup mails a code to the account email', x.s === 200 && mail.at(-1).to === 'mailer@biz.com' && /•/.test(x.j.data.destination), JSON.stringify(x.j));
+  x = await call('POST', '/auth/2fa/enable', { code: mail.at(-1).text.match(/(\d{6})/)[1] }, ms);
+  ok('email two-factor turns on', x.s === 200 && mailUser.twofa_method === 'email');
+  mailUser.twofa_otp_sent_at = new Date(Date.now() - 60000);
+  login = await call('POST', '/auth/login', { email: 'mailer@biz.com', password: 'Str0ng!pass' }, null, '10.7.0.2');
+  ok('email login mails a code', login.j.two_factor_required && login.j.data.method === 'email' && mail.at(-1).to === 'mailer@biz.com');
+  x = await call('POST', '/auth/2fa/verify', { challenge_token: login.j.data.challenge_token, code: mail.at(-1).text.match(/(\d{6})/)[1] }, null, '10.7.0.3');
+  ok('the emailed code signs in', x.s === 200 && x.j.data?.token, x.j.message);
+  x = await call('POST', '/auth/2fa/setup', { method: 'totp' }, ms);
+  ok('switching method needs two-factor off first', x.s === 400);
 
   // ── 6. sign out everywhere ────────────────────────────────────────────────
   const u3 = await mkUser('multi@biz.com', 'Str0ng!pass');
